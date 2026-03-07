@@ -195,7 +195,7 @@ import {
 } from "~/projectScripts";
 import { Toggle } from "./ui/toggle";
 import { SidebarTrigger } from "./ui/sidebar";
-import { newCommandId, newMessageId, newThreadId } from "~/lib/utils";
+import { newCommandId, newMessageId, newThreadId, randomUuid } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
 import {
   getAppModelOptions,
@@ -221,6 +221,34 @@ import { estimateTimelineMessageHeight } from "./timelineHeight";
 function formatMessageMeta(createdAt: string, duration: string | null): string {
   if (!duration) return formatTimestamp(createdAt);
   return `${formatTimestamp(createdAt)} • ${duration}`;
+}
+
+function truncateThreadContextPreview(text: string, maxLength = 160): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function describeThreadContextMessage(message: ChatMessage): string {
+  const textPreview = truncateThreadContextPreview(message.text);
+  if (textPreview.length > 0) {
+    return textPreview;
+  }
+
+  const attachmentCount = message.attachments?.length ?? 0;
+  if (attachmentCount > 0) {
+    return attachmentCount === 1 ? "1 attachment" : `${attachmentCount} attachments`;
+  }
+
+  return message.role === "assistant" ? "Assistant message" : "Message";
+}
+
+function resolveThreadContextMessage(
+  messages: ReadonlyArray<ChatMessage>,
+): ChatMessage | null {
+  return messages.find((message) => message.role === "user") ?? messages[0] ?? null;
 }
 
 const LAST_EDITOR_KEY = "t3code:last-editor";
@@ -420,7 +448,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 function buildTemporaryWorktreeBranchName(): string {
   // Keep the 8-hex suffix shape for backend temporary-branch detection.
-  const token = crypto.randomUUID().slice(0, 8).toLowerCase();
+  const token = randomUuid().slice(0, 8).toLowerCase();
   return `${WORKTREE_BRANCH_PREFIX}/${token}`;
 }
 
@@ -1046,6 +1074,23 @@ export default function ChatView({ threadId }: ChatViewProps) {
     }
     return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
   }, [serverMessages, attachmentPreviewHandoffByMessageId, optimisticUserMessages]);
+  const threadContextMessage = useMemo(
+    () => resolveThreadContextMessage(timelineMessages),
+    [timelineMessages],
+  );
+  const [threadContextJumpRequestKey, setThreadContextJumpRequestKey] = useState(0);
+  const onJumpToThreadContext = useCallback(() => {
+    if (!threadContextMessage) {
+      return;
+    }
+    const scrollContainer = messagesScrollRef.current;
+    if (scrollContainer) {
+      scrollContainer.scrollTo({ top: 0, behavior: "smooth" });
+      lastKnownScrollTopRef.current = 0;
+      shouldAutoScrollRef.current = false;
+    }
+    setThreadContextJumpRequestKey((value) => value + 1);
+  }, [threadContextMessage]);
   const timelineEntries = useMemo(
     () =>
       deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
@@ -1343,13 +1388,13 @@ export default function ChatView({ threadId }: ChatViewProps) {
   }, [activeThreadId, setTerminalOpen, terminalState.terminalOpen]);
   const splitTerminal = useCallback(() => {
     if (!activeThreadId || hasReachedTerminalLimit) return;
-    const terminalId = `terminal-${crypto.randomUUID()}`;
+    const terminalId = `terminal-${randomUuid()}`;
     storeSplitTerminal(activeThreadId, terminalId);
     setTerminalFocusRequestId((value) => value + 1);
   }, [activeThreadId, storeSplitTerminal, hasReachedTerminalLimit]);
   const createNewTerminal = useCallback(() => {
     if (!activeThreadId || hasReachedTerminalLimit) return;
-    const terminalId = `terminal-${crypto.randomUUID()}`;
+    const terminalId = `terminal-${randomUuid()}`;
     storeNewTerminal(activeThreadId, terminalId);
     setTerminalFocusRequestId((value) => value + 1);
   }, [activeThreadId, storeNewTerminal, hasReachedTerminalLimit]);
@@ -1418,7 +1463,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       const shouldCreateNewTerminal =
         wantsNewTerminal && terminalState.terminalIds.length < MAX_THREAD_TERMINAL_COUNT;
       const targetTerminalId = shouldCreateNewTerminal
-        ? `terminal-${crypto.randomUUID()}`
+        ? `terminal-${randomUuid()}`
         : baseTerminalId;
 
       setTerminalOpen(true);
@@ -2212,7 +2257,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       const previewUrl = URL.createObjectURL(file);
       nextImages.push({
         type: "image",
-        id: crypto.randomUUID(),
+        id: randomUuid(),
         name: file.name || "image",
         mimeType: file.type,
         sizeBytes: file.size,
@@ -3345,6 +3390,10 @@ export default function ChatView({ threadId }: ChatViewProps) {
       {/* Error banner */}
       <ProviderHealthBanner status={activeProviderStatus} />
       <ThreadErrorBanner error={activeThread.error} />
+      <ThreadContextPanel
+        contextMessage={threadContextMessage}
+        onJumpToMessage={onJumpToThreadContext}
+      />
       <PlanModePanel activePlan={activePlan} />
 
       {/* Messages */}
@@ -3370,6 +3419,8 @@ export default function ChatView({ threadId }: ChatViewProps) {
           activeTurnStartedAt={activeLatestTurn?.startedAt ?? null}
           scrollContainer={messagesScrollElement}
           timelineEntries={timelineEntries}
+          jumpToMessageId={threadContextMessage?.id ?? null}
+          jumpToMessageRequestKey={threadContextJumpRequestKey}
           completionDividerBeforeEntryId={completionDividerBeforeEntryId}
           completionSummary={completionSummary}
           turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
@@ -4123,6 +4174,43 @@ interface PlanModePanelProps {
   activePlan: ReturnType<typeof deriveActivePlanState>;
 }
 
+const ThreadContextPanel = memo(function ThreadContextPanel(props: {
+  contextMessage: ChatMessage | null;
+  onJumpToMessage: () => void;
+}) {
+  const { contextMessage, onJumpToMessage } = props;
+  if (!contextMessage) {
+    return null;
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl pt-3">
+      <button
+        type="button"
+        data-thread-context-jump="true"
+        data-thread-context-message-id={contextMessage.id}
+        className="group w-full rounded-xl border border-border/70 bg-card/70 px-4 py-3 text-left transition-colors duration-150 hover:border-border hover:bg-card"
+        onClick={onJumpToMessage}
+      >
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">Context</Badge>
+          <span className="text-xs text-muted-foreground">
+            Started {formatTimestamp(contextMessage.createdAt)}
+          </span>
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-3">
+          <p className="min-w-0 flex-1 truncate text-sm text-foreground/90">
+            {describeThreadContextMessage(contextMessage)}
+          </p>
+          <span className="shrink-0 text-[11px] uppercase tracking-[0.12em] text-muted-foreground/70 transition-colors duration-150 group-hover:text-foreground/80">
+            Jump
+          </span>
+        </div>
+      </button>
+    </div>
+  );
+});
+
 const PlanModePanel = memo(function PlanModePanel({ activePlan }: PlanModePanelProps) {
   if (!activePlan) return null;
 
@@ -4611,6 +4699,8 @@ interface MessagesTimelineProps {
   activeTurnStartedAt: string | null;
   scrollContainer: HTMLDivElement | null;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
+  jumpToMessageId: MessageId | null;
+  jumpToMessageRequestKey: number;
   completionDividerBeforeEntryId: string | null;
   completionSummary: string | null;
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
@@ -4665,6 +4755,8 @@ const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnStartedAt,
   scrollContainer,
   timelineEntries,
+  jumpToMessageId,
+  jumpToMessageRequestKey,
   completionDividerBeforeEntryId,
   completionSummary,
   turnDiffSummaryByAssistantMessageId,
@@ -4767,6 +4859,37 @@ const MessagesTimeline = memo(function MessagesTimeline({
 
     return nextRows;
   }, [timelineEntries, completionDividerBeforeEntryId, isWorking, activeTurnStartedAt]);
+  const messageRowIndexById = useMemo(() => {
+    const nextMap = new Map<MessageId, number>();
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      if (!row || row.kind !== "message") {
+        continue;
+      }
+      nextMap.set(row.message.id, index);
+    }
+    return nextMap;
+  }, [rows]);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | null>(null);
+  const highlightedMessageTimeoutRef = useRef<number | null>(null);
+
+  const findMessageElement = useCallback(
+    (messageId: MessageId): HTMLElement | null =>
+      Array.from(timelineRootRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []).find(
+        (element) => element.dataset.messageId === messageId,
+      ) ?? null,
+    [],
+  );
+  const highlightMessage = useCallback((messageId: MessageId) => {
+    if (highlightedMessageTimeoutRef.current !== null) {
+      window.clearTimeout(highlightedMessageTimeoutRef.current);
+    }
+    setHighlightedMessageId(messageId);
+    highlightedMessageTimeoutRef.current = window.setTimeout(() => {
+      highlightedMessageTimeoutRef.current = null;
+      setHighlightedMessageId((current) => (current === messageId ? null : current));
+    }, 1800);
+  }, []);
 
   const firstUnvirtualizedRowIndex = useMemo(() => {
     const firstTailRowIndex = Math.max(rows.length - ALWAYS_UNVIRTUALIZED_TAIL_ROWS, 0);
@@ -4833,6 +4956,13 @@ const MessagesTimeline = memo(function MessagesTimeline({
     rowVirtualizer.measure();
   }, [rowVirtualizer, timelineWidthPx]);
   useEffect(() => {
+    return () => {
+      if (highlightedMessageTimeoutRef.current !== null) {
+        window.clearTimeout(highlightedMessageTimeoutRef.current);
+      }
+    };
+  }, []);
+  useEffect(() => {
     rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (_item, _delta, instance) => {
       const viewportHeight = instance.scrollRect?.height ?? 0;
       const scrollOffset = instance.scrollOffset ?? 0;
@@ -4859,6 +4989,67 @@ const MessagesTimeline = memo(function MessagesTimeline({
       }
     };
   }, []);
+  useEffect(() => {
+    if (!jumpToMessageId || jumpToMessageRequestKey < 1) {
+      return;
+    }
+
+    const rowIndex = messageRowIndexById.get(jumpToMessageId);
+    if (typeof rowIndex !== "number") {
+      return;
+    }
+
+    const scrollTargetIntoView = (): boolean => {
+      const element = findMessageElement(jumpToMessageId);
+      if (!element) {
+        return false;
+      }
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+      highlightMessage(jumpToMessageId);
+      return true;
+    };
+
+    if (scrollTargetIntoView()) {
+      return;
+    }
+
+    rowVirtualizer.scrollToIndex(rowIndex, { align: "start" });
+
+    if (rowIndex === 0) {
+      scrollContainer?.scrollTo({ top: 0 });
+    }
+
+    let frameId = 0;
+    let cancelled = false;
+    let attemptsRemaining = 12;
+    const settleScroll = () => {
+      if (cancelled) {
+        return;
+      }
+      if (scrollTargetIntoView()) {
+        return;
+      }
+      if (attemptsRemaining <= 0) {
+        return;
+      }
+      attemptsRemaining -= 1;
+      frameId = window.requestAnimationFrame(settleScroll);
+    };
+    frameId = window.requestAnimationFrame(settleScroll);
+
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [
+    findMessageElement,
+    highlightMessage,
+    jumpToMessageId,
+    jumpToMessageRequestKey,
+    messageRowIndexById,
+    rowVirtualizer,
+    scrollContainer,
+  ]);
 
   const virtualRows = rowVirtualizer.getVirtualItems();
   const nonVirtualizedRows = rows.slice(virtualizedRowCount);
@@ -4874,7 +5065,12 @@ const MessagesTimeline = memo(function MessagesTimeline({
 
   const renderRowContent = (row: TimelineRow) => (
     <div
-      className="pb-4"
+      className={cn(
+        "pb-4 transition-colors duration-500",
+        row.kind === "message" &&
+          highlightedMessageId === row.message.id &&
+          "rounded-2xl bg-accent/25 ring-1 ring-border/80",
+      )}
       data-timeline-row-kind={row.kind}
       data-message-id={row.kind === "message" ? row.message.id : undefined}
       data-message-role={row.kind === "message" ? row.message.role : undefined}

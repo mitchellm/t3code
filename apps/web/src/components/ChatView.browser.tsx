@@ -409,6 +409,13 @@ async function waitForInteractionModeButton(expectedLabel: "Chat" | "Plan"): Pro
   );
 }
 
+async function waitForThreadContextJumpButton(): Promise<HTMLButtonElement> {
+  return waitForElement(
+    () => document.querySelector<HTMLButtonElement>("[data-thread-context-jump='true']"),
+    "Unable to find thread context jump button.",
+  );
+}
+
 async function waitForImagesToLoad(scope: ParentNode): Promise<void> {
   const images = Array.from(scope.querySelectorAll("img"));
   if (images.length === 0) {
@@ -747,6 +754,45 @@ describe("ChatView timeline estimator parity (full app)", () => {
       }
     },
   );
+
+  it("renders a pinned thread context jump target and scrolls back to it", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-user-target-context-jump" as MessageId,
+      targetText: "context jump target",
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot,
+    });
+
+    try {
+      const scrollContainer = await waitForElement(
+        () => document.querySelector<HTMLDivElement>("div.overflow-y-auto.overscroll-y-contain"),
+        "Unable to find ChatView message scroll container.",
+      );
+      const contextJumpButton = await waitForThreadContextJumpButton();
+
+      expect(contextJumpButton.textContent).toContain("filler user message 0");
+
+      await vi.waitFor(
+        () => {
+          expect(scrollContainer.scrollTop).toBeGreaterThan(200);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      contextJumpButton.click();
+
+      await vi.waitFor(
+        () => {
+          expect(scrollContainer.scrollTop).toBeLessThan(200);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
 
   it("opens the project cwd for draft threads without a worktree path", async () => {
     useComposerDraftStore.setState({
