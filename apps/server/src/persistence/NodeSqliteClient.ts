@@ -68,17 +68,6 @@ const makeWithDatabase = (
         Effect.sync(() => db.close()),
       );
 
-      const statementReaderCache = new WeakMap<StatementSync, boolean>();
-      const hasRows = (statement: StatementSync): boolean => {
-        const cached = statementReaderCache.get(statement);
-        if (cached !== undefined) {
-          return cached;
-        }
-        const value = statement.columns().length > 0;
-        statementReaderCache.set(statement, value);
-        return value;
-      };
-
       const prepareCache = yield* Cache.make({
         capacity: options.prepareCacheSize ?? 200,
         timeToLive: options.prepareCacheTTL ?? Duration.minutes(10),
@@ -97,11 +86,11 @@ const makeWithDatabase = (
         Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
           statement.setReadBigInts(Boolean(ServiceMap.get(fiber.services, Client.SafeIntegers)));
           try {
-            if (hasRows(statement)) {
-              return Effect.succeed(statement.all(...(params as any)));
+            if (raw) {
+              const result = statement.run(...(params as any));
+              return Effect.succeed(result as unknown as ReadonlyArray<any>);
             }
-            const result = statement.run(...(params as any));
-            return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
+            return Effect.succeed(statement.all(...(params as any)));
           } catch (cause) {
             return Effect.fail(new SqlError({ cause, message: "Failed to execute statement" }));
           }
@@ -116,23 +105,17 @@ const makeWithDatabase = (
           (statement) =>
             Effect.try({
               try: () => {
-                if (hasRows(statement)) {
-                  statement.setReturnArrays(true);
-                  // Safe to cast to array after we've setReturnArrays(true)
-                  return statement.all(...(params as any)) as unknown as ReadonlyArray<
-                    ReadonlyArray<unknown>
-                  >;
-                }
-                statement.run(...(params as any));
-                return [];
+                statement.setReturnArrays(true);
+                // Safe to cast to array after we've setReturnArrays(true)
+                return statement.all(...(params as any)) as unknown as ReadonlyArray<
+                  ReadonlyArray<unknown>
+                >;
               },
               catch: (cause) => new SqlError({ cause, message: "Failed to execute statement" }),
             }),
           (statement) =>
             Effect.sync(() => {
-              if (hasRows(statement)) {
-                statement.setReturnArrays(false);
-              }
+              statement.setReturnArrays(false);
             }),
         );
 
