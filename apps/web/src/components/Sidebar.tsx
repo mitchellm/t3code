@@ -3,6 +3,7 @@ import {
   FolderIcon,
   GitPullRequestIcon,
   RocketIcon,
+  SearchIcon,
   SparklesIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -1143,8 +1144,10 @@ export default function Sidebar() {
             {projects.map((project) => {
               const projectThreadSearch = threadSearchByProject.get(project.id) ?? "";
               const hasActiveThreadSearch = projectThreadSearch.trim().length > 0;
+              const allProjectThreads = sidebarThreads.filter((thread) => thread.projectId === project.id);
+              const showThreadSearch = allProjectThreads.length >= THREAD_PREVIEW_LIMIT;
               const filteredProjectThreads = filterSidebarThreads(
-                sidebarThreads.filter((thread) => thread.projectId === project.id),
+                allProjectThreads,
                 projectThreadSearch,
               );
               const projectThreads = sortSidebarThreads(
@@ -1208,7 +1211,7 @@ export default function Sidebar() {
                               <button
                                 type="button"
                                 aria-label={`Auto-rename threads in ${project.name}`}
-                                className="inline-flex size-5 items-center justify-center rounded-md p-0 text-amber-600/90 transition-colors hover:bg-secondary hover:text-amber-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-amber-300 dark:hover:text-amber-200"
+                                className="inline-flex size-5 items-center justify-center rounded-md p-0 text-muted-foreground/70 transition-colors hover:bg-secondary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                                 disabled={isAutoRenamingProject || projectThreads.length === 0}
                                 onClick={(event) => {
                                   event.preventDefault();
@@ -1255,42 +1258,44 @@ export default function Sidebar() {
                     </div>
 
                     <CollapsibleContent>
-                      <SidebarMenuSub className="mx-1 my-0 w-full translate-x-0 gap-0 px-1.5 py-0">
-                        <SidebarMenuSubItem className="w-full">
-                          <div className="px-2 py-1.5">
-                            <InputGroup className="rounded-md border-border/60 bg-background/70 shadow-none dark:bg-background/20">
-                              <InputGroupInput
-                                type="search"
-                                size="sm"
-                                value={projectThreadSearch}
-                                placeholder="Search threads"
-                                aria-label={`Search threads in ${project.name}`}
-                                className="text-xs placeholder:text-muted-foreground/55"
-                                onChange={(event) => {
-                                  setProjectThreadSearch(project.id, event.target.value);
-                                }}
-                                onKeyDown={(event) => {
-                                  event.stopPropagation();
-                                  if (event.key === "Escape" && projectThreadSearch.length > 0) {
-                                    event.preventDefault();
-                                    setProjectThreadSearch(project.id, "");
-                                  }
-                                }}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                }}
-                              />
-                              <InputGroupAddon align="inline-end" className="pe-2">
-                                <InputGroupText
-                                  aria-hidden="true"
-                                  className="text-xs text-muted-foreground/55"
-                                >
-                                  🔍
-                                </InputGroupText>
-                              </InputGroupAddon>
-                            </InputGroup>
-                          </div>
-                        </SidebarMenuSubItem>
+                      <SidebarMenuSub className="mx-1 my-0 translate-x-0 gap-0 px-1.5 py-0">
+                        {showThreadSearch && (
+                          <SidebarMenuSubItem className="w-full">
+                            <div className="px-2 py-1.5">
+                              <InputGroup className="overflow-visible rounded-md border-border bg-background/70 shadow-none dark:bg-background/20">
+                                <InputGroupInput
+                                  type="search"
+                                  size="sm"
+                                  value={projectThreadSearch}
+                                  placeholder="Search threads"
+                                  aria-label={`Search threads in ${project.name}`}
+                                  className="text-xs placeholder:text-muted-foreground/55"
+                                  onChange={(event) => {
+                                    setProjectThreadSearch(project.id, event.target.value);
+                                  }}
+                                  onKeyDown={(event) => {
+                                    event.stopPropagation();
+                                    if (event.key === "Escape" && projectThreadSearch.length > 0) {
+                                      event.preventDefault();
+                                      setProjectThreadSearch(project.id, "");
+                                    }
+                                  }}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                  }}
+                                />
+                                <InputGroupAddon align="inline-end" className="pe-2.5">
+                                  <InputGroupText
+                                    aria-hidden="true"
+                                    className="text-muted-foreground/50"
+                                  >
+                                    <SearchIcon className="size-3.5" />
+                                  </InputGroupText>
+                                </InputGroupAddon>
+                              </InputGroup>
+                            </div>
+                          </SidebarMenuSubItem>
+                        )}
                         {visibleThreads.map((thread) => {
                           const isActive = routeThreadId === thread.id;
                           const threadStatus = deriveThreadStatusPill({

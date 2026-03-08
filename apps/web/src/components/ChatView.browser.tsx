@@ -918,6 +918,57 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
+  it("does not retrigger a prior context jump when switching thread context modes", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-target-context-toggle-jump" as MessageId,
+        targetText: "context jump target",
+      }),
+    });
+
+    try {
+      const scrollContainer = await waitForElement(
+        () => document.querySelector<HTMLDivElement>("div.overflow-y-auto.overscroll-y-contain"),
+        "Unable to find ChatView message scroll container.",
+      );
+      const contextJumpButton = await waitForThreadContextJumpButton();
+      const latestContextToggle = await waitForThreadContextToggle("last");
+
+      await vi.waitFor(
+        () => {
+          expect(scrollContainer.scrollTop).toBeGreaterThan(200);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      contextJumpButton.click();
+
+      await vi.waitFor(
+        () => {
+          expect(scrollContainer.scrollTop).toBeLessThan(200);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      latestContextToggle.click();
+
+      await vi.waitFor(
+        () => {
+          expect(contextJumpButton.textContent).toContain("filler user message 21");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      for (let index = 0; index < 6; index += 1) {
+        await waitForLayout();
+        expect(scrollContainer.scrollTop).toBeLessThan(200);
+      }
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("opens the project cwd for draft threads without a worktree path", async () => {
     useComposerDraftStore.setState({
       draftThreadsByThreadId: {

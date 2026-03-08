@@ -12,7 +12,9 @@ Today, the fork is centered on:
 
 - Codex support through the existing app-server integration
 - Claude Code support through a new provider adapter
-- Better thread awareness for long-running, paused, and resumed work
+- Better thread awareness for long-running, paused, resumed, and high-volume work
+- Project-wide thread auto-rename for cleaning up low-signal thread titles
+- Better sidebar management, search, and draft thread handling across many active threads
 - Reliability-first behavior around persistence, orchestration, and recovery
 - Better usability across desktop, laptop, and phone browsers on the same network
 
@@ -25,7 +27,9 @@ Today, the fork is centered on:
 2. Thread and chat UX
    - Added paused thread visibility in the sidebar
    - Added thread context jump support so important context is easy to revisit
-   - Improved sidebar sorting/search behavior and general thread status visibility
+   - Added project-wide thread auto-rename to clean up titles from real message context
+   - Improved sidebar sorting, search, and status visibility for faster thread triage
+   - Added better local draft thread handling so in-progress work shows up with useful titles
    - Added thread UX refinements around active plan display, mobile behavior, and higher-volume thread management
 3. Reliability fixes
    - Fixed write-only SQLite statement handling in the server persistence layer
@@ -40,6 +44,7 @@ The original T3 Code has a strong backend and orchestration foundation. This for
 The practical goal is simple:
 
 - make it easier to manage many threads quickly
+- make thread organization and naming hold up when moving fast across multiple projects
 - make remote browser access a first-class workflow, not a side effect
 - make phone usage actually useful
 - make the app feel good enough to use as an everyday agent workspace across multiple machines
