@@ -20,6 +20,7 @@ export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
+  autorenameProjectThreads: "orchestration.autorenameProjectThreads",
   replayEvents: "orchestration.replayEvents",
 } as const;
 
@@ -1068,6 +1069,42 @@ export type OrchestrationGetFullThreadDiffInput = typeof OrchestrationGetFullThr
 export const OrchestrationGetFullThreadDiffResult = ThreadTurnDiff;
 export type OrchestrationGetFullThreadDiffResult = typeof OrchestrationGetFullThreadDiffResult.Type;
 
+export const OrchestrationAutorenameProjectThreadsInput = Schema.Struct({
+  projectId: ProjectId,
+});
+export type OrchestrationAutorenameProjectThreadsInput =
+  typeof OrchestrationAutorenameProjectThreadsInput.Type;
+
+export const OrchestrationAutorenameSkippedReason = Schema.Literals([
+  "no-user-messages",
+  "unchanged",
+]);
+export type OrchestrationAutorenameSkippedReason =
+  typeof OrchestrationAutorenameSkippedReason.Type;
+
+export const OrchestrationAutorenameProjectThreadsResult = Schema.Struct({
+  renamed: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      title: TrimmedNonEmptyString,
+    }),
+  ),
+  skipped: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      reason: OrchestrationAutorenameSkippedReason,
+    }),
+  ),
+  failed: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      message: TrimmedNonEmptyString,
+    }),
+  ),
+});
+export type OrchestrationAutorenameProjectThreadsResult =
+  typeof OrchestrationAutorenameProjectThreadsResult.Type;
+
 export const OrchestrationReplayEventsInput = Schema.Struct({
   fromSequenceExclusive: NonNegativeInt,
 });
@@ -1092,6 +1129,10 @@ export const OrchestrationRpcSchemas = {
   getFullThreadDiff: {
     input: OrchestrationGetFullThreadDiffInput,
     output: OrchestrationGetFullThreadDiffResult,
+  },
+  autorenameProjectThreads: {
+    input: OrchestrationAutorenameProjectThreadsInput,
+    output: OrchestrationAutorenameProjectThreadsResult,
   },
   replayEvents: {
     input: OrchestrationReplayEventsInput,

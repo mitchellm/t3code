@@ -32,6 +32,8 @@ import type {
 } from "./terminal";
 import type { ServerUpsertKeybindingInput, ServerUpsertKeybindingResult } from "./server";
 import type {
+  OrchestrationAutorenameProjectThreadsInput,
+  OrchestrationAutorenameProjectThreadsResult,
   ClientOrchestrationCommand,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
@@ -145,6 +147,9 @@ export interface NativeApi {
     getFullThreadDiff: (
       input: OrchestrationGetFullThreadDiffInput,
     ) => Promise<OrchestrationGetFullThreadDiffResult>;
+    autorenameProjectThreads: (
+      input: OrchestrationAutorenameProjectThreadsInput,
+    ) => Promise<OrchestrationAutorenameProjectThreadsResult>;
     replayEvents: (fromSequenceExclusive: number) => Promise<OrchestrationEvent[]>;
     onDomainEvent: (callback: (event: OrchestrationEvent) => void) => () => void;
   };

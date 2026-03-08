@@ -52,6 +52,7 @@ import { searchWorkspaceEntries } from "./workspaceEntries";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor";
+import { ThreadTitleManager } from "./orchestration/Services/ThreadTitleManager";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { ProviderHealth } from "./provider/Services/ProviderHealth";
 import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuery";
@@ -207,6 +208,7 @@ export type ServerCoreRuntimeServices =
   | ProjectionSnapshotQuery
   | CheckpointDiffQuery
   | OrchestrationReactor
+  | ThreadTitleManager
   | ProviderService
   | ProviderHealth;
 
@@ -612,6 +614,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const projectionReadModelQuery = yield* ProjectionSnapshotQuery;
   const checkpointDiffQuery = yield* CheckpointDiffQuery;
   const orchestrationReactor = yield* OrchestrationReactor;
+  const threadTitleManager = yield* ThreadTitleManager;
   const { openInEditor } = yield* Open;
 
   const subscriptionsScope = yield* Scope.make("sequential");
@@ -745,6 +748,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case ORCHESTRATION_WS_METHODS.getFullThreadDiff: {
         const body = stripRequestTag(request.body);
         return yield* checkpointDiffQuery.getFullThreadDiff(body);
+      }
+
+      case ORCHESTRATION_WS_METHODS.autorenameProjectThreads: {
+        const body = stripRequestTag(request.body);
+        return yield* threadTitleManager.autorenameProjectThreads(body.projectId);
       }
 
       case ORCHESTRATION_WS_METHODS.replayEvents: {

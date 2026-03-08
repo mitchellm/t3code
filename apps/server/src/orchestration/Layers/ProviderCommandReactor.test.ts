@@ -173,6 +173,14 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
     );
+    const generateThreadTitle = vi.fn(() =>
+      Effect.fail(
+        new TextGenerationError({
+          operation: "generateThreadTitle",
+          detail: "disabled in test harness",
+        }),
+      ),
+    );
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
@@ -202,7 +210,10 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provideMerge(Layer.succeed(GitCore, { renameBranch } as unknown as GitCoreShape)),
       Layer.provideMerge(
-        Layer.succeed(TextGeneration, { generateBranchName } as unknown as TextGenerationShape),
+        Layer.succeed(
+          TextGeneration,
+          { generateBranchName, generateThreadTitle } as unknown as TextGenerationShape,
+        ),
       ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), stateDir)),
       Layer.provideMerge(NodeServices.layer),
@@ -252,6 +263,7 @@ describe("ProviderCommandReactor", () => {
       stopSession,
       renameBranch,
       generateBranchName,
+      generateThreadTitle,
       stateDir,
     };
   }

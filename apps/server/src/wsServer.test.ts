@@ -51,6 +51,10 @@ import { GitCore } from "./git/Services/GitCore.ts";
 import { GitCommandError, GitManagerError } from "./git/Errors.ts";
 import { MigrationError } from "@effect/sql-sqlite-bun/SqliteMigrator";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
+import {
+  ThreadTitleManager,
+  type ThreadTitleManagerShape,
+} from "./orchestration/Services/ThreadTitleManager";
 
 interface PendingMessages {
   queue: unknown[];
@@ -396,6 +400,7 @@ describe("WebSocket Server", () => {
       gitManager?: GitManagerShape;
       gitCore?: Pick<GitCoreShape, "listBranches" | "initRepo" | "pullCurrentBranch">;
       terminalManager?: TerminalManagerShape;
+      threadTitleManager?: ThreadTitleManagerShape;
     } = {},
   ): Promise<Http.Server> {
     if (serverScope) {
@@ -433,6 +438,9 @@ describe("WebSocket Server", () => {
         : Layer.empty,
       options.terminalManager
         ? Layer.succeed(TerminalManager, options.terminalManager)
+        : Layer.empty,
+      options.threadTitleManager
+        ? Layer.succeed(ThreadTitleManager, options.threadTitleManager)
         : Layer.empty,
     );
 
@@ -1550,6 +1558,46 @@ describe("WebSocket Server", () => {
     expect(fs.readFileSync(path.join(workspace, "plans", "effect-rpc.md"), "utf8")).toBe(
       "# Plan\n\n- step 1\n",
     );
+  });
+
+  it("routes orchestration.autorenameProjectThreads over websocket", async () => {
+    const autorenameProjectThreads = vi.fn(() =>
+      Effect.succeed({
+        renamed: [
+          {
+            threadId: ThreadId.makeUnsafe("thread-1"),
+            title: "Refresh sidebar thread titles",
+          },
+        ],
+        skipped: [{ threadId: ThreadId.makeUnsafe("thread-2"), reason: "unchanged" as const }],
+        failed: [],
+      }),
+    );
+
+    server = await createTestServer({
+      cwd: "/test",
+      threadTitleManager: {
+        autorenameProjectThreads,
+      },
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const response = await sendRequest(ws, ORCHESTRATION_WS_METHODS.autorenameProjectThreads, {
+      projectId: "project-1",
+    });
+
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual({
+      renamed: [{ threadId: "thread-1", title: "Refresh sidebar thread titles" }],
+      skipped: [{ threadId: "thread-2", reason: "unchanged" }],
+      failed: [],
+    });
+    expect(autorenameProjectThreads).toHaveBeenCalledWith("project-1");
   });
 
   it("rejects projects.writeFile paths outside the workspace root", async () => {

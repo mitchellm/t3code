@@ -2,6 +2,7 @@ import { Schema, Struct } from "effect";
 import { ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 
 import {
+  OrchestrationAutorenameProjectThreadsInput,
   ClientOrchestrationCommand,
   OrchestrationGetFullThreadDiffInput,
   ORCHESTRATION_WS_METHODS,
@@ -98,6 +99,10 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(ORCHESTRATION_WS_METHODS.getSnapshot, OrchestrationGetSnapshotInput),
   tagRequestBody(ORCHESTRATION_WS_METHODS.getTurnDiff, OrchestrationGetTurnDiffInput),
   tagRequestBody(ORCHESTRATION_WS_METHODS.getFullThreadDiff, OrchestrationGetFullThreadDiffInput),
+  tagRequestBody(
+    ORCHESTRATION_WS_METHODS.autorenameProjectThreads,
+    OrchestrationAutorenameProjectThreadsInput,
+  ),
   tagRequestBody(ORCHESTRATION_WS_METHODS.replayEvents, OrchestrationReplayEventsInput),
 
   // Project Search
