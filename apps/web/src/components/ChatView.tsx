@@ -226,6 +226,11 @@ import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./Compose
 import ContextWindowIndicator from "./ContextWindowIndicator";
 import { estimateTimelineMessageHeight } from "./timelineHeight";
 import { useThreadRunStateStore } from "../threadRunStateStore";
+import {
+  EMPTY_QUEUE,
+  type QueuedThreadSubmission,
+  useThreadMessageQueueStore,
+} from "../threadMessageQueueStore";
 import { deriveTimelineScrollbarMarkers } from "../timelineScrollbarMarkers";
 
 function formatMessageMeta(createdAt: string, duration: string | null): string {
@@ -459,6 +464,26 @@ function cloneComposerImageForRetry(image: ComposerImageAttachment): ComposerIma
   } catch {
     return image;
   }
+}
+
+function queuedSubmissionToOptimisticMessage(submission: QueuedThreadSubmission): ChatMessage {
+  const attachments = submission.attachments.map((attachment) => ({
+    type: "image" as const,
+    id: attachment.id,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    previewUrl: attachment.previewUrl,
+  }));
+
+  return {
+    id: submission.messageId,
+    role: "user",
+    text: submission.text,
+    ...(attachments.length > 0 ? { attachments } : {}),
+    createdAt: submission.createdAt,
+    streaming: false,
+  };
 }
 
 const VscodeEntryIcon = memo(function VscodeEntryIcon(props: {
@@ -718,6 +743,16 @@ export default function ChatView({ threadId }: ChatViewProps) {
   );
   const startPendingRun = useThreadRunStateStore((state) => state.startPendingRun);
   const clearPendingRun = useThreadRunStateStore((state) => state.clearPendingRun);
+  const queuedSubmissions = useThreadMessageQueueStore(
+    (state) => state.queuedByThreadId[threadId] ?? EMPTY_QUEUE,
+  );
+  const enqueueQueuedSubmission = useThreadMessageQueueStore((state) => state.enqueueSubmission);
+  const prependQueuedSubmission = useThreadMessageQueueStore((state) => state.prependSubmission);
+  const dequeueQueuedSubmission = useThreadMessageQueueStore((state) => state.dequeueSubmission);
+  const isInterruptingQueuedSend = useThreadMessageQueueStore(
+    (state) => state.interruptingByThreadId[threadId] === true,
+  );
+  const setInterruptingQueuedSend = useThreadMessageQueueStore((state) => state.setInterrupting);
 
   const setPrompt = useCallback(
     (nextPrompt: string) => {
@@ -899,6 +934,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
     isSendBusy ||
     isConnecting ||
     isRevertingCheckpoint;
+  const queuedSubmissionCount = queuedSubmissions.length;
+  const hasQueuedSubmissions = queuedSubmissionCount > 0;
+  const hasComposerSubmission = prompt.trim().length > 0 || composerImages.length > 0;
   const nowIso = new Date(nowTick).toISOString();
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
@@ -999,7 +1037,6 @@ export default function ChatView({ threadId }: ChatViewProps) {
     isConnecting ||
     isPendingThreadRun ||
     isComposerApprovalState ||
-    phase === "running" ||
     isSendBusy ||
     isRevertingCheckpoint;
   const hasComposerHeader =
@@ -1256,6 +1293,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
     }
     previousWorkingRef.current = isWorking;
   }, [isWorking, latestCompletedAssistantMessage?.id]);
+  useEffect(() => {
+    if (phase === "running" || !isInterruptingQueuedSend) {
+      return;
+    }
+    setInterruptingQueuedSend(threadId, false);
+  }, [isInterruptingQueuedSend, phase, setInterruptingQueuedSend, threadId]);
   const completionDividerBeforeEntryId = useMemo(() => {
     if (!latestTurnSettled) return null;
     if (!activeLatestTurn?.startedAt) return null;
@@ -2563,198 +2606,183 @@ export default function ChatView({ threadId }: ChatViewProps) {
     [activeThread, isConnecting, isRevertingCheckpoint, isSendBusy, phase, setThreadError],
   );
 
-  const onSend = async (e?: { preventDefault: () => void }) => {
-    e?.preventDefault();
-    const api = readNativeApi();
-    if (
-      !api ||
-      !activeThread ||
-      phase === "running" ||
-      isPendingThreadRun ||
-      isSendBusy ||
-      isConnecting ||
-      sendInFlightRef.current
-    ) {
-      return;
-    }
-    if (activePendingProgress) {
-      onAdvanceActivePendingUserInput();
-      return;
-    }
+  const clearComposerInput = useCallback(
+    (threadIdToClear: ThreadId) => {
+      promptRef.current = "";
+      clearComposerDraftContent(threadIdToClear);
+      setComposerHighlightedItemId(null);
+      setComposerCursor(0);
+      setComposerTrigger(null);
+    },
+    [clearComposerDraftContent],
+  );
+
+  const restoreSubmissionToComposer = useCallback(
+    (submission: QueuedThreadSubmission) => {
+      promptRef.current = submission.text;
+      setPrompt(submission.text);
+      setComposerCursor(submission.text.length);
+      addComposerImagesToDraft(submission.attachments.map(cloneComposerImageForRetry));
+      setComposerTrigger(detectComposerTrigger(submission.text, submission.text.length));
+    },
+    [addComposerImagesToDraft, setPrompt],
+  );
+
+  const buildComposerSubmission = useCallback((): QueuedThreadSubmission | null => {
     const trimmed = prompt.trim();
-    if (showPlanFollowUpPrompt && activeProposedPlan) {
-      const followUp = resolvePlanFollowUpSubmission({
-        draftText: trimmed,
-        planMarkdown: activeProposedPlan.planMarkdown,
-      });
-      promptRef.current = "";
-      clearComposerDraftContent(activeThread.id);
-      setComposerHighlightedItemId(null);
-      setComposerCursor(0);
-      setComposerTrigger(null);
-      await onSubmitPlanFollowUp({
-        text: followUp.text,
-        interactionMode: followUp.interactionMode,
-      });
-      return;
-    }
-    const standaloneSlashCommand =
-      composerImages.length === 0 ? parseStandaloneComposerSlashCommand(trimmed) : null;
-    if (standaloneSlashCommand) {
-      await handleInteractionModeChange(standaloneSlashCommand);
-      promptRef.current = "";
-      clearComposerDraftContent(activeThread.id);
-      setComposerHighlightedItemId(null);
-      setComposerCursor(0);
-      setComposerTrigger(null);
-      return;
-    }
-    if (!trimmed && composerImages.length === 0) return;
-    if (!activeProject) return;
-    const threadIdForSend = activeThread.id;
-    const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
-    const baseBranchForWorktree =
-      isFirstMessage && envMode === "worktree" && !activeThread.worktreePath
-        ? activeThread.branch
-        : null;
-
-    // In worktree mode, require an explicit base branch so we don't silently
-    // fall back to local execution when branch selection is missing.
-    const shouldCreateWorktree =
-      isFirstMessage && envMode === "worktree" && !activeThread.worktreePath;
-    if (shouldCreateWorktree && !activeThread.branch) {
-      setStoreThreadError(
-        threadIdForSend,
-        "Select a base branch before sending in New worktree mode.",
-      );
-      return;
+    if (!trimmed && composerImages.length === 0) {
+      return null;
     }
 
-    sendInFlightRef.current = true;
-    beginSendPhase(baseBranchForWorktree ? "preparing-worktree" : "sending-turn");
+    return {
+      messageId: newMessageId(),
+      createdAt: new Date().toISOString(),
+      text: trimmed,
+      attachments: [...composerImages],
+      provider: selectedProvider,
+      model: selectedModel || undefined,
+      serviceTier: selectedServiceTier,
+      modelOptions: selectedModelOptionsForDispatch,
+      runtimeMode,
+      interactionMode,
+      assistantDeliveryMode: settings.enableAssistantStreaming ? "streaming" : "buffered",
+    };
+  }, [
+    composerImages,
+    interactionMode,
+    prompt,
+    runtimeMode,
+    selectedModel,
+    selectedModelOptionsForDispatch,
+    selectedProvider,
+    selectedServiceTier,
+    settings.enableAssistantStreaming,
+  ]);
 
-    const composerImagesSnapshot = [...composerImages];
-    const messageIdForSend = newMessageId();
-    const messageCreatedAt = new Date().toISOString();
-    const turnAttachmentsPromise = Promise.all(
-      composerImagesSnapshot.map(async (image) => ({
-        type: "image" as const,
-        name: image.name,
-        mimeType: image.mimeType,
-        sizeBytes: image.sizeBytes,
-        dataUrl: await readFileAsDataUrl(image.file),
-      })),
-    );
-    const optimisticAttachments = composerImagesSnapshot.map((image) => ({
-      type: "image" as const,
-      id: image.id,
-      name: image.name,
-      mimeType: image.mimeType,
-      sizeBytes: image.sizeBytes,
-      previewUrl: image.previewUrl,
-    }));
-    setOptimisticUserMessages((existing) => [
-      ...existing,
-      {
-        id: messageIdForSend,
-        role: "user",
-        text: trimmed,
-        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        createdAt: messageCreatedAt,
-        streaming: false,
+  const executeQueuedSubmission = useCallback(
+    async (
+      submission: QueuedThreadSubmission,
+      options?: {
+        restoreToComposerOnFailure?: boolean;
       },
-    ]);
-    // Sending a message should always bring the latest user turn into view.
-    shouldAutoScrollRef.current = true;
-    forceStickToBottom();
+    ): Promise<boolean> => {
+      const api = readNativeApi();
+      if (
+        !api ||
+        !activeThread ||
+        !activeProject ||
+        phase === "running" ||
+        isPendingThreadRun ||
+        isSendBusy ||
+        isConnecting ||
+        sendInFlightRef.current
+      ) {
+        return false;
+      }
 
-    setThreadError(threadIdForSend, null);
-    promptRef.current = "";
-    clearComposerDraftContent(threadIdForSend);
-    setComposerHighlightedItemId(null);
-    setComposerCursor(0);
-    setComposerTrigger(null);
+      const trimmed = submission.text.trim();
+      if (!trimmed && submission.attachments.length === 0) {
+        return false;
+      }
 
-    let createdServerThreadForLocalDraft = false;
-    let turnStartSucceeded = false;
-    let nextThreadBranch = activeThread.branch;
-    let nextThreadWorktreePath = activeThread.worktreePath;
-    await (async () => {
-      // On first message: lock in branch + create worktree if needed.
-      if (baseBranchForWorktree) {
-        beginSendPhase("preparing-worktree");
-        const newBranch = buildTemporaryWorktreeBranchName();
-        const result = await createWorktreeMutation.mutateAsync({
-          cwd: activeProject.cwd,
-          branch: baseBranchForWorktree,
-          newBranch,
-        });
-        nextThreadBranch = result.worktree.branch;
-        nextThreadWorktreePath = result.worktree.path;
-        if (isServerThread) {
-          await api.orchestration.dispatchCommand({
-            type: "thread.meta.update",
-            commandId: newCommandId(),
-            threadId: threadIdForSend,
-            branch: result.worktree.branch,
-            worktreePath: result.worktree.path,
+      const threadIdForSend = activeThread.id;
+      const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
+      const baseBranchForWorktree =
+        isFirstMessage && envMode === "worktree" && !activeThread.worktreePath
+          ? activeThread.branch
+          : null;
+      const shouldCreateWorktree =
+        isFirstMessage && envMode === "worktree" && !activeThread.worktreePath;
+      if (shouldCreateWorktree && !activeThread.branch) {
+        setStoreThreadError(
+          threadIdForSend,
+          "Select a base branch before sending in New worktree mode.",
+        );
+        return false;
+      }
+
+      sendInFlightRef.current = true;
+      beginSendPhase(baseBranchForWorktree ? "preparing-worktree" : "sending-turn");
+      setThreadError(threadIdForSend, null);
+      setOptimisticUserMessages((existing) =>
+        existing.some((message) => message.id === submission.messageId)
+          ? existing
+          : [...existing, queuedSubmissionToOptimisticMessage(submission)],
+      );
+      shouldAutoScrollRef.current = true;
+      forceStickToBottom();
+
+      const turnAttachmentsPromise = Promise.all(
+        submission.attachments.map(async (image) => ({
+          type: "image" as const,
+          name: image.name,
+          mimeType: image.mimeType,
+          sizeBytes: image.sizeBytes,
+          dataUrl: await readFileAsDataUrl(image.file),
+        })),
+      );
+
+      let createdServerThreadForLocalDraft = false;
+      let turnStartSucceeded = false;
+      let nextThreadBranch = activeThread.branch;
+      let nextThreadWorktreePath = activeThread.worktreePath;
+
+      await (async () => {
+        if (baseBranchForWorktree) {
+          beginSendPhase("preparing-worktree");
+          const newBranch = buildTemporaryWorktreeBranchName();
+          const result = await createWorktreeMutation.mutateAsync({
+            cwd: activeProject.cwd,
+            branch: baseBranchForWorktree,
+            newBranch,
           });
-          // Keep local thread state in sync immediately so terminal drawer opens
-          // with the worktree cwd/env instead of briefly using the project root.
-          setStoreThreadBranch(threadIdForSend, result.worktree.branch, result.worktree.path);
-        }
-      }
-
-      let firstComposerImageName: string | null = null;
-      if (composerImagesSnapshot.length > 0) {
-        const firstComposerImage = composerImagesSnapshot[0];
-        if (firstComposerImage) {
-          firstComposerImageName = firstComposerImage.name;
-        }
-      }
-      let titleSeed = trimmed;
-      if (!titleSeed) {
-        if (firstComposerImageName) {
-          titleSeed = `Image: ${firstComposerImageName}`;
-        } else {
-          titleSeed = "New thread";
-        }
-      }
-      const title = truncateTitle(titleSeed);
-      let threadCreateModel: ModelSlug =
-        selectedModel || (activeProject.model as ModelSlug) || DEFAULT_MODEL_BY_PROVIDER.codex;
-
-      if (isLocalDraftThread) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.create",
-          commandId: newCommandId(),
-          threadId: threadIdForSend,
-          projectId: activeProject.id,
-          title,
-          model: threadCreateModel,
-          runtimeMode,
-          interactionMode,
-          branch: nextThreadBranch,
-          worktreePath: nextThreadWorktreePath,
-          createdAt: activeThread.createdAt,
-        });
-        createdServerThreadForLocalDraft = true;
-      }
-
-      let setupScript: ProjectScript | null = null;
-      if (baseBranchForWorktree) {
-        setupScript = setupProjectScript(activeProject.scripts);
-      }
-      if (setupScript) {
-        let shouldRunSetupScript = false;
-        if (isServerThread) {
-          shouldRunSetupScript = true;
-        } else {
-          if (createdServerThreadForLocalDraft) {
-            shouldRunSetupScript = true;
+          nextThreadBranch = result.worktree.branch;
+          nextThreadWorktreePath = result.worktree.path;
+          if (isServerThread) {
+            await api.orchestration.dispatchCommand({
+              type: "thread.meta.update",
+              commandId: newCommandId(),
+              threadId: threadIdForSend,
+              branch: result.worktree.branch,
+              worktreePath: result.worktree.path,
+            });
+            setStoreThreadBranch(threadIdForSend, result.worktree.branch, result.worktree.path);
           }
         }
-        if (shouldRunSetupScript) {
+
+        const firstAttachmentName = submission.attachments[0]?.name ?? null;
+        let titleSeed = trimmed;
+        if (!titleSeed) {
+          titleSeed = firstAttachmentName ? `Image: ${firstAttachmentName}` : "New thread";
+        }
+        const title = truncateTitle(titleSeed);
+        const threadCreateModel: ModelSlug =
+          (submission.model as ModelSlug | undefined) ||
+          (activeProject.model as ModelSlug) ||
+          DEFAULT_MODEL_BY_PROVIDER.codex;
+
+        if (isLocalDraftThread) {
+          await api.orchestration.dispatchCommand({
+            type: "thread.create",
+            commandId: newCommandId(),
+            threadId: threadIdForSend,
+            projectId: activeProject.id,
+            title,
+            model: threadCreateModel,
+            runtimeMode: submission.runtimeMode,
+            interactionMode: submission.interactionMode,
+            branch: nextThreadBranch,
+            worktreePath: nextThreadWorktreePath,
+            createdAt: activeThread.createdAt,
+          });
+          createdServerThreadForLocalDraft = true;
+        }
+
+        let setupScript: ProjectScript | null = null;
+        if (baseBranchForWorktree) {
+          setupScript = setupProjectScript(activeProject.scripts);
+        }
+        if (setupScript && (isServerThread || createdServerThreadForLocalDraft)) {
           const setupScriptOptions: Parameters<typeof runProjectScript>[1] = {
             worktreePath: nextThreadWorktreePath,
             rememberAsLastInvoked: false,
@@ -2765,105 +2793,277 @@ export default function ChatView({ threadId }: ChatViewProps) {
           }
           await runProjectScript(setupScript, setupScriptOptions);
         }
-      }
 
-      // Auto-title from first message
-      if (isFirstMessage && isServerThread) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId: threadIdForSend,
-          title,
-        });
-      }
-
-      if (isServerThread) {
-        await persistThreadSettingsForNextTurn({
-          threadId: threadIdForSend,
-          createdAt: messageCreatedAt,
-          ...(selectedModel ? { model: selectedModel } : {}),
-          runtimeMode,
-          interactionMode,
-        });
-      }
-
-      beginSendPhase("sending-turn");
-      const turnAttachments = await turnAttachmentsPromise;
-      await api.orchestration.dispatchCommand({
-        type: "thread.turn.start",
-        commandId: newCommandId(),
-        threadId: threadIdForSend,
-        message: {
-          messageId: messageIdForSend,
-          role: "user",
-          text: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
-          attachments: turnAttachments,
-        },
-        model: selectedModel || undefined,
-        serviceTier: selectedServiceTier,
-        ...(selectedModelOptionsForDispatch
-          ? { modelOptions: selectedModelOptionsForDispatch }
-          : {}),
-        ...(isFirstMessage ? { provider: selectedProvider } : {}),
-        assistantDeliveryMode: settings.enableAssistantStreaming ? "streaming" : "buffered",
-        runtimeMode,
-        interactionMode,
-        createdAt: messageCreatedAt,
-      });
-      turnStartSucceeded = true;
-      if (isFirstMessage) {
-        clearDraftThread(threadIdForSend);
-      }
-    })().catch(async (err: unknown) => {
-      if (createdServerThreadForLocalDraft && !turnStartSucceeded) {
-        await api.orchestration
-          .dispatchCommand({
-            type: "thread.delete",
+        if (isFirstMessage && isServerThread) {
+          await api.orchestration.dispatchCommand({
+            type: "thread.meta.update",
             commandId: newCommandId(),
             threadId: threadIdForSend,
-          })
-          .catch(() => undefined);
-      }
-      if (
-        !turnStartSucceeded &&
-        promptRef.current.length === 0 &&
-        composerImagesRef.current.length === 0
-      ) {
-        setOptimisticUserMessages((existing) => {
-          const removed = existing.filter((message) => message.id === messageIdForSend);
-          for (const message of removed) {
-            revokeUserMessagePreviewUrls(message);
-          }
-          const next = existing.filter((message) => message.id !== messageIdForSend);
-          return next.length === existing.length ? existing : next;
+            title,
+          });
+        }
+
+        if (isServerThread) {
+          await persistThreadSettingsForNextTurn({
+            threadId: threadIdForSend,
+            createdAt: submission.createdAt,
+            ...(submission.model ? { model: submission.model } : {}),
+            runtimeMode: submission.runtimeMode,
+            interactionMode: submission.interactionMode,
+          });
+        }
+
+        beginSendPhase("sending-turn");
+        const turnAttachments = await turnAttachmentsPromise;
+        await api.orchestration.dispatchCommand({
+          type: "thread.turn.start",
+          commandId: newCommandId(),
+          threadId: threadIdForSend,
+          message: {
+            messageId: submission.messageId,
+            role: "user",
+            text: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+            attachments: turnAttachments,
+          },
+          ...(submission.model ? { model: submission.model } : {}),
+          ...(submission.serviceTier !== undefined ? { serviceTier: submission.serviceTier } : {}),
+          ...(submission.modelOptions ? { modelOptions: submission.modelOptions } : {}),
+          ...(isFirstMessage && submission.provider ? { provider: submission.provider } : {}),
+          assistantDeliveryMode: submission.assistantDeliveryMode,
+          runtimeMode: submission.runtimeMode,
+          interactionMode: submission.interactionMode,
+          createdAt: submission.createdAt,
         });
-        promptRef.current = trimmed;
-        setPrompt(trimmed);
-        setComposerCursor(trimmed.length);
-        addComposerImagesToDraft(composerImagesSnapshot.map(cloneComposerImageForRetry));
-        setComposerTrigger(detectComposerTrigger(trimmed, trimmed.length));
+        turnStartSucceeded = true;
+        if (isFirstMessage) {
+          clearDraftThread(threadIdForSend);
+        }
+      })().catch(async (err: unknown) => {
+        if (createdServerThreadForLocalDraft && !turnStartSucceeded) {
+          await api.orchestration
+            .dispatchCommand({
+              type: "thread.delete",
+              commandId: newCommandId(),
+              threadId: threadIdForSend,
+            })
+            .catch(() => undefined);
+        }
+        if (
+          !turnStartSucceeded &&
+          promptRef.current.length === 0 &&
+          composerImagesRef.current.length === 0 &&
+          options?.restoreToComposerOnFailure !== false
+        ) {
+          setOptimisticUserMessages((existing) => {
+            const removed = existing.filter((message) => message.id === submission.messageId);
+            for (const message of removed) {
+              revokeUserMessagePreviewUrls(message);
+            }
+            const next = existing.filter((message) => message.id !== submission.messageId);
+            return next.length === existing.length ? existing : next;
+          });
+          restoreSubmissionToComposer(submission);
+        }
+        setThreadError(
+          threadIdForSend,
+          err instanceof Error ? err.message : "Failed to send message.",
+        );
+      });
+
+      sendInFlightRef.current = false;
+      if (!turnStartSucceeded) {
+        resetSendPhase();
       }
-      setThreadError(
-        threadIdForSend,
-        err instanceof Error ? err.message : "Failed to send message.",
+      return turnStartSucceeded;
+    },
+    [
+      activeProject,
+      activeThread,
+      beginSendPhase,
+      clearDraftThread,
+      createWorktreeMutation,
+      envMode,
+      forceStickToBottom,
+      isConnecting,
+      isLocalDraftThread,
+      isPendingThreadRun,
+      isSendBusy,
+      isServerThread,
+      phase,
+      persistThreadSettingsForNextTurn,
+      resetSendPhase,
+      restoreSubmissionToComposer,
+      runProjectScript,
+      setStoreThreadBranch,
+      setStoreThreadError,
+      setThreadError,
+    ],
+  );
+
+  const queueComposerSubmission = useCallback(
+    (priority: "front" | "back" = "back"): QueuedThreadSubmission | null => {
+      if (!activeThread) {
+        return null;
+      }
+      const submission = buildComposerSubmission();
+      if (!submission) {
+        return null;
+      }
+
+      if (priority === "front") {
+        prependQueuedSubmission(activeThread.id, submission);
+      } else {
+        enqueueQueuedSubmission(activeThread.id, submission);
+      }
+      setOptimisticUserMessages((existing) =>
+        existing.some((message) => message.id === submission.messageId)
+          ? existing
+          : [...existing, queuedSubmissionToOptimisticMessage(submission)],
       );
-    });
-    sendInFlightRef.current = false;
-    if (!turnStartSucceeded) {
-      resetSendPhase();
+      setThreadError(activeThread.id, null);
+      clearComposerInput(activeThread.id);
+      shouldAutoScrollRef.current = true;
+      forceStickToBottom();
+      return submission;
+    },
+    [
+      activeThread,
+      buildComposerSubmission,
+      clearComposerInput,
+      enqueueQueuedSubmission,
+      forceStickToBottom,
+      prependQueuedSubmission,
+      setThreadError,
+    ],
+  );
+
+  const onSend = async (e?: { preventDefault: () => void }) => {
+    e?.preventDefault();
+    if (activePendingProgress) {
+      onAdvanceActivePendingUserInput();
+      return;
     }
+    if (!activeThread) {
+      return;
+    }
+
+    const trimmed = prompt.trim();
+    if (showPlanFollowUpPrompt && activeProposedPlan) {
+      const followUp = resolvePlanFollowUpSubmission({
+        draftText: trimmed,
+        planMarkdown: activeProposedPlan.planMarkdown,
+      });
+      clearComposerInput(activeThread.id);
+      await onSubmitPlanFollowUp({
+        text: followUp.text,
+        interactionMode: followUp.interactionMode,
+      });
+      return;
+    }
+
+    const standaloneSlashCommand =
+      composerImages.length === 0 ? parseStandaloneComposerSlashCommand(trimmed) : null;
+    if (standaloneSlashCommand) {
+      await handleInteractionModeChange(standaloneSlashCommand);
+      clearComposerInput(activeThread.id);
+      return;
+    }
+
+    const submission = buildComposerSubmission();
+    if (!submission) {
+      return;
+    }
+
+    if (phase === "running" || isPendingThreadRun || isSendBusy || isConnecting) {
+      queueComposerSubmission();
+      return;
+    }
+
+    clearComposerInput(activeThread.id);
+    await executeQueuedSubmission(submission);
   };
 
-  const onInterrupt = async () => {
+  const onInterrupt = useCallback(async () => {
     const api = readNativeApi();
     if (!api || !activeThread) return;
-    await api.orchestration.dispatchCommand({
-      type: "thread.turn.interrupt",
-      commandId: newCommandId(),
-      threadId: activeThread.id,
-      createdAt: new Date().toISOString(),
-    });
-  };
+
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "thread.turn.interrupt",
+        commandId: newCommandId(),
+        threadId: activeThread.id,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      setThreadError(
+        activeThread.id,
+        err instanceof Error ? err.message : "Failed to interrupt the active turn.",
+      );
+      throw err;
+    }
+  }, [activeThread, setThreadError]);
+
+  const onInterruptAndSendNow = useCallback(async () => {
+    if (!activeThread || phase !== "running" || isInterruptingQueuedSend) {
+      return;
+    }
+    const queuedSubmission = queueComposerSubmission("front");
+    if (!queuedSubmission) {
+      return;
+    }
+
+    setInterruptingQueuedSend(activeThread.id, true);
+    try {
+      await onInterrupt();
+    } catch {
+      setInterruptingQueuedSend(activeThread.id, false);
+    }
+  }, [
+    activeThread,
+    isInterruptingQueuedSend,
+    onInterrupt,
+    phase,
+    queueComposerSubmission,
+    setInterruptingQueuedSend,
+  ]);
+
+  useEffect(() => {
+    if (
+      !activeThread ||
+      activePendingProgress ||
+      showPlanFollowUpPrompt ||
+      isComposerApprovalState ||
+      phase === "running" ||
+      isPendingThreadRun ||
+      isSendBusy ||
+      isConnecting ||
+      isRevertingCheckpoint ||
+      sendInFlightRef.current ||
+      queuedSubmissions.length === 0
+    ) {
+      return;
+    }
+
+    const nextSubmission = dequeueQueuedSubmission(activeThread.id);
+    if (!nextSubmission) {
+      return;
+    }
+
+    void executeQueuedSubmission(nextSubmission);
+  }, [
+    activePendingProgress,
+    activeThread,
+    dequeueQueuedSubmission,
+    executeQueuedSubmission,
+    isComposerApprovalState,
+    isConnecting,
+    isPendingThreadRun,
+    isRevertingCheckpoint,
+    isSendBusy,
+    phase,
+    queuedSubmissions.length,
+    showPlanFollowUpPrompt,
+  ]);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -3936,6 +4136,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
 
                 {/* Right side: send / stop button */}
                 <div className="flex shrink-0 items-center gap-2">
+                  {hasQueuedSubmissions ? (
+                    <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[11px]">
+                      {queuedSubmissionCount} queued
+                    </Badge>
+                  ) : null}
                   {activeContextWindow ? (
                     <ContextWindowIndicator contextWindow={activeContextWindow} />
                   ) : null}
@@ -3974,22 +4179,46 @@ export default function ChatView({ threadId }: ChatViewProps) {
                       </Button>
                     </div>
                   ) : phase === "running" ? (
-                    <button
-                      type="button"
-                      className="flex size-8 items-center justify-center rounded-full bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
-                      onClick={() => void onInterrupt()}
-                      aria-label="Stop generation"
-                    >
-                      <svg
-                        width="12"
-                        height="12"
-                        viewBox="0 0 12 12"
-                        fill="currentColor"
-                        aria-hidden="true"
+                    hasComposerSubmission ? (
+                      <>
+                        <Button
+                          type="submit"
+                          size="sm"
+                          variant="outline"
+                          className="rounded-full px-4"
+                          disabled={isInterruptingQueuedSend}
+                        >
+                          Queue
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="rounded-full bg-rose-500/90 px-4 text-white hover:bg-rose-500"
+                          disabled={isInterruptingQueuedSend}
+                          onClick={() => void onInterruptAndSendNow()}
+                        >
+                          {isInterruptingQueuedSend ? "Interrupting..." : "Interrupt & send"}
+                        </Button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="flex size-8 items-center justify-center rounded-full bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
+                        onClick={() => void onInterrupt()}
+                        disabled={isInterruptingQueuedSend}
+                        aria-label={isInterruptingQueuedSend ? "Interrupting generation" : "Stop generation"}
                       >
-                        <rect x="2" y="2" width="8" height="8" rx="1.5" />
-                      </svg>
-                    </button>
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 12 12"
+                          fill="currentColor"
+                          aria-hidden="true"
+                        >
+                          <rect x="2" y="2" width="8" height="8" rx="1.5" />
+                        </svg>
+                      </button>
+                    )
                   ) : pendingUserInputs.length === 0 ? (
                     showPlanFollowUpPrompt ? (
                       prompt.trim().length > 0 ? (
