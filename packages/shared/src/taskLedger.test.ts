@@ -5,11 +5,17 @@ import {
   LedgerCheckpointId,
   LedgerId,
   LedgerItemId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { applyLedgerEvent, type LedgerDomainEvent } from "./taskLedger.ts";
+import {
+  applyLedgerEvent,
+  decideLedgerAutoContinue,
+  LEDGER_AUTO_CONTINUE_CAP,
+  type LedgerDomainEvent,
+} from "./taskLedger.ts";
 
 const at = (seconds: number) => DateTime.makeUnsafe(Date.UTC(2026, 0, 1, 0, 0, seconds));
 const threadId = ThreadId.make("thread:ledger-reducer");
@@ -122,5 +128,151 @@ describe("applyLedgerEvent", () => {
     expect(
       applyLedgerEvent(created, { ...base, type: "ledger.created", payload: replacement }),
     ).toBe(replacement);
+  });
+});
+
+describe("decideLedgerAutoContinue", () => {
+  type Message = Parameters<typeof decideLedgerAutoContinue>[0]["messages"][number];
+  const userMessage: Message = { role: "user", createdBy: "user", creationSource: "web" };
+  const followUp = (round: number, statuses: ReadonlyArray<[string, LedgerItem["status"]]>) =>
+    ({
+      role: "user",
+      createdBy: "agent",
+      creationSource: "server",
+      notification: {
+        source: {
+          kind: "ledger_continue",
+          round,
+          items: statuses.map(([name, status]) => ({
+            id: LedgerItemId.make(`item:${name}`),
+            status,
+          })),
+        },
+        outcome: "updated",
+        summary: "open",
+      },
+    }) satisfies Message;
+  const withItems = (...items: ReadonlyArray<LedgerItem>): Ledger => ({ ...created, items });
+
+  it("is idle without open items", () => {
+    expect(decideLedgerAutoContinue({ ledger: undefined, messages: [] })).toEqual({
+      type: "idle",
+    });
+    expect(
+      decideLedgerAutoContinue({
+        ledger: withItems(item("a", { status: "closed" }), item("b", { status: "dropped" })),
+        messages: [],
+      }),
+    ).toEqual({ type: "idle" });
+    expect(
+      decideLedgerAutoContinue({
+        ledger: { ...withItems(item("a")), closedAt: at(1) },
+        messages: [],
+      }),
+    ).toEqual({ type: "idle" });
+  });
+
+  it("starts at round one and names only the open items", () => {
+    const decision = decideLedgerAutoContinue({
+      ledger: withItems(
+        item("a"),
+        item("b", { status: "in_progress" }),
+        item("c", { status: "closed" }),
+      ),
+      messages: [userMessage],
+    });
+    expect(decision).toMatchObject({ type: "continue", round: 1 });
+    expect(decision.type === "continue" ? decision.open.map((entry) => entry.id) : []).toEqual([
+      "item:a",
+      "item:b",
+    ]);
+  });
+
+  it("counts rounds since the user last spoke and ignores other server wakes", () => {
+    const serverWake: Message = { role: "user", createdBy: "user", creationSource: "server" };
+    const decision = decideLedgerAutoContinue({
+      ledger: withItems(item("a"), item("b", { status: "in_progress" })),
+      messages: [
+        userMessage,
+        followUp(1, [
+          ["a", "open"],
+          ["b", "open"],
+        ]),
+        serverWake,
+        followUp(2, [
+          ["a", "open"],
+          ["b", "open"],
+          ["c", "open"],
+        ]),
+      ],
+    });
+    expect(decision).toMatchObject({ type: "continue", round: 3 });
+  });
+
+  it("stops at the cap even while items keep moving", () => {
+    const rounds = Array.from({ length: LEDGER_AUTO_CONTINUE_CAP }, (_, index) =>
+      followUp(index + 1, [
+        ["a", "open"],
+        [`extra-${index}`, "open"],
+      ]),
+    );
+    expect(
+      decideLedgerAutoContinue({
+        ledger: withItems(item("a")),
+        messages: [userMessage, ...rounds],
+      }),
+    ).toEqual({ type: "stuck", reason: "cap", openIds: [LedgerItemId.make("item:a")] });
+  });
+
+  it("stops when no item changed since the previous follow-up", () => {
+    expect(
+      decideLedgerAutoContinue({
+        ledger: withItems(item("a"), item("b", { status: "closed" })),
+        messages: [
+          userMessage,
+          followUp(1, [
+            ["a", "open"],
+            ["b", "closed"],
+          ]),
+        ],
+      }),
+    ).toEqual({ type: "stuck", reason: "stalled", openIds: [LedgerItemId.make("item:a")] });
+    expect(
+      decideLedgerAutoContinue({
+        ledger: withItems(item("a", { status: "in_progress" }), item("b", { status: "closed" })),
+        messages: [
+          userMessage,
+          followUp(1, [
+            ["a", "open"],
+            ["b", "closed"],
+          ]),
+        ],
+      }).type,
+    ).toBe("continue");
+  });
+
+  it("stays quiet after the user cancels a follow-up, until they speak again", () => {
+    const cancelled = { ...followUp(1, [["a", "open"]]), runId: RunId.make("run:cancelled") };
+    const cancelledRunIds = new Set(["run:cancelled"]);
+    const ledger = withItems(item("a", { status: "in_progress" }));
+    expect(
+      decideLedgerAutoContinue({ ledger, messages: [userMessage, cancelled], cancelledRunIds }),
+    ).toEqual({ type: "idle" });
+    expect(
+      decideLedgerAutoContinue({
+        ledger,
+        messages: [cancelled, userMessage],
+        cancelledRunIds,
+      }).type,
+    ).toBe("continue");
+  });
+
+  it("starts over after a user message", () => {
+    expect(
+      decideLedgerAutoContinue({
+        ledger: withItems(item("a")),
+        messages: [followUp(1, [["a", "open"]]), userMessage],
+      }),
+    ).toMatchObject({ type: "continue", round: 1 });
   });
 });
