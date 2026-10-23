@@ -127,6 +127,8 @@ export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly regenerateTitle?: boolean;
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null;
   readonly expectedEmpty?: boolean;
+  /** Sets the thread's loadout, or clears it with null so it runs solo again. */
+  readonly loadout?: import("@t3tools/contracts").ThreadLoadout | null;
 }
 
 /** Pin free text, or a message whose text the server copies at pin time. */
@@ -615,11 +617,13 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       input.worktreePath !== undefined ||
       input.regenerateTitle !== undefined ||
       input.linkedPullRequest !== undefined ||
-      input.limitRecovery !== undefined
+      input.limitRecovery !== undefined ||
+      input.loadout !== undefined
     ) {
       result = yield* dispatch({
         type: "thread.metadata.update",
         ...(input.limitRecovery === undefined ? {} : { limitRecovery: input.limitRecovery }),
+        ...(input.loadout === undefined ? {} : { loadout: input.loadout }),
         commandId,
         threadId: input.threadId,
         ...(input.title === undefined ? {} : { title: input.title }),

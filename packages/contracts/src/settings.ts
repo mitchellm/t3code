@@ -29,6 +29,7 @@ import {
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
   ProviderOptionSelections,
 } from "./model.ts";
+import { DEFAULT_LOADOUTS, Loadout } from "./loadout.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { ProjectScript, type ProjectMutation } from "./project.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./providerPolicy.ts";
@@ -1036,6 +1037,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleKeepPullRequests",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
+  "loadouts",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1081,6 +1083,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  loadouts: Schema.optionalKey(Schema.Array(Loadout)),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1316,6 +1319,10 @@ export const ServerSettings = Schema.Struct({
    * Providers re-deliver it outside the summarized transcript.
    */
   pinnedRules: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Replaced whole when edited; a thread whose loadout is not in the list runs solo. */
+  loadouts: Schema.Array(Loadout).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LOADOUTS)),
+  ),
   branchNamingMode: BranchNamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("static" as const)),
   ),
@@ -1652,6 +1659,7 @@ export const ServerSettingsPatch = Schema.Struct({
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   threadTitleInstructions: Schema.optionalKey(TrimmedString),
   pinnedRules: Schema.optionalKey(TrimmedString),
+  loadouts: Schema.optionalKey(Schema.Array(Loadout)),
   branchNamingMode: Schema.optionalKey(BranchNamingMode),
   branchNamePrefix: Schema.optionalKey(TrimmedString),
   branchNameInstructions: Schema.optionalKey(TrimmedString),

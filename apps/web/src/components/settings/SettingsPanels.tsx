@@ -55,6 +55,7 @@ import { useSettingsScope } from "./SettingsScopeContext";
 import { scopedIdleCompaction } from "./scopedSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { PinnedRulesSettings } from "./PinnedRulesSettings";
+import { LoadoutSettings } from "./LoadoutSettings";
 import { ThreadTitleInstructionsSettings } from "./ThreadTitleInstructionsSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
@@ -543,6 +544,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ? ["Thread title instructions"]
       : []),
     ...(settings.pinnedRules !== DEFAULT_UNIFIED_SETTINGS.pinnedRules ? ["Pinned rules"] : []),
+    ...(JSON.stringify(settings.loadouts) !== JSON.stringify(DEFAULT_UNIFIED_SETTINGS.loadouts)
+      ? ["Loadouts"]
+      : []),
     ...getChangedBrowserSettingLabels(settings),
     ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
       ? ["Agent browser access"]
@@ -661,6 +665,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
       threadTitleInstructions: DEFAULT_UNIFIED_SETTINGS.threadTitleInstructions,
       pinnedRules: DEFAULT_UNIFIED_SETTINGS.pinnedRules,
+      loadouts: [...DEFAULT_UNIFIED_SETTINGS.loadouts],
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
@@ -1942,6 +1947,7 @@ export function GeneralSettingsPanel() {
           }
         />
         <ThreadTitleInstructionsSettings />
+        <LoadoutSettings />
       </SettingsSection>
 
       <SettingsSection title="Pinned rules">
