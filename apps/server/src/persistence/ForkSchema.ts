@@ -1,7 +1,14 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-export default Effect.gen(function* () {
+/**
+ * Fork: tables that only this fork has. They live outside the numbered migration list because the
+ * migrator keys by number and upstream will eventually take the same number for a different
+ * migration, which fails startup with BadState. Everything here is idempotent and runs right after
+ * upstream's migrations. A table that is upstreamed gets a real migration number at that point.
+ * Append new fork tables to this function.
+ */
+export const ensureForkSchema = Effect.fn("ensureForkSchema")(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   // No backfill: ledger events did not exist before this table, so replay fills it.
