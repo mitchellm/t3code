@@ -604,6 +604,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["survive context compaction instructions always remember rules claude codex"],
   },
   {
+    id: "loadouts",
+    title: "Loadouts",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["agent structure planner worker judge explorer solo model roles delegate"],
+  },
+  {
     id: "app-version",
     title: "Version",
     to: "/settings/general",

@@ -62,10 +62,19 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadId,
+  type ThreadLoadout,
+  resolveProjectProviderInstanceEnabled,
   type TurnItemId,
 } from "@t3tools/contracts";
+import {
+  decideThreadLoadout,
+  loadoutHasJudge,
+  resolveLoadout,
+  withSolo,
+} from "@t3tools/shared/loadouts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { recordThreadOpen } from "@t3tools/shared/paletteSearch";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   derivePendingBackgroundWork,
   pendingBackgroundTurnItems,
@@ -2483,6 +2492,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
+    let parentLineage: {
+      readonly parentThreadId: ThreadId;
+      readonly rootThreadId: ThreadId;
+    } | null = null;
+    if (command.lineage !== undefined) {
+      // The server rewrites a client's provenance to `user`, so this gate keeps clients from
+      // hiding threads as subagents of arbitrary parents.
+      if (command.createdBy !== "system" || command.creationSource !== "server") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Only the server can create a thread with a parent.",
+        });
+      }
+      const parent = yield* projectionStore.getThread(command.lineage.parentThreadId).pipe(
+        Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+      if (parent === null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "The parent thread was not found.",
+        });
+      }
+      parentLineage = {
+        parentThreadId: command.lineage.parentThreadId,
+        rootThreadId: parent.lineage.rootThreadId,
+      };
+    }
+
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
@@ -2499,11 +2541,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       worktreePath: command.worktreePath,
       activeProviderThreadId: null,
       pullRequests: [],
-      lineage: {
-        parentThreadId: null,
-        relationshipToParent: null,
-        rootThreadId: command.threadId,
-      },
+      lineage:
+        parentLineage === null
+          ? { parentThreadId: null, relationshipToParent: null, rootThreadId: command.threadId }
+          : { ...parentLineage, relationshipToParent: "subagent" },
       ...(command.launchedByThreadId === undefined
         ? {}
         : { launchedByThreadId: command.launchedByThreadId }),
@@ -3096,6 +3137,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       snoozedUntil = parsedSnoozedUntil.value;
     }
+    let loadoutPatch: { readonly loadout: ThreadLoadout | null } | undefined;
+    if (command.type === "thread.metadata.update" && command.loadout !== undefined) {
+      const requested = command.loadout;
+      if (
+        requested !== null &&
+        !withSolo(
+          resolveProjectSettings(
+            yield* serverSettings.getSettings.pipe(Effect.orDie),
+            thread.projectId,
+          ).settings.loadouts,
+        ).some(({ id }) => id === requested.id)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Unknown loadout ${requested.id} for this thread's project.`,
+        });
+      }
+      const decision = decideThreadLoadout(thread.loadout, requested);
+      if (decision._tag === "user_choice_stands") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} has a loadout the user chose; an agent cannot replace it.`,
+        });
+      }
+      if (decision._tag === "set") loadoutPatch = { loadout: decision.loadout };
+    }
     let markUnreadVisitedAt: DateTime.Utc | null = null;
     if (command.type === "thread.mark-unread") {
       const projection = yield* loadProjectionForCommand(command, ["runs"]);
@@ -3334,6 +3403,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : command.regenerateTitle === false || command.title !== undefined
                 ? { titleRegeneration: null }
                 : {}),
+            ...loadoutPatch,
             updatedAt: now,
           };
         }
@@ -7115,6 +7185,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         title: command.title ?? null,
         model: command.modelSelection.model,
         ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
+        ...(command.role === undefined ? {} : { role: command.role }),
         status: "running",
         result: null,
         startedAt: now,
@@ -11455,7 +11526,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     const now = yield* DateTime.now;
-    const planned = planLedgerCommand({ command, ledger, now });
+    // Decided here, from settings the thread's agent cannot edit, so a new ledger's judge gate
+    // cannot be opted out of by the command that creates it.
+    // Stamped only when the judge can actually run (its instance has a V2 adapter and is enabled
+    // for the project): a gate nothing can satisfy would leave items closable only by dropping
+    // them, and the agent could not tell why. Without a judge the ledger is simply ungated.
+    const requiresJudge =
+      command.type === "ledger.create"
+        ? yield* Effect.gen(function* () {
+            const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+            const loadout = resolveLoadout(
+              resolveProjectSettings(settings, thread.projectId).settings.loadouts,
+              thread.loadout?.id,
+            );
+            const judge = loadout.roles.judge;
+            if (!loadoutHasJudge(loadout) || judge === undefined) return false;
+            const adapterIds = yield* providerAdapters.list();
+            return (
+              adapterIds.includes(judge.instanceId) &&
+              resolveProjectProviderInstanceEnabled(settings, thread.projectId, judge.instanceId)
+            );
+          })
+        : undefined;
+    const planned = planLedgerCommand({
+      command,
+      ledger,
+      now,
+      ...(requiresJudge === undefined ? {} : { requiresJudge }),
+    });
     if (Result.isFailure(planned)) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,

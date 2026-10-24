@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  type ThreadLoadout,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -40,26 +41,35 @@ const adapter = {
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
   openSession: () => Effect.die("Ledger commands never reach a provider"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
+const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
+const claudeAdapter = {
+  ...adapter,
+  instanceId: claudeInstanceId,
+  driver: ProviderDriverKind.make("claudeAgent"),
+} as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
-const layerTest = Layer.mergeAll(
-  layerDatabase,
-  ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
-  EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
-  ProjectionMaintenance.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        layerDatabase,
-        EventStore.layer.pipe(Layer.provide(layerDatabase)),
-        ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+const layerWith = (adapters: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>) =>
+  Layer.mergeAll(
+    layerDatabase,
+    ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+    EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
+    ProjectionMaintenance.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          layerDatabase,
+          EventStore.layer.pipe(Layer.provide(layerDatabase)),
+          ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+        ),
       ),
     ),
-  ),
-  ProviderReplayHarness.layerWithRegistry(
-    { name: "task-ledger" },
-    ProviderAdapterRegistry.layerFromAdapters([adapter]),
-    { databaseLayer: layerDatabase, runEffectWorker: false },
-  ),
-);
+    ProviderReplayHarness.layerWithRegistry(
+      { name: "task-ledger" },
+      ProviderAdapterRegistry.layerFromAdapters(adapters),
+      { databaseLayer: layerDatabase, runEffectWorker: false },
+    ),
+  );
+const layerTest = layerWith([adapter, claudeAdapter]);
+const layerWithoutJudgeInstance = layerWith([adapter]);
 
 const ledgerId = LedgerId.make("ledger:main");
 const itemId = (name: string) => LedgerItemId.make(`item:${name}`);
@@ -713,6 +723,137 @@ it.effect("keeps a cheap open item count in step with the ledger, through a rebu
     assert.equal(yield* count(), 2);
     assert.isTrue((yield* maintenance.rebuild).valid);
     assert.equal(yield* count(), 2);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+const setLoadout = (threadId: ThreadId, loadout: ThreadLoadout | null) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    return yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: nextCommandId(),
+      threadId,
+      loadout,
+    });
+  });
+
+const loadoutOf = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    return (yield* orchestrator.getThreadProjection(threadId)).thread.loadout ?? null;
+  });
+
+const judged: ThreadLoadout = {
+  id: "planner-workers-judge",
+  reason: "four independent modules",
+  setBy: "agent",
+};
+
+it.effect("a user's loadout choice outranks an agent proposal, which can fill an empty slot", () =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread("loadout-precedence");
+    assert.isNull(yield* loadoutOf(threadId));
+
+    yield* setLoadout(threadId, judged);
+    assert.deepEqual(yield* loadoutOf(threadId), judged);
+
+    const user: ThreadLoadout = { id: "read-only-sweep", reason: null, setBy: "user" };
+    yield* setLoadout(threadId, user);
+    assert.deepEqual(yield* loadoutOf(threadId), user);
+
+    // The agent proposes again; the user's choice stands and the rejection says why.
+    const exit = yield* Effect.exit(setLoadout(threadId, judged));
+    assert.isTrue(Exit.isFailure(exit));
+    assert.include(
+      String(
+        (Cause.squash((exit as Exit.Failure<unknown, unknown>).cause) as { cause?: unknown }).cause,
+      ),
+      "chose",
+    );
+    assert.deepEqual(yield* loadoutOf(threadId), user);
+
+    // Only the user can hand the slot back.
+    yield* setLoadout(threadId, null);
+    assert.isNull(yield* loadoutOf(threadId));
+    yield* setLoadout(threadId, judged);
+    assert.deepEqual(yield* loadoutOf(threadId), judged);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects a loadout the project's settings do not list", () =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread("loadout-unknown");
+    const exit = yield* Effect.exit(
+      setLoadout(threadId, { id: "no-such-loadout", reason: null, setBy: "user" }),
+    );
+    assert.isTrue(Exit.isFailure(exit));
+    assert.include(
+      String(
+        (Cause.squash((exit as Exit.Failure<unknown, unknown>).cause) as { cause?: unknown }).cause,
+      ),
+      "Unknown loadout",
+    );
+    assert.isNull(yield* loadoutOf(threadId));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("does not stamp a gate no judge can satisfy", () =>
+  Effect.gen(function* () {
+    // The loadout names a judge on claudeAgent, but this environment has no such instance.
+    const threadId = yield* createThread("judge-unresolvable");
+    yield* setLoadout(threadId, judged);
+    yield* createLedger(threadId, { items: ["a"] });
+    assert.notOk((yield* ledgerOf(threadId))?.requiresJudge);
+    yield* updateItem(threadId, "a", { status: "closed", evidence: "tests pass" });
+    assert.equal(itemOf(yield* ledgerOf(threadId), "a")?.status, "closed");
+  }).pipe(Effect.provide(layerWithoutJudgeInstance)),
+);
+
+it.effect("round trips the precedence rule: user sets, user clears, agent proposes", () =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread("loadout-round-trip");
+    const user: ThreadLoadout = { id: "solo", reason: null, setBy: "user" };
+    yield* setLoadout(threadId, user);
+    assert.isTrue(Exit.isFailure(yield* Effect.exit(setLoadout(threadId, judged))));
+    yield* setLoadout(threadId, null);
+    assert.isNull(yield* loadoutOf(threadId));
+    yield* setLoadout(threadId, judged);
+    assert.deepEqual(yield* loadoutOf(threadId), judged);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("fixes requiresJudge when the ledger is created and gates closing on a verdict", () =>
+  Effect.gen(function* () {
+    // Solo: no judge role, so an item closes on evidence alone.
+    const solo = yield* createThread("judge-solo");
+    yield* createLedger(solo, { items: ["a"] });
+    assert.notOk((yield* ledgerOf(solo))?.requiresJudge);
+    yield* updateItem(solo, "a", { status: "closed", evidence: "tests pass" });
+    assert.equal(itemOf(yield* ledgerOf(solo), "a")?.status, "closed");
+
+    // A loadout with a judge role: the ledger is born gated.
+    const org = yield* createThread("judge-org");
+    yield* setLoadout(org, judged);
+    yield* createLedger(org, { items: ["a"] });
+    assert.isTrue((yield* ledgerOf(org))?.requiresJudge);
+    yield* assertRejected(
+      org,
+      updateItem(org, "a", { status: "closed", evidence: "tests pass" }),
+      "passing judge verdict",
+    );
+    yield* updateItem(org, "a", { status: "in_progress", evidence: "tests pass" });
+    yield* recordVerdict(org, "a", "fail");
+    yield* assertRejected(org, updateItem(org, "a", { status: "closed" }), "passing judge verdict");
+    yield* recordVerdict(org, "a", "pass");
+    yield* updateItem(org, "a", { status: "closed" });
+    assert.equal(itemOf(yield* ledgerOf(org), "a")?.status, "closed");
+
+    // Switching to solo later does not un-gate a ledger that already exists.
+    const switched = yield* createThread("judge-switched");
+    yield* setLoadout(switched, judged);
+    yield* createLedger(switched, { items: ["a"] });
+    yield* setLoadout(switched, { id: "solo", reason: null, setBy: "user" });
+    assert.isTrue((yield* ledgerOf(switched))?.requiresJudge);
   }).pipe(Effect.provide(layerTest)),
 );
 

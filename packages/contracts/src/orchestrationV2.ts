@@ -61,6 +61,7 @@ import {
   LedgerVerdictRecordCommand,
   LedgerJson,
 } from "./ledger.ts";
+import { ThreadLoadout } from "./loadout.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
   ThreadLinkedPullRequest,
@@ -495,6 +496,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   /** Absent on threads and servers from before rule pins; read as empty. */
   rulePins: Schema.optional(Schema.Array(ThreadRulePin)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** Absent means solo: every thread starts without delegated roles. */
+  loadout: Schema.optional(Schema.NullOr(ThreadLoadout)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
@@ -795,6 +798,11 @@ export const OrchestrationV2Subagent = Schema.Struct({
   model: Schema.NullOr(Schema.String),
   modelSelection: Schema.optional(ModelSelection),
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  /**
+   * The delegate_task role the task was started under. The prompt only carries it as prose and
+   * the judge's carries none, so timing reads it from here. Absent when the delegation named none.
+   */
+  role: Schema.optional(TrimmedNonEmptyString),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   status: Schema.Literals([
     "idle",
@@ -1999,6 +2007,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  loadout: Schema.optional(Schema.NullOr(ThreadLoadout)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2753,6 +2762,17 @@ export const OrchestrationV2Command = Schema.Union([
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
     launchedByThreadId: Schema.optional(ThreadId),
+    /**
+     * Makes the new thread a hidden subagent child of an existing one. Only a server-created
+     * thread (`createdBy: "system"`, `creationSource: "server"`) may set it; the orchestrator
+     * rejects it from any client, whose provenance the server rewrites to `user`.
+     */
+    lineage: Schema.optional(
+      Schema.Struct({
+        parentThreadId: ThreadId,
+        relationshipToParent: Schema.Literal("subagent"),
+      }),
+    ),
     importedNativeThread: Schema.optional(
       Schema.Struct({
         ref: Schema.Struct({
@@ -2874,6 +2894,11 @@ export const OrchestrationV2Command = Schema.Union([
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
     /** Link (object) or unlink (null) a pull request (#8160); absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+    /**
+     * Set (object) or clear (null) the thread's loadout. A clear is always the user's; an agent
+     * proposal (`setBy: "agent"`) is rejected while the user's explicit choice stands.
+     */
+    loadout: Schema.optional(Schema.NullOr(ThreadLoadout)),
   }),
   // Pin free text, or a message by `sourceMessageId`, whose text the server
   // copies at pin time. The two are exclusive so the pinned text is never
@@ -3176,6 +3201,7 @@ export const OrchestrationV2Command = Schema.Union([
     // Omitted behaves as "settled_only" (no wake while the parent has a live
     // run); producers that want fire-and-forget wakes must set "always".
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    role: Schema.optional(TrimmedNonEmptyString),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
@@ -3294,6 +3320,10 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   searchThreads: "orchestration.searchThreads",
   getThreadPreviews: "orchestration.getThreadPreviews",
+  getTaskTiming: "orchestration.getTaskTiming",
+  getTaskRetro: "orchestration.getTaskRetro",
+  runTaskRetro: "orchestration.runTaskRetro",
+  resolveTaskRetro: "orchestration.resolveTaskRetro",
   searchThread: "orchestration.searchThread",
   searchThreadStream: "orchestration.searchThreadStream",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",

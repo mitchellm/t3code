@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { ensureForkSchema } from "./ForkSchema.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 
 const v2Migrations = migrationManifest.filter(([id]) => id >= 55);
@@ -120,6 +121,26 @@ describe("runMigrations", () => {
       `;
 
       assert.deepStrictEqual(yield* runMigrations(), []);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("creates fork tables outside the numbered list and tolerates repeat runs", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const forkTables = sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('orchestration_v2_projection_ledgers', 'thread_task_retros')
+        UNION ALL
+        SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_thread_task_retros_project'
+      `;
+      yield* runMigrations();
+      assert.strictEqual((yield* forkTables).length, 3);
+      assert.deepStrictEqual(yield* history, migrationManifest);
+
+      yield* ensureForkSchema();
+      yield* ensureForkSchema();
+      yield* runMigrations();
+      assert.strictEqual((yield* forkTables).length, 3);
+      assert.deepStrictEqual(yield* history, migrationManifest);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
