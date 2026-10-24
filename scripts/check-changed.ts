@@ -20,6 +20,8 @@ import * as NodePath from "node:path";
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 
 const root = NodePath.resolve(import.meta.dirname, "..");
+// Windows cannot spawn the bare `vp` (a .cmd shim) without a shell, so run its bin with this Node.
+const vpBin = NodePath.join(root, "node_modules", "vite-plus", "bin", "vp");
 const CODE = /\.[cm]?[jt]sx?$/;
 
 // quotePath=false keeps non-ASCII paths as real paths instead of quoted escapes.
@@ -206,8 +208,8 @@ const checkPatches = (): boolean => {
       if (NodeFS.existsSync(NodePath.join(root, extra))) copy(extra);
     }
     const { status, stdout, stderr, error } = NodeChildProcess.spawnSync(
-      "vp",
-      ["install", "--lockfile-only", "--ignore-scripts"],
+      process.execPath,
+      [vpBin, "install", "--lockfile-only", "--ignore-scripts"],
       { cwd: temp, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
     );
     if (status === 0) return true;
@@ -285,7 +287,10 @@ const results = await Promise.all(
         // takes about a second, so the commands start right after it.
         if ("run" in step) return finish(step.run());
         const output: Array<Buffer> = [];
-        const child = NodeChildProcess.spawn("vp", step.args, { cwd: root, env });
+        const child = NodeChildProcess.spawn(process.execPath, [vpBin, ...step.args], {
+          cwd: root,
+          env,
+        });
         child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
         child.stderr.on("data", (chunk: Buffer) => output.push(chunk));
         // A failed spawn emits "error", then "close" with a nonzero code.
