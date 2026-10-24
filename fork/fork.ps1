@@ -60,9 +60,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$ReleaseRepo = 'chickenputty/t3code'
 # The two overrides let fork/test-restart.ps1 run the install logic against a stand-in app.
 $StateDir = $env:T3CODE_FORK_STATE_DIR ?? (Join-Path $env:LOCALAPPDATA 't3code-fork')
+# Someone running their own fork of this fork sets config.json "releaseRepo" (where builds are
+# published and the app updates from) and "remote" (the git remote that carries their main).
+$ForkConfig = $null
+$ForkConfigPath = Join-Path $StateDir 'config.json'
+if (Test-Path $ForkConfigPath) { $ForkConfig = Get-Content $ForkConfigPath -Raw | ConvertFrom-Json }
+$ReleaseRepo = $ForkConfig.releaseRepo ?? 'chickenputty/t3code'
+$ForkRemote = $ForkConfig.remote ?? 'origin'
 $BuildDir = Join-Path $StateDir 'build'
 $ReleaseDir = Join-Path $StateDir 'release'
 $LogDir = Join-Path $StateDir 'logs'
@@ -239,7 +245,7 @@ function Move-LocalBranch([string]$Repo, [string]$Name, [string]$From, [string]$
   # Fast-forward the checkout that has the branch out. Git refuses rather than touch local edits.
   $r = Invoke-Git $wt merge --ff-only $To
   if ($r.Code) {
-    return "could not fast-forward $Name in $wt ($($r.Out -split "`n" | Select-Object -Last 1)); run 'git merge --ff-only origin/$Name' there"
+    return "could not fast-forward $Name in $wt ($($r.Out -split "`n" | Select-Object -Last 1)); run 'git merge --ff-only $ForkRemote/$Name' there"
   }
   "fast-forwarded $Name in $wt to $(Short $To)"
 }
@@ -288,17 +294,17 @@ function Invoke-Sync {
 
   $state = Read-State
   try {
-    Log "fetching upstream and origin ($repo)"
+    Log "fetching upstream and $ForkRemote ($repo)"
     GitOut $repo fetch --quiet upstream '+refs/heads/main:refs/remotes/upstream/main' | Out-Null
-    GitOut $repo fetch --quiet origin | Out-Null
+    GitOut $repo fetch --quiet $ForkRemote | Out-Null
 
     $local = GitOut $repo rev-parse "refs/heads/$Branch"
-    $remote = (Invoke-Git $repo rev-parse --verify --quiet "refs/remotes/origin/$Branch").Out
+    $remote = (Invoke-Git $repo rev-parse --verify --quiet "refs/remotes/$ForkRemote/$Branch").Out
     $base = $local
     if ($remote -and $remote -ne $local) {
       if (Test-Ancestor $repo $local $remote) { $base = $remote }
       elseif (-not (Test-Ancestor $repo $remote $local)) {
-        throw "$Branch and origin/$Branch have diverged. Merge origin/$Branch into $Branch by hand, then sync again."
+        throw "$Branch and $ForkRemote/$Branch have diverged. Merge $ForkRemote/$Branch into $Branch by hand, then sync again."
       }
     }
     $up = GitOut $repo rev-parse $UpstreamRef
@@ -374,8 +380,8 @@ function Invoke-Sync {
     if ((GitOut $repo rev-parse "refs/heads/$Branch") -ne $local) {
       throw "$Branch moved during the build; the next sync builds the new commits."
     }
-    Log "pushing $(Short $candidate) to origin/$Branch"
-    GitOut $repo push --quiet origin "$($candidate):refs/heads/$Branch" | Out-Null
+    Log "pushing $(Short $candidate) to $ForkRemote/$Branch"
+    GitOut $repo push --quiet $ForkRemote "$($candidate):refs/heads/$Branch" | Out-Null
 
     $patches = (Invoke-Git $repo log --no-merges --format='- %s (%h)' "$up..$candidate").Out
     $body = @(
@@ -436,7 +442,7 @@ function Show-Status {
     $repoName = if ($feed -match 'repo:\s*(\S+)') { $Matches[1] } else { '?' }
     $main = Get-AppMain | Select-Object -First 1
     $running = $main ? "running since $($main.CreationDate.ToString('yyyy-MM-dd HH:mm'))" : 'not running'
-    "Installed   $build ($running), updates from $owner/$repoName$(if ($owner -ne $ReleaseRepo.Split('/')[0]) { ' (the official app; run fork.ps1 install to switch)' })"
+    "Installed   $build ($running), updates from $owner/$repoName$(if ($owner -ne $ReleaseRepo.Split('/')[0]) { " (not $ReleaseRepo; run fork.ps1 install to switch)" })"
     $dl = Get-DownloadedUpdate
     $newest = $state.published ? $state.published.version : $null
     if ($dl -and (Compare-Build $dl $build) -gt 0) { "App update  $dl downloaded; T3 installs it when it quits, then reopens" }
