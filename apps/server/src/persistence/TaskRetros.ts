@@ -1,3 +1,4 @@
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -72,7 +73,10 @@ const make = Effect.gen(function* () {
 
   return TaskRetroRepository.of({
     get: Effect.fn("TaskRetroRepository.get")(function* (threadId) {
-      const row = yield* findRetro({ threadId }).pipe(Effect.mapError(mapError("getTaskRetro")));
+      const row = yield* findRetro({ threadId }).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError(mapError("getTaskRetro")),
+      );
       return Option.map(row, ({ retro }) => retro);
     }),
     put: Effect.fn("TaskRetroRepository.put")(function* (retro) {
@@ -92,7 +96,7 @@ const make = Effect.gen(function* () {
       const rows = yield* listRetros({
         projectId: filter.projectId ?? null,
         since: filter.since ?? null,
-      }).pipe(Effect.mapError(mapError("listTaskRetros")));
+      }).pipe(NodeSqliteClient.readOnly, Effect.mapError(mapError("listTaskRetros")));
       return rows.map(({ retro }) => retro);
     }),
   });

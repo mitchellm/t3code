@@ -6731,7 +6731,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThread: readOnReader(getThread),
       getSettlementCandidates: readOnReader(getSettlementCandidates),
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
-      getOpenLedgerItemCount,
+      getOpenLedgerItemCount: readOnReader(getOpenLedgerItemCount),
       getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),
       getThreadProjection,
       getTurnStartContext: readOnReader(getTurnStartContext),
@@ -6749,7 +6749,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       hasUnpairedRunInterruptRequest: readOnReader(hasUnpairedRunInterruptRequest),
       isNodeStored: readOnReader(isNodeStored),
       getMessageCount: readOnReader(getMessageCount),
-      getUserMessageCreationSources,
+      getUserMessageCreationSources: readOnReader(getUserMessageCreationSources),
       getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),
       getTurnItem: readOnReader(getTurnItem),
       getThreadRecords: (threadId, fields, filter) =>
