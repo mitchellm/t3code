@@ -7,11 +7,13 @@ import {
   MessageId,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
+  ProviderThreadId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -632,6 +634,74 @@ it.effect.each(["provider-interrupt", "agent-interrupt"] as const)(
       const followUps = yield* stopFollowUp(stop, stop);
       assert.deepEqual(followUps.map(roundOf), [1, 2]);
     }).pipe(Effect.provide(layerTest)),
+);
+
+/** Sets the thread's native `/goal` the way the provider reports it, on its active provider thread. */
+const setGoal = (threadId: ThreadId, goal: OrchestrationV2ProviderThread["goal"]) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(nextId("event:goal")),
+          type: "provider-thread.updated",
+          threadId,
+          driver: adapter.driver,
+          occurredAt: now,
+          payload: {
+            id: ProviderThreadId.make(`provider-thread:${threadId}`),
+            driver: adapter.driver,
+            providerInstanceId: instanceId,
+            providerSessionId: null,
+            appThreadId: threadId,
+            ownerNodeId: null,
+            nativeThreadRef: null,
+            nativeConversationHeadRef: null,
+            status: "idle",
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            pendingBackgroundTasks: [],
+            contextUsage: null,
+            nativeMetadata: null,
+            goal,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      ],
+    });
+  });
+
+it.effect("stands aside while the thread has a native goal", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("goal-active");
+    yield* sendUserMessage(threadId);
+    yield* setGoal(threadId, { objective: "Ship it", status: "active" });
+    yield* completeLatest(threadId);
+    assert.equal((yield* autoContinues(threadId)).length, 0);
+    assert.isFalse(yield* isMarkedStuck(threadId));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["complete", "cleared"] as const)("continues as before once the goal is %s", (end) =>
+  Effect.gen(function* () {
+    const threadId = yield* setup(`goal-${end}`);
+    yield* sendUserMessage(threadId);
+    yield* setGoal(threadId, { objective: "Ship it", status: "active" });
+    yield* completeLatest(threadId);
+    assert.equal((yield* autoContinues(threadId)).length, 0);
+
+    yield* serverWake(threadId);
+    yield* setGoal(
+      threadId,
+      end === "complete" ? { objective: "Ship it", status: "complete" } : null,
+    );
+    yield* completeLatest(threadId);
+    assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), [1]);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("truncates a long item title in the stop notice", () =>

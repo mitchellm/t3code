@@ -280,7 +280,7 @@ For a task with several parts, the agent can keep a task ledger: a checklist for
 
 Watch progress in two places: the **Overview** tab and the thread details panel. Both list every item as open, in progress, done or dropped, with its evidence, the reason for any dropped item, and a judge's verdict when there is one. While items remain open, a **Ledger** count such as `3/8` also shows at the right of the thread header.
 
-If a turn ends while items are still open, T3 Code continues for you. It sends a follow-up marked as automatic in the thread, so it is not mistaken for something you typed. It continues up to five times in a row, and stops sooner if a round makes no progress. When it stops, the thread says why and is marked unread.
+If a turn ends while items are still open, T3 Code continues for you. It sends a follow-up marked as automatic in the thread, so it is not mistaken for something you typed. It continues up to five times in a row, and stops sooner if a round makes no progress. When it stops, the thread says why and is marked unread. While a `/goal` is set and not yet met, it stands aside and lets the goal keep the agent going.
 
 To stop it earlier, stop the running turn, remove the queued follow-up before it starts, or ask the agent to close or drop the remaining items. Sending your own message starts the count again.
 

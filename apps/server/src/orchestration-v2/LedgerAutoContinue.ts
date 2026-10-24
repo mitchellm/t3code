@@ -97,10 +97,10 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   const { orchestrator } = deps;
   const records = yield* orchestrator.getThreadRecords(
     input.threadId,
-    ["runs", "runtimeRequests", "ledger", "turnItems"],
+    ["runs", "runtimeRequests", "ledger", "turnItems", "providerThreads"],
     { turnItemTypes: ["run_interrupt_request"] },
   );
-  const { thread, runs, runtimeRequests, ledger, turnItems } = records;
+  const { thread, runs, runtimeRequests, ledger, turnItems, providerThreads } = records;
   const run = runs.find((candidate) => candidate.id === input.runId);
   // Failed runs never reach checkpoint capture and a usage limit is a failure, so only a normal
   // completion gets here; a stopped or cancelled run must not be restarted behind the user.
@@ -117,6 +117,9 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   if (runs.some((candidate) => NON_TERMINAL_RUN_STATUSES.has(candidate.status))) return;
   if (thread.archivedAt !== null || thread.deletedAt != null) return;
   if (thread.settledOverride === "settled") return;
+  // A native `/goal` already keeps the provider going across turns; a second loop would fight it.
+  const goal = providerThreads.find(({ id }) => id === thread.activeProviderThreadId)?.goal;
+  if (goal != null && goal.status !== "complete") return;
   // Agents and the server stop runs too; only a person's Stop says the user wants the work off.
   const userStoppedRunIds = new Set(
     turnItems.flatMap((item) =>
