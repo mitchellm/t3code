@@ -52,6 +52,7 @@ import {
   type AcpRegistrySetProviderInput,
   OrchestrationGetFullThreadDiffError,
   OrchestrationSearchThreadsError,
+  OrchestrationGetTaskTimingError,
   OrchestrationGetThreadPreviewsError,
   OrchestrationV2SearchThreadError,
   OrchestrationGetTurnDiffError,
@@ -164,6 +165,7 @@ import {
 } from "./orchestration-v2/WireProjection.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
+import * as TaskTimingService from "./orchestration-v2/TaskTimingService.ts";
 import * as ThreadPreviews from "./orchestration-v2/ThreadPreviews.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
@@ -3214,6 +3216,7 @@ const layerUpstreamWsRpc = (
 const layerForkWsRpc = ServerForkWsRpcGroup.toLayer(
   Effect.gen(function* () {
     const threadPreviews = yield* ThreadPreviews.ThreadPreviews;
+    const taskTiming = yield* TaskTimingService.TaskTimingService;
     const workspaceFileReferences = yield* WorkspaceFileReferences.WorkspaceFileReferences;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
@@ -3229,6 +3232,17 @@ const layerForkWsRpc = ServerForkWsRpcGroup.toLayer(
             (cause) =>
               new OrchestrationGetThreadPreviewsError({
                 message: "Failed to read thread previews",
+                cause,
+              }),
+          ),
+        ),
+      [ORCHESTRATION_V2_WS_METHODS.getTaskTiming]: (input) =>
+        Effect.annotateCurrentSpan({ threadId: input.threadId }).pipe(
+          Effect.andThen(taskTiming.summary(input.threadId)),
+          Effect.mapError(
+            (cause) =>
+              new OrchestrationGetTaskTimingError({
+                message: "Failed to read task timing",
                 cause,
               }),
           ),
