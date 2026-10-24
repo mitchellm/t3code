@@ -80,6 +80,10 @@ pwsh fork/test-restart.ps1         # tests the install and restart logic on a wi
 Logs, state and builds live in `%LOCALAPPDATA%\t3code-fork` (`logs\`, `state.json`, `release\`,
 `restart.json` while a restart is armed, `config.json`).
 
+To run your own fork of this fork, set `"releaseRepo": "<owner>/t3code"` (where builds are
+published and the installed app updates from) and `"remote": "<git remote of your fork>"` in
+`config.json`. Both default to this fork (`chickenputty/t3code`, `origin`).
+
 ## When the sync reports a conflict
 
 Upstream changed code that a patch also changes. In the checkout, on a clean `main`:
