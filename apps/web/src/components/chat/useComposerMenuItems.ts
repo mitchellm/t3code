@@ -56,6 +56,7 @@ export function useComposerMenuItems({
   threadPullRequests,
   planModeUiEnabled,
   compactSlashCommandAvailable,
+  ledgerSlashCommandAvailable,
   selectedProvider,
   selectedProviderSkills,
   selectedProviderSlashCommands,
@@ -70,6 +71,7 @@ export function useComposerMenuItems({
   readonly threadPullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined;
   readonly planModeUiEnabled: boolean;
   readonly compactSlashCommandAvailable: boolean;
+  readonly ledgerSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;
   readonly selectedProviderSkills: ServerProvider["skills"];
   readonly selectedProviderSlashCommands: ServerProvider["slashCommands"];
@@ -187,6 +189,17 @@ export function useComposerMenuItems({
           label: "/model",
           description: "Switch response model for this thread",
         },
+        ...(ledgerSlashCommandAvailable
+          ? ([
+              {
+                id: "slash:ledger",
+                type: "slash-command",
+                command: "ledger",
+                label: "/ledger",
+                description: "Have the agent itemize a task into a ledger, then work it",
+              },
+            ] as const)
+          : []),
         ...(planModeUiEnabled
           ? ([
               {

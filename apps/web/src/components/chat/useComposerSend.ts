@@ -55,6 +55,8 @@ import {
 import {
   type ComposerSubmissionIntent,
   collapseExpandedComposerCursor,
+  expandLedgerSlashCommand,
+  isBareLedgerSlashCommand,
   parseStandaloneComposerSlashCommand,
 } from "../../composer-logic";
 import { resolvePlanFollowUpSubmission } from "../../proposedPlan";
@@ -730,6 +732,13 @@ export function useComposerSend(input: ComposerSendInput) {
       composerRef.current?.resetCursorState();
       return;
     }
+    if (
+      isBareLedgerSlashCommand(trimmed) &&
+      readEnvironmentPresentation(environmentId)?.serverConfig?.environment.capabilities
+        .threadLedger === true
+    ) {
+      return;
+    }
     if (!hasSendableContent) {
       if (expiredTerminalContextCount > 0) {
         const toastCopy = buildExpiredTerminalContextToastCopy(
@@ -823,7 +832,13 @@ export function useComposerSend(input: ComposerSendInput) {
       model: ctxSelectedModel,
       models: ctxSelectedProviderModels,
       effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+      text:
+        (readEnvironmentPresentation(environmentId)?.serverConfig?.environment.capabilities
+          .threadLedger === true
+          ? expandLedgerSlashCommand(messageTextForSend)
+          : null) ||
+        messageTextForSend ||
+        ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     });
     if (composerRef.current?.validateProviderInput(outgoingMessageText) === false) {
       return;

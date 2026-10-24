@@ -239,6 +239,10 @@
       "types": "./src/threadPullRequests.ts",
       "import": "./src/threadPullRequests.ts"
     },
+    "./taskLedger": {
+      "types": "./src/taskLedger.ts",
+      "import": "./src/taskLedger.ts"
+    },
     "./composerTrigger": {
       "types": "./src/composerTrigger.ts",
       "import": "./src/composerTrigger.ts"
