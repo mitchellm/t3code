@@ -1308,7 +1308,7 @@ export function claudeQueryEnvironment(
  * pins that a compaction re-sent): the sent copy sits in the conversation, and
  * clearing the pins must retract it.
  */
-export function claudePinnedRulesHook(input: {
+function claudePinnedRulesHook(input: {
   /** Undefined means the read failed, which is not the same as cleared (""). */
   readonly readCurrentPinnedRules: (signal: AbortSignal) => Promise<string | undefined>;
   readonly openedWithPinnedRules: boolean;

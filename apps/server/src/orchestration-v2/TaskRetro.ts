@@ -308,7 +308,7 @@ export function parseRetroAnswer(
   };
 }
 
-export const RETRO_COOLDOWN_MS = 10 * 60 * 1_000;
+const RETRO_COOLDOWN_MS = 10 * 60 * 1_000;
 
 /**
  * Why an agent may not start a retro now, if it may not. A person pressing Run retro skips this:
