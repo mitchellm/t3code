@@ -8,6 +8,7 @@ import {
 } from "~/components/views/inspectorModel";
 import { formatRelativeMs } from "~/components/views/viewEngine";
 
+import { ThreadRetroSection } from "./ThreadRetroSection";
 import { ThreadTimingSection } from "./ThreadTimingSection";
 
 // `satisfies` makes a renamed or removed run status a type error here; mirrors the server's runIsLive.
@@ -39,6 +40,7 @@ export function ThreadActivityTab({
         activityKey={lastFinished?.id ?? ""}
         nowMs={nowMs}
       />
+      <ThreadRetroSection threadRef={threadRef} nowMs={nowMs} />
       <ActivityTurns model={model} nowMs={nowMs} />
     </>
   );

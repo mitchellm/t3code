@@ -2728,6 +2728,17 @@ export const OrchestrationV2Command = Schema.Union([
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
     launchedByThreadId: Schema.optional(ThreadId),
+    /**
+     * Makes the new thread a hidden subagent child of an existing one. Only a server-created
+     * thread (`createdBy: "system"`, `creationSource: "server"`) may set it; the orchestrator
+     * rejects it from any client, whose provenance the server rewrites to `user`.
+     */
+    lineage: Schema.optional(
+      Schema.Struct({
+        parentThreadId: ThreadId,
+        relationshipToParent: Schema.Literal("subagent"),
+      }),
+    ),
     importedNativeThread: Schema.optional(
       Schema.Struct({
         ref: Schema.Struct({
@@ -3271,6 +3282,9 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   searchThreads: "orchestration.searchThreads",
   getThreadPreviews: "orchestration.getThreadPreviews",
   getTaskTiming: "orchestration.getTaskTiming",
+  getTaskRetro: "orchestration.getTaskRetro",
+  runTaskRetro: "orchestration.runTaskRetro",
+  resolveTaskRetro: "orchestration.resolveTaskRetro",
   searchThread: "orchestration.searchThread",
   searchThreadStream: "orchestration.searchThreadStream",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
