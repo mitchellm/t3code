@@ -22,6 +22,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as RunExecutionService from "./RunExecutionService.ts";
 
 const NON_TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
   "preparing",
@@ -116,8 +117,18 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   if (runs.some((candidate) => NON_TERMINAL_RUN_STATUSES.has(candidate.status))) return;
   if (thread.archivedAt !== null || thread.deletedAt != null) return;
   if (thread.settledOverride === "settled") return;
+  // Agents and the server stop runs too; only a person's Stop says the user wants the work off.
+  const userStoppedRunIds = new Set(
+    turnItems.flatMap((item) =>
+      item.type === "run_interrupt_request" &&
+      item.message === RunExecutionService.USER_STOP_REASON &&
+      item.runId !== null
+        ? [item.runId]
+        : [],
+    ),
+  );
   // A stop that raced the provider's own completion still means the user wants this to end.
-  if (turnItems.some((item) => item.runId === run.id)) return;
+  if (userStoppedRunIds.has(run.id)) return;
   if (runtimeRequests.some((request) => request.status === "pending")) return;
 
   const ordinalByRun = new Map(runs.map((candidate) => [candidate.id, candidate.ordinal]));
@@ -146,8 +157,7 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
         .filter(
           (candidate) =>
             candidate.status === "cancelled" ||
-            (candidate.status === "interrupted" &&
-              turnItems.some((item) => item.runId === candidate.id)),
+            (candidate.status === "interrupted" && userStoppedRunIds.has(candidate.id)),
         )
         .map(({ id }) => id),
     ),

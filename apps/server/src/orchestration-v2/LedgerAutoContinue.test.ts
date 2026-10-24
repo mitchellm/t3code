@@ -56,6 +56,9 @@ const layerTest = Layer.mergeAll(
   ),
 );
 
+// What OrchestratorMcpService records when an agent stops a run (`t3_thread_interrupt`).
+const AGENT_STOP_REASON = "Stopped by an agent: the subtask is done";
+
 const ledgerId = LedgerId.make("ledger:auto");
 const itemId = (name: string) => LedgerItemId.make(`item:${name}`);
 
@@ -303,6 +306,24 @@ it.effect("does nothing when the user stopped a run that still completed", () =>
     });
     yield* completeLatest(threadId);
     assert.equal((yield* autoContinues(threadId)).length, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("continues when an agent stopped a run that still completed", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = yield* setup("agent-stop-race");
+    yield* sendUserMessage(threadId);
+    const run = yield* latestRun(threadId);
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make(nextId("interrupt")),
+      threadId,
+      runId: run.id,
+      reason: AGENT_STOP_REASON,
+    });
+    yield* completeLatest(threadId);
+    assert.equal((yield* autoContinues(threadId)).length, 1);
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -565,7 +586,10 @@ const serverWake = (threadId: ThreadId) =>
   });
 
 /** Runs one auto-continue round, then ends the follow-up run the way `stop` says. */
-const stopFollowUp = (name: string, stop: "cancelled" | "user-interrupt" | "provider-interrupt") =>
+const stopFollowUp = (
+  name: string,
+  stop: "cancelled" | "user-interrupt" | "agent-interrupt" | "provider-interrupt",
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const threadId = yield* setup(`stopped-follow-up-${name}`);
@@ -574,13 +598,14 @@ const stopFollowUp = (name: string, stop: "cancelled" | "user-interrupt" | "prov
     const followUp = (yield* autoContinues(threadId))[0]!;
     const followUpRun = yield* latestRun(threadId);
     assert.equal(followUpRun.userMessageId, followUp.id);
-    if (stop === "user-interrupt") {
-      // The real stop path records the user's interrupt request next to the status.
+    if (stop === "user-interrupt" || stop === "agent-interrupt") {
+      // The real stop path records the interrupt request, with its reason, next to the status.
       yield* orchestrator.dispatch({
         type: "run.interrupt",
         commandId: CommandId.make(nextId("interrupt")),
         threadId,
         runId: followUpRun.id,
+        ...(stop === "agent-interrupt" ? { reason: AGENT_STOP_REASON } : {}),
       });
     } else {
       yield* completeLatest(threadId, stop === "cancelled" ? "cancelled" : "interrupted");
@@ -600,11 +625,13 @@ it.effect.each(["cancelled", "user-interrupt"] as const)(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("keeps going after the provider ends the follow-up turn on its own", () =>
-  Effect.gen(function* () {
-    const followUps = yield* stopFollowUp("provider", "provider-interrupt");
-    assert.deepEqual(followUps.map(roundOf), [1, 2]);
-  }).pipe(Effect.provide(layerTest)),
+it.effect.each(["provider-interrupt", "agent-interrupt"] as const)(
+  "keeps going after the follow-up turn ends without the user (%s)",
+  (stop) =>
+    Effect.gen(function* () {
+      const followUps = yield* stopFollowUp(stop, stop);
+      assert.deepEqual(followUps.map(roundOf), [1, 2]);
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("truncates a long item title in the stop notice", () =>
