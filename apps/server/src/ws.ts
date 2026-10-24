@@ -87,6 +87,7 @@ import {
   FilesystemBrowseError,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
+  SOURCE_CONTROL_MEDIA_ASSET,
   ChatAttachmentId,
   PersistChatAttachmentsError,
   RpcClientId,
@@ -1182,12 +1183,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         });
       }
 
-      const currentShell = yield* threadManagement.getShellSnapshot({ location: "active" });
-      subagentThreadIds = new Set(
-        currentShell.threads
-          .filter((thread) => thread.lineage.relationshipToParent === "subagent")
-          .map((thread) => thread.id),
-      );
+      subagentThreadIds = new Set(yield* threadManagement.listActiveSubagentThreadIds());
 
       const loaded = yield* loadProjectMetadataSnapshot(highWater);
       const replay = toShellStream(
@@ -2524,6 +2520,7 @@ const layerUpstreamWsRpc = (
           ),
         [WS_METHODS.pullRequestsList]: (input) => pullRequests.list(input),
         [WS_METHODS.pullRequestsListStats]: (input) => pullRequests.listStats(input),
+        [WS_METHODS.pullRequestsFilterOptions]: (input) => pullRequests.filterOptions(input),
         [WS_METHODS.pullRequestsRoutingIdentity]: (input) => pullRequests.routingIdentity(input),
         [WS_METHODS.pullRequestsRouting]: (input) => pullRequests.routing(input),
         [WS_METHODS.pullRequestsSummary]: (input) =>
@@ -2786,7 +2783,7 @@ const layerUpstreamWsRpc = (
               input.resource._tag === "attachment" ||
               input.resource._tag === "native-app-icon" ||
               input.resource._tag === "tool-output-image" ||
-              input.resource._tag === "github-media" ||
+              input.resource._tag === SOURCE_CONTROL_MEDIA_ASSET ||
               // A network path is served only from the thread's project, looked up below.
               (input.resource._tag === "media-file" &&
                 path.isAbsolute(input.resource.path) &&

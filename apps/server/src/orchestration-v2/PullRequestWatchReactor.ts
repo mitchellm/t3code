@@ -13,7 +13,7 @@ import {
   normalizeThreadPullRequestKey,
   threadPullRequestKeyOf,
   visibleThreadPullRequests,
-} from "@t3tools/shared/threadPullRequests";
+} from "../sourceControl/threadPullRequests.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -171,6 +171,7 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
     left.passed === right.passed &&
     left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
+    (left.owedChecks ?? []).join("\n") === (right.owedChecks ?? []).join("\n") &&
     left.remarksThrough === right.remarksThrough &&
     left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
     left.conflicting === right.conflicting &&

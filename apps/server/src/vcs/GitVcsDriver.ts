@@ -203,15 +203,10 @@ export interface GitRenameBranchResult {
   branch: string;
 }
 
-export interface GitFetchPullRequestBranchInput {
+export interface GitFetchRefInput {
   cwd: string;
-  prNumber: number;
-  branch: string;
-}
-
-export interface GitFetchPullRequestHeadCommitInput {
-  cwd: string;
-  prNumber: number;
+  /** A ref on the primary remote, such as a host's change request head ref. */
+  ref: string;
 }
 
 export interface GitResolveCommitInput {
@@ -357,6 +352,14 @@ export class GitVcsDriver extends Context.Service<
       cwd: string,
       key: string,
     ) => Effect.Effect<string | null, GitCommandError>;
+    /**
+     * The branch, named as on the host, that T3 recorded `branch` was cut from. Null when none
+     * was recorded.
+     */
+    readonly readBranchBase: (
+      cwd: string,
+      branch: string,
+    ) => Effect.Effect<string | null, GitCommandError>;
     readonly resolveBranchName: (
       cwd: string,
       refName: string,
@@ -369,11 +372,12 @@ export class GitVcsDriver extends Context.Service<
       input: VcsCreateWorktreeInput,
       options?: CreateWorktreeOptions,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
-    readonly fetchPullRequestBranch: (
-      input: GitFetchPullRequestBranchInput,
+    /** Force-updates local `branch` to the primary remote's `ref`. */
+    readonly fetchRefIntoBranch: (
+      input: GitFetchRefInput & { readonly branch: string },
     ) => Effect.Effect<void, GitCommandError>;
-    readonly fetchPullRequestHeadCommit: (
-      input: GitFetchPullRequestHeadCommitInput,
+    readonly fetchRefCommit: (
+      input: GitFetchRefInput,
     ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
     readonly resolveCommit: (
       input: GitResolveCommitInput,
@@ -558,37 +562,39 @@ const spawnGitCommand = (
       : {}),
   });
 
-const gitCommand = (
-  process: VcsProcess.VcsProcess["Service"],
-  operation: string,
-  cwd: string,
-  args: ReadonlyArray<string>,
-  options?: GitCommandOptions,
-) =>
-  Effect.promise(() =>
-    options?.stdin === undefined
-      ? GitMetadataFastPath.tryAnswerGitCommand({
-          cwd,
-          args,
-          env: options?.env,
-          timeoutMs: options?.timeoutMs,
-          maxOutputBytes: options?.maxOutputBytes,
-        })
-      : Promise.resolve(null),
-  ).pipe(
-    Effect.flatMap((answer) =>
-      // A failing exit code without allowNonZeroExit needs git's own error details.
-      answer !== null && (answer.exitCode === 0 || options?.allowNonZeroExit)
-        ? Effect.succeed({
-            exitCode: ChildProcessSpawner.ExitCode(answer.exitCode),
-            stdout: answer.stdout,
-            stderr: answer.stderr,
-            stdoutTruncated: false,
-            stderrTruncated: false,
-          } satisfies VcsProcess.VcsProcessOutput)
-        : spawnGitCommand(process, operation, cwd, args, options),
+const gitCommand = Effect.fn("GitVcsDriver.gitCommand")(
+  (
+    process: VcsProcess.VcsProcess["Service"],
+    operation: string,
+    cwd: string,
+    args: ReadonlyArray<string>,
+    options?: GitCommandOptions,
+  ) =>
+    Effect.promise(() =>
+      options?.stdin === undefined
+        ? GitMetadataFastPath.tryAnswerGitCommand({
+            cwd,
+            args,
+            env: options?.env,
+            timeoutMs: options?.timeoutMs,
+            maxOutputBytes: options?.maxOutputBytes,
+          })
+        : Promise.resolve(null),
+    ).pipe(
+      Effect.flatMap((answer) =>
+        // A failing exit code without allowNonZeroExit needs git's own error details.
+        answer !== null && (answer.exitCode === 0 || options?.allowNonZeroExit)
+          ? Effect.succeed({
+              exitCode: ChildProcessSpawner.ExitCode(answer.exitCode),
+              stdout: answer.stdout,
+              stderr: answer.stderr,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            } satisfies VcsProcess.VcsProcessOutput)
+          : spawnGitCommand(process, operation, cwd, args, options),
+      ),
     ),
-  );
+);
 
 export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;

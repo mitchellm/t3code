@@ -930,7 +930,7 @@ describe("makeTaskLimiter", () => {
     );
     // Release in start order; every third task fails.
     for (let done = 0; done < 10; done++) {
-      while (release.length <= done) await new Promise((resolve) => setImmediate(resolve));
+      await expect.poll(() => release.length).toBeGreaterThan(done);
       expect(running).toBeLessThanOrEqual(3);
       release[done]!(done % 3 === 0);
     }

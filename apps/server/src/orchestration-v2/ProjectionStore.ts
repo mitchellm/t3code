@@ -1,6 +1,7 @@
-import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequests";
+import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { makeThreadFind, findProjectedThreadItems } from "./ThreadFind.ts";
 import type {
   OrchestrationV2SearchThreadInput,
@@ -13,7 +14,7 @@ import {
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
+import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import type {
   OrchestrationV2AppThread,
   OrchestrationV2Checkpoint,
@@ -351,6 +352,26 @@ const activeRunStatuses: ReadonlySet<ProjectionRun["status"]> = new Set([
   "waiting",
 ]);
 
+// A fork inherits its source's history before it has messages of its own,
+// unless a portable handoff's budget left none of that history to deliver.
+const inheritsForkConversation = ({
+  thread,
+  contextTransfers,
+  contextHandoffs,
+}: Pick<OrchestrationV2ThreadProjection, "thread" | "contextTransfers" | "contextHandoffs">) => {
+  if (thread.forkedFrom?.type !== "run") return false;
+  const resolution = contextTransfers.find(
+    (transfer) => transfer.type === "fork" && transfer.targetThreadId === thread.id,
+  )?.resolution;
+  return (
+    resolution?.strategy !== "portable_context" ||
+    contextHandoffs.some(
+      (handoff) =>
+        handoff.id === resolution.contextHandoffId && (handoff.history?.messages.length ?? 0) > 0,
+    )
+  );
+};
+
 // In-memory twin of the omitSettledLeafNodes SQL clause in readCanonicalProjection.
 const isSettledLeafNode = (node: ProjectionNode, runs: ReadonlyArray<ProjectionRun>) =>
   settledLeafNodeKinds.has(node.kind) &&
@@ -424,6 +445,10 @@ export interface ProjectionStoreV2Shape {
   readonly getShellSnapshot: (
     options?: ShellSnapshotOptions,
   ) => Effect.Effect<OrchestrationV2ThreadShellSnapshot, ProjectionStoreV2Error>;
+  readonly listActiveSubagentThreadIds: () => Effect.Effect<
+    ReadonlyArray<ThreadId>,
+    ProjectionStoreV2Error
+  >;
   /**
    * Callers that combine the shell with other reads run this inside their own
    * transaction and the returned decode after it commits, so the shared
@@ -1667,6 +1692,7 @@ export function threadShellFromProjection(
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
     pinOrderKey: projection.thread.pinOrderKey ?? null,
     lastVisitedAt: projection.thread.lastVisitedAt,
+    opens: projection.thread.opens ?? null,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
     limitRecovery: projection.thread.limitRecovery ?? null,
     deletedAt: projection.thread.deletedAt,
@@ -1910,6 +1936,7 @@ function shellFromState(input: {
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
     lastVisitedAt: input.state.thread.lastVisitedAt,
+    opens: input.state.thread.opens ?? null,
     titleRegeneration: input.state.thread.titleRegeneration ?? null,
     limitRecovery: input.state.thread.limitRecovery ?? null,
     deletedAt: input.state.thread.deletedAt,
@@ -4298,7 +4325,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ) AS present
             `;
             return {
-              hasConversation: conversation[0]?.present === 1,
+              hasConversation:
+                conversation[0]?.present === 1 ||
+                inheritsForkConversation({ thread, contextTransfers, contextHandoffs }),
               thread,
               runs,
               attempts,
@@ -6468,6 +6497,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         .withTransaction(readShellSnapshotRows(options))
         .pipe(Effect.mapError(shellSnapshotReadError), Effect.flatMap(decodeShellSnapshot));
 
+    const listActiveSubagentThreadIds = Effect.fn("ProjectionStore.listActiveSubagentThreadIds")(
+      function* () {
+        const rows = yield* sql<{ readonly thread_id: string }>`
+        SELECT thread_id
+        FROM orchestration_v2_projection_threads
+        WHERE deleted_at IS NULL
+          AND json_extract(payload_json, '$.archivedAt') IS NULL
+          AND json_extract(payload_json, '$.lineage.relationshipToParent') = 'subagent'
+      `;
+        return rows.map((row) => ThreadId.make(row.thread_id));
+      },
+      Effect.mapError(shellSnapshotReadError),
+    );
+
     const getThreadShell: ProjectionStoreV2Shape["getThreadShell"] = (threadId) =>
       sql
         .withTransaction(
@@ -6550,48 +6593,57 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
 
+    const readOnReader =
+      <Args extends ReadonlyArray<unknown>, A, E, R>(
+        method: (...args: Args) => Effect.Effect<A, E, R>,
+      ) =>
+      (...args: Args): Effect.Effect<A, E, R> =>
+        method(...args).pipe(NodeSqliteClient.readOnly);
+
     return {
       apply,
-      getShellSnapshot,
-      readShellSnapshot,
-      getThreadShell,
-      getThread,
-      getSettlementCandidates,
-      getThreadsWithPullRequests,
-      getThreadWorktreePaths,
+      getShellSnapshot: readOnReader(getShellSnapshot),
+      listActiveSubagentThreadIds: readOnReader(listActiveSubagentThreadIds),
+      readShellSnapshot: readOnReader(readShellSnapshot),
+      getThreadShell: readOnReader(getThreadShell),
+      getThread: readOnReader(getThread),
+      getSettlementCandidates: readOnReader(getSettlementCandidates),
+      getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
+      getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),
       getThreadProjection,
-      getTurnStartContext,
-      getTurnStartHistory,
-      getRuntimeRecoveryProjection,
-      getRunningTurnContext,
-      getThreadProviderContext,
-      getRuntimeResponseContext,
-      getCheckpointContext,
-      getCheckpointCaptureContext,
-      getCheckpointRollbackContext,
-      getRunMessage,
-      canStartQueuedRun,
-      getPendingNativeUserInputs,
-      hasUnpairedRunInterruptRequest,
-      isNodeStored,
-      getMessageCount,
-      getNextTurnItemOrdinal,
-      getTurnItem,
-      getThreadRecords,
-      getRuntimeRequest,
-      getPlan,
-      getProviderControlContext,
-      getLimitRecoveryCandidates,
-      getRecoveryThreadIds,
-      getUnreadableThreadIds,
-      getUnboundLiveProviderSessions,
-      getThreadSnapshot,
-      getThreadSnapshotWindow,
-      getTimelinePage,
-      getThreadHistoryPage,
-      searchThread,
+      getTurnStartContext: readOnReader(getTurnStartContext),
+      getTurnStartHistory: readOnReader(getTurnStartHistory),
+      getRuntimeRecoveryProjection: readOnReader(getRuntimeRecoveryProjection),
+      getRunningTurnContext: readOnReader(getRunningTurnContext),
+      getThreadProviderContext: readOnReader(getThreadProviderContext),
+      getRuntimeResponseContext: readOnReader(getRuntimeResponseContext),
+      getCheckpointContext: readOnReader(getCheckpointContext),
+      getCheckpointCaptureContext: readOnReader(getCheckpointCaptureContext),
+      getCheckpointRollbackContext: readOnReader(getCheckpointRollbackContext),
+      getRunMessage: readOnReader(getRunMessage),
+      canStartQueuedRun: readOnReader(canStartQueuedRun),
+      getPendingNativeUserInputs: readOnReader(getPendingNativeUserInputs),
+      hasUnpairedRunInterruptRequest: readOnReader(hasUnpairedRunInterruptRequest),
+      isNodeStored: readOnReader(isNodeStored),
+      getMessageCount: readOnReader(getMessageCount),
+      getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),
+      getTurnItem: readOnReader(getTurnItem),
+      getThreadRecords: (threadId, fields, filter) =>
+        getThreadRecords(threadId, fields, filter).pipe(NodeSqliteClient.readOnly),
+      getRuntimeRequest: readOnReader(getRuntimeRequest),
+      getPlan: readOnReader(getPlan),
+      getProviderControlContext: readOnReader(getProviderControlContext),
+      getLimitRecoveryCandidates: readOnReader(getLimitRecoveryCandidates),
+      getRecoveryThreadIds: readOnReader(getRecoveryThreadIds),
+      getUnreadableThreadIds: readOnReader(getUnreadableThreadIds),
+      getUnboundLiveProviderSessions: readOnReader(getUnboundLiveProviderSessions),
+      getThreadSnapshot: readOnReader(getThreadSnapshot),
+      getThreadSnapshotWindow: readOnReader(getThreadSnapshotWindow),
+      getTimelinePage: readOnReader(getTimelinePage),
+      getThreadHistoryPage: readOnReader(getThreadHistoryPage),
+      searchThread: readOnReader(searchThread),
       searchThreadStream,
-      getThreadAttachmentIds,
+      getThreadAttachmentIds: readOnReader(getThreadAttachmentIds),
     } satisfies ProjectionStoreV2Shape;
   }),
 );
@@ -6661,6 +6713,19 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           archivedThreads: visible.filter((thread) => thread.archivedAt !== null),
         };
       }),
+      listActiveSubagentThreadIds: Effect.fn("ProjectionStore.listActiveSubagentThreadIds")(
+        function* () {
+          const existing = (yield* Ref.get(replayState)).projections;
+          return [...existing.values()]
+            .filter(
+              ({ thread }) =>
+                thread.deletedAt === null &&
+                thread.archivedAt === null &&
+                thread.lineage.relationshipToParent === "subagent",
+            )
+            .map(({ thread }) => thread.id);
+        },
+      ),
       readShellSnapshot: (options) =>
         service.getShellSnapshot(options).pipe(Effect.map(Effect.succeed)),
       getThreadShell: Effect.fn("ProjectionStore.getThreadShell")(function* (threadId) {
@@ -7251,12 +7316,13 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         service.getThreadProjection(threadId).pipe(
           Effect.map((projection) => ({
             ...projection,
-            hasConversation: projection.messages.some(
-              (message) =>
-                message.role === "user" &&
-                (message.text.trim().toLowerCase() !== "/compact" ||
-                  message.attachments.length > 0),
-            ),
+            hasConversation:
+              projection.messages.some(
+                (message) =>
+                  message.role === "user" &&
+                  (message.text.trim().toLowerCase() !== "/compact" ||
+                    message.attachments.length > 0),
+              ) || inheritsForkConversation(projection),
             turnItems: projection.turnItems.filter((item) => item.runId === runId),
           })),
         ),

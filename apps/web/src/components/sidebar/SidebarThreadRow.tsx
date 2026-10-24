@@ -3,7 +3,7 @@ import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { requestCustomSnooze } from "../CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
-import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
+import { resolveThreadCurrentPullRequestLink } from "@t3tools/client-runtime/thread-pull-requests";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
@@ -1225,9 +1225,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       </span>
                       <span className={cn("inline-flex", topStatus.className)}>
                         <SidebarStatusGlyph icon={topStatus.icon} />
-                        <span role="status" className="sr-only">
-                          {topStatus.label}
-                        </span>
+                        {/* Not a live region: BackgroundThreadAnnouncer and the
+                          open thread's timeline speak status changes. */}
+                        <span className="sr-only">{topStatus.label}</span>
                       </span>
                     </span>
                   ) : (
@@ -1349,11 +1349,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         ) : topStatus.icon === "done" ? (
           <CircleCheckIcon aria-hidden className="size-3.5 shrink-0" />
         ) : null}
-        {/* The label alone is the live region: a role="status" wrapper around
-            the ticking duration would make screen readers announce every second. */}
-        <span role="status" className="truncate">
-          {topStatus.label}
-        </span>
+        {/* Not a live region: a collapsed sidebar is inert, so
+            BackgroundThreadAnnouncer and the open thread's timeline speak
+            status changes instead. */}
+        <span className="truncate">{topStatus.label}</span>
         {status === "working" ? (
           <span aria-hidden className="shrink-0">
             <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
@@ -1620,6 +1619,8 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
   resultId: string;
   searchMatch: EnvironmentThreadSearchMatch | null;
   searchQuery: string;
+  /** The query `searchMatch` was found for, which lags `searchQuery` while a search runs. */
+  searchMatchQuery?: string;
   onHighlight: () => void;
   onSelect: () => void;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
@@ -1758,7 +1759,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
                 match={{
                   source: props.searchMatch.source,
                   snippet: props.searchMatch.snippet,
-                  query: props.searchQuery,
+                  query: props.searchMatchQuery ?? props.searchQuery,
                 }}
               />
             ) : null}

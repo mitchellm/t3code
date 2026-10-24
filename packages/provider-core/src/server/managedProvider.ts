@@ -82,7 +82,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     readonly publishSnapshot: (snapshot: ServerProvider) => Effect.Effect<void>;
   }) => Effect.Effect<void>;
   readonly refreshInterval?: Duration.Input;
-  readonly refreshOnInterval?: boolean;
+  readonly refreshOnInterval?: boolean | ((snapshot: ServerProvider) => boolean);
   readonly checkProviderOnSettingsChange?: (previous: Settings, next: Settings) => boolean;
 }): Effect.fn.Return<
   ManagedServerProvider,
@@ -273,11 +273,15 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     return yield* applySnapshot(nextSettings, { forceRefresh: true, userRequested });
   });
 
-  const hasProviderStatusDemand = Effect.gen(function* () {
+  const shouldRefreshOnInterval = Effect.gen(function* () {
     const state = yield* Ref.get(snapshotStateRef);
     // A disabled instance has nothing to probe; a periodic check would only
     // republish a snapshot that differs in checkedAt.
-    if (!state.snapshot.enabled) {
+    if (
+      !state.snapshot.enabled ||
+      input.refreshOnInterval === false ||
+      (typeof input.refreshOnInterval === "function" && !input.refreshOnInterval(state.snapshot))
+    ) {
       return false;
     }
     const instanceId = state.snapshot.instanceId;
@@ -331,10 +335,8 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
           Queue.take(refreshIntervalChanges).pipe(Effect.as(false)),
         ).pipe(
           Effect.flatMap((intervalElapsed) =>
-            input.refreshOnInterval !== false &&
-            intervalElapsed &&
-            Duration.toMillis(Duration.fromInputUnsafe(refreshInterval)) > 0
-              ? hasProviderStatusDemand.pipe(
+            intervalElapsed && Duration.toMillis(Duration.fromInputUnsafe(refreshInterval)) > 0
+              ? shouldRefreshOnInterval.pipe(
                   Effect.flatMap((shouldRefresh) =>
                     shouldRefresh ? refreshSnapshot(false).pipe(Effect.asVoid) : Effect.void,
                   ),

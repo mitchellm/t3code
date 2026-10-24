@@ -12,7 +12,7 @@ import * as DateTime from "effect/DateTime";
  * this only stops a chatty bot looping an agent that is replying to it.
  */
 export const PULL_REQUEST_WATCH_WAKE_LIMIT = 10;
-/** How long a GitHub head may go without any check before the agent is told none reported. */
+/** How long a head may go without any check before the agent is told none reported. */
 const PULL_REQUEST_WATCH_NO_CHECKS_MS = 15 * 60_000;
 const LISTED_ITEMS = 10;
 const SNIPPET_LENGTH = 200;
@@ -38,7 +38,7 @@ export function evaluatePullRequestWatch(
   watch: ThreadPullRequestWatch,
   detail: Pick<
     PullRequestDetail,
-    "provider" | "headSha" | "checks" | "mergeability" | "viewer" | "author"
+    "capabilities" | "headSha" | "checks" | "mergeability" | "viewer" | "author"
   >,
   remarks: ReadonlyArray<PullRequestComment> | null,
   now: number,
@@ -51,6 +51,7 @@ export function evaluatePullRequestWatch(
   let failedChecks = headMoved ? [] : watch.failedChecks;
   let passed = headMoved ? false : watch.passed;
   let passedChecks = headMoved ? [] : watch.passedChecks;
+  let owedChecks = headMoved ? [] : (watch.owedChecks ?? []);
   if (detail.checks.length > 0) {
     const failed = detail.checks.filter(isFailedCheck);
     const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
@@ -65,8 +66,28 @@ export function evaluatePullRequestWatch(
     // A required job created and finished between two passes is never seen pending. Without
     // required checks, any check counts, and advisory bots keep adding passed ones: no wake.
     const gateGrew = required.length > 0 && gateNames.some((name) => !told.includes(name));
+    // Other checks still pending when required ones passed are owed one wake when all settle.
+    // Only those are owed, so later advisory churn never wakes. One turned required is gate news.
+    const owed =
+      passedNow && passed
+        ? detail.checks
+            .filter((check) => check.required !== true && owedChecks.includes(check.name))
+            .map((check) => check.name)
+        : [];
+    const settled =
+      failed.length === 0 && detail.checks.every((check) => check.status !== "pending");
+    owedChecks = owed;
     if (passedNow && (!passed || gateGrew)) {
       changes.push({ kind: "checks-passed", count: gate.length, required: required.length > 0 });
+      owedChecks =
+        required.length > 0
+          ? detail.checks
+              .filter((check) => check.required !== true && check.status === "pending")
+              .map((check) => check.name)
+          : [];
+    } else if (settled && owed.length > 0) {
+      changes.push({ kind: "checks-passed", count: detail.checks.length, required: false });
+      owedChecks = [];
     }
     passed = passedNow;
     passedChecks = passedNow ? gateNames : [];
@@ -74,10 +95,10 @@ export function evaluatePullRequestWatch(
 
   // Only a head never read with checks waits for them: an empty read after checks were seen is
   // the failed read above. A watch saved before this field may have seen pending checks on its
-  // head, so its clock starts only at the next push. Other hosts can lack a checks API (Azure
-  // DevOps pipelines), where an empty list says nothing, so only GitHub waits.
+  // head, so its clock starts only at the next push. Where a host's empty list can mean the
+  // repository runs no checks at all, nothing waits.
   let checksAwaitedSince = watch.checksAwaitedSince;
-  if (detail.provider === "github") {
+  if (detail.capabilities.checksAlwaysReport === true) {
     const awaitedBefore = headMoved
       ? DateTime.formatIso(DateTime.makeUnsafe(now))
       : (watch.checksAwaitedSince ?? null);
@@ -92,7 +113,7 @@ export function evaluatePullRequestWatch(
   const own = (detail.viewer ?? detail.author?.login)?.toLowerCase();
   const through = Date.parse(watch.remarksThrough);
   const activeAt = (remark: PullRequestComment) => remark.editedAt ?? remark.createdAt;
-  // GitHub times are per second, so remarks at the boundary time are told apart by ID.
+  // Hosts can stamp remarks to the second, so remarks at the boundary time are told apart by ID.
   const fresh = (remarks ?? []).filter((remark) => {
     const at = Date.parse(activeAt(remark));
     return (
@@ -112,7 +133,7 @@ export function evaluatePullRequestWatch(
   if (detail.mergeability === "conflicting" && !watch.conflicting) {
     changes.push({ kind: "conflicting" });
   }
-  // "unknown" is GitHub still computing after a push; only a clean answer clears a conflict.
+  // "unknown" is a host still computing after a push; only a clean answer clears a conflict.
   const conflicting =
     detail.mergeability === "unknown" ? watch.conflicting : detail.mergeability === "conflicting";
 
@@ -127,6 +148,7 @@ export function evaluatePullRequestWatch(
       failedChecks,
       passed,
       passedChecks,
+      owedChecks,
       remarksThrough,
       remarkIds,
       conflicting,

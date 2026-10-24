@@ -931,6 +931,10 @@ export function shouldShowPlanFollowUpPrompt(input: {
   );
 }
 
+// A typed `/compact`, with or without instructions, is already the compaction. Queueing a
+// bare one ahead of it would run an uninstructed compaction first and charge for two.
+const COMPACT_COMMAND_PATTERN = /^\/compact(?:\s|$)/i;
+
 const sessionDismissedBranchMismatchKeys = new Set<string>();
 
 export function dismissBranchMismatchForSession(key: string): void {
@@ -1339,7 +1343,7 @@ export function shouldCompactBeforeSend(input: {
   return (
     input.resumeCompactionTokens !== null &&
     input.compactArmed &&
-    input.messageText.trim().toLowerCase() !== "/compact"
+    !COMPACT_COMMAND_PATTERN.test(input.messageText.trim())
   );
 }
 
