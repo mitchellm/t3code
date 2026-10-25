@@ -12,6 +12,7 @@ import {
   type RunAttemptId,
   type ServerProviderSkill,
   type RunId,
+  type ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -209,6 +210,12 @@ interface MessagesTimelineProps {
   runningRunId?: RunId | null;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
+  /**
+   * Null until the server has the thread. Pins read the thread detail, and a
+   * draft's detail fetch 404s and is cached as deleted, which leaves the thread
+   * it becomes empty after the first send.
+   */
+  rulePinsThreadRef: ScopedThreadRef | null;
   displayThreadKey?: string;
   paintOnly?: boolean;
   /** Off where another region already speaks the thread's status, like a subagent's bar. */
@@ -324,6 +331,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   runningRunId = null,
   turnDiffSummaries,
   routeThreadKey,
+  rulePinsThreadRef,
   displayThreadKey,
   paintOnly = false,
   announceTurnStatus = true,
@@ -908,7 +916,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Rows and chat width resize the content without resizing the viewport.
   }, [timelineViewportElement, rows.length, reportContentOverflow, chatWidth]);
 
-  const rulePins = useThreadRulePins(citationThreadRef);
+  const rulePins = useThreadRulePins(rulePinsThreadRef);
   const sharedState: TimelineRowSharedState = {
     citationRequest: readyCitationRequest,
     listRef,

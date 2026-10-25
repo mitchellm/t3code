@@ -3427,6 +3427,7 @@ export default function ChatView(props: ChatViewProps) {
                   displayedThreadRef?.environmentId ?? activeThread.environmentId
                 }
                 routeThreadKey={displayedTimelineKey}
+                rulePinsThreadRef={paintOnlyDisplayedTimeline ? null : routeThreadDetailRef}
                 displayThreadKey={displayedTimelineKey}
                 paintOnly={paintOnlyDisplayedTimeline}
                 announceTurnStatus={!isProviderSubagent}
