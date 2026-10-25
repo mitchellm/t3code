@@ -676,7 +676,12 @@ function Clear-ForInstall([datetime]$ClosedAt) {
   }
 }
 
-function Start-App { Start-Process -FilePath $AppExe }
+# Resolve the exe again: an install can rename it (Alpha to Beta) after this script resolved $AppExe.
+function Start-App {
+  $exe = @('T3 Code (Beta).exe', 'T3 Code (Alpha).exe') |
+    ForEach-Object { Join-Path $AppDir $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
+  Start-Process -FilePath ($exe ?? $AppExe)
+}
 
 function Complete-Install([string]$Exe, [string]$Ver, [datetime]$ClosedAt, [switch]$SkipIfCurrent, [switch]$Rollback) {
   # Runs right after T3 quit. Returns the build installed afterwards, with T3 running on it.
