@@ -16,9 +16,10 @@ import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import {
   followInvestigation,
   type InvestigationCommand,
-  investigationAddProblem,
+  investigationCommandProblem,
   isInvestigationCommand,
   planInvestigationCommand,
+  stampRefuterVerdict,
 } from "./Investigation.ts";
 
 export type LedgerEventBody = Extract<
@@ -274,10 +275,14 @@ export function planLedgerCommand(input: {
       requiresJudge: input.requiresJudge === true,
     });
   }
-  const tooMany = investigationAddProblem(command, input.ledger);
-  if (tooMany !== undefined) return Result.fail(tooMany);
+  const problem = investigationCommandProblem(command, input.ledger);
+  if (problem !== undefined) return Result.fail(problem);
   return Result.map(planCoreLedgerCommand({ ...input, command }), (planned) =>
-    followInvestigation(input.ledger, planned, input.now),
+    followInvestigation(
+      input.ledger,
+      stampRefuterVerdict(command, input.ledger, planned),
+      input.now,
+    ),
   );
 }
 

@@ -35,6 +35,11 @@ export const LedgerItemVerdict = Schema.Struct({
   judge: LedgerVerdictJudge,
   notes: Schema.String,
   at: Schema.DateTimeUtc,
+  /**
+   * Fork: the planner stamps this when it records a verdict on an investigation's approach, the
+   * only items judged by the refuter. Only such a pass solves an investigation.
+   */
+  refuter: Schema.optionalKey(Schema.Boolean),
 });
 export type LedgerItemVerdict = typeof LedgerItemVerdict.Type;
 

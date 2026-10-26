@@ -75,6 +75,7 @@ import {
 } from "./ledger.ts";
 import {
   LedgerInvestigationEndCommand,
+  LedgerInvestigationSpendCommand,
   LedgerInvestigationStartCommand,
   LedgerInvestigationUpdatedPayload,
   LedgerInvestigationUpdatedPayloadJson,
@@ -3508,6 +3509,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
   // Fork: Investigate mode; clients reach these only through the investigation RPCs.
   LedgerInvestigationStartCommand,
   LedgerInvestigationEndCommand,
+  LedgerInvestigationSpendCommand,
   /**
    * Internal so no client can mark a request saved without the value being
    * stored.

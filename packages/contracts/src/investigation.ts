@@ -72,6 +72,10 @@ export const LedgerInvestigation = Schema.Struct({
   solvedItemId: Schema.optionalKey(LedgerItemId),
   /** Why it ended, in a sentence for the run view. */
   endReason: Schema.optionalKey(Schema.String),
+  /** Dollars spent as of the server's last check; present once a dollar budget was checked. */
+  spentUsd: Schema.optionalKey(Schema.Number),
+  /** Some of the spend could not be priced (rates unavailable or an unknown model). */
+  costUnknown: Schema.optionalKey(Schema.Boolean),
 });
 export type LedgerInvestigation = typeof LedgerInvestigation.Type;
 
@@ -104,6 +108,16 @@ export const LedgerInvestigationEndCommand = Schema.Struct({
   ledgerId: LedgerId,
   status: Schema.Literals(["exhausted", "stopped"]),
   reason: TrimmedNonEmptyString,
+});
+
+/** Server-only: records the spend the budget check measured, for the run view. */
+export const LedgerInvestigationSpendCommand = Schema.Struct({
+  type: Schema.Literal("ledger.investigation.spend"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  ledgerId: LedgerId,
+  spentUsd: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isFinite()),
+  costUnknown: Schema.Boolean,
 });
 
 export const LedgerInvestigationUpdatedPayload = Schema.Struct({

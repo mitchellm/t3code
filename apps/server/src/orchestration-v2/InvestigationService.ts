@@ -96,8 +96,9 @@ function reportText(investigation: LedgerInvestigation): string {
 }
 
 /**
- * Dollars spent by the investigation so far: every provider turn on the thread and on its
- * delegated children that started after it, priced by the run's model. Unpriced models count 0.
+ * Dollars spent by the investigation so far: every provider turn on the thread and on every task
+ * under it, at any depth, that started after it, priced by the run's model. `unpricedTurns` counts
+ * turns with usage that no rate covered, so the spend is a floor rather than the whole cost.
  */
 export function investigationSpendUsd(input: {
   readonly investigation: LedgerInvestigation;
@@ -106,9 +107,10 @@ export function investigationSpendUsd(input: {
     readonly runs: ReadonlyArray<OrchestrationV2Run>;
   }>;
   readonly rates: RateTable;
-}): number {
+}): { readonly usd: number; readonly unpricedTurns: number } {
   const startMs = DateTime.toEpochMillis(input.investigation.startedAt);
   let total = 0;
+  let unpricedTurns = 0;
   for (const thread of input.threads) {
     const modelByNode = new Map(
       thread.runs.flatMap((run) =>
@@ -122,26 +124,69 @@ export function investigationSpendUsd(input: {
       if (DateTime.toEpochMillis(turn.startedAt) < startMs) continue;
       const model = modelByNode.get(turn.nodeId) ?? fallbackModel;
       const rate = model === undefined ? null : lookupRate(input.rates, model);
-      if (rate === null) continue;
-      const input_ = usage.inputTokens ?? 0;
+      if (rate === null) {
+        unpricedTurns += 1;
+        continue;
+      }
+      const inputTokens = usage.inputTokens ?? 0;
       const cached = usage.cachedInputTokens ?? 0;
       const creation = usage.cacheCreationTokens ?? 0;
       total +=
-        Math.max(0, input_ - cached - creation) * rate.inputCostPerToken +
+        Math.max(0, inputTokens - cached - creation) * rate.inputCostPerToken +
         cached * rate.cacheReadCostPerToken +
         creation * rate.cacheCreationCostPerToken +
         (usage.outputTokens ?? 0) * rate.outputCostPerToken;
     }
   }
-  return total;
+  return { usd: total, unpricedTurns };
 }
 
 const runningInvestigation = (ledger: Ledger | undefined) =>
   ledger?.investigation?.status === "running" ? ledger.investigation : undefined;
 
+// Bounds the walk over tasks under tasks, so a runaway tree cannot stall every budget check.
+const MAX_SPEND_THREADS = 200;
+
+/** The thread's turns and those of every delegated task below it, breadth first. */
+const readTreeTurns = Effect.fn("InvestigationService.readTreeTurns")(function* (
+  deps: InvestigationDeps,
+  threadId: ThreadId,
+) {
+  const threads: Array<{
+    readonly providerTurns: ReadonlyArray<OrchestrationV2ProviderTurn>;
+    readonly runs: ReadonlyArray<OrchestrationV2Run>;
+  }> = [];
+  const seen = new Set<string>([threadId]);
+  let frontier: ReadonlyArray<ThreadId> = [threadId];
+  while (frontier.length > 0 && seen.size <= MAX_SPEND_THREADS) {
+    const records = yield* Effect.forEach(
+      frontier,
+      (id) =>
+        deps.orchestrator
+          .getThreadRecords(id, ["providerTurns", "runs", "subagents"])
+          // A deleted child only loses its own spend, not the whole check.
+          .pipe(Effect.orElseSucceed(() => ({ providerTurns: [], runs: [], subagents: [] }))),
+      { concurrency: 4 },
+    );
+    const next: Array<ThreadId> = [];
+    for (const record of records) {
+      threads.push(record);
+      for (const task of record.subagents) {
+        if (task.origin !== "app_owned" || task.childThreadId === null) continue;
+        if (seen.has(task.childThreadId)) continue;
+        seen.add(task.childThreadId);
+        next.push(task.childThreadId);
+      }
+    }
+    frontier = next;
+  }
+  return threads;
+});
+
 /**
- * Ends the investigation when a budget is used up. Safe to call at any time and repeatedly: the
- * end command is keyed by the ledger, and the planner ignores an end once it has ended.
+ * Ends the investigation when a budget is used up, and records the spend for the run view when it
+ * has a dollar budget. Safe to call at any time and repeatedly: the end command is keyed by the
+ * ledger, and the planner ignores an end or a spend report once it has ended.
  */
 export const checkInvestigationBudget = Effect.fn("InvestigationService.checkBudget")(function* (
   deps: InvestigationDeps,
@@ -153,25 +198,34 @@ export const checkInvestigationBudget = Effect.fn("InvestigationService.checkBud
   if (ledger === undefined || investigation === undefined) return;
   let spentUsd = 0;
   if (investigation.budget.usd !== undefined) {
-    const records = yield* deps.orchestrator.getThreadRecords(threadId, [
-      "subagents",
-      "providerTurns",
-      "runs",
-    ]);
-    const children = yield* Effect.forEach(
-      records.subagents.flatMap((task) =>
-        task.origin === "app_owned" && task.childThreadId !== null ? [task.childThreadId] : [],
-      ),
-      (childThreadId) =>
-        deps.orchestrator
-          .getThreadRecords(childThreadId, ["providerTurns", "runs"])
-          .pipe(Effect.orElseSucceed(() => ({ providerTurns: [], runs: [] }))),
-      { concurrency: 4 },
-    );
-    spentUsd = investigationSpendUsd({
+    const rates = yield* deps.rateTable;
+    const spend = investigationSpendUsd({
       investigation,
-      threads: [records, ...children],
-      rates: yield* deps.rateTable,
+      threads: yield* readTreeTurns(deps, threadId),
+      rates,
+    });
+    spentUsd = spend.usd;
+    const costUnknown = rates.size === 0 || spend.unpricedTurns > 0;
+    if (costUnknown) {
+      // A dollars-only budget cannot end on cost it cannot price; say so rather than wait quietly.
+      yield* Effect.logWarning("investigation spend is partly unpriced", {
+        threadId,
+        ledgerId: ledger.id,
+        ratesLoaded: rates.size > 0,
+        unpricedTurns: spend.unpricedTurns,
+        timeBudget: investigation.budget.minutes !== undefined,
+      });
+    }
+    const cents = Math.round(spentUsd * 100);
+    yield* deps.orchestrator.dispatch({
+      type: "ledger.investigation.spend",
+      commandId: CommandId.make(
+        `server:investigation-spend:${ledger.id}:${cents}:${costUnknown ? "unknown" : "priced"}`,
+      ),
+      threadId,
+      ledgerId: ledger.id,
+      spentUsd,
+      costUnknown,
     });
   }
   const use = investigationBudgetUse({
@@ -303,6 +357,16 @@ export const stopInvestigation = Effect.fn("InvestigationService.stop")(function
       reason: "Stopped by the user.",
     })
     .pipe(Effect.mapError(dispatchError("stop the investigation")));
+  // The planner stops too. No reason, so it reads as the user's Stop; the end's own effect has
+  // already queued stopping the children.
+  yield* deps.orchestrator
+    .dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make(`server:investigation-stop-thread:${ledger.id}`),
+      threadId,
+      stopDelegatedTasks: false,
+    })
+    .pipe(Effect.mapError(dispatchError("stop the planner")));
 });
 
 export class InvestigationService extends Context.Service<
@@ -314,6 +378,9 @@ export class InvestigationService extends Context.Service<
     readonly stop: (threadId: ThreadId) => Effect.Effect<void, OrchestrationInvestigationError>;
   }
 >()("t3/orchestration-v2/InvestigationService") {}
+
+// Long enough to cover a restart or an outage; older ended investigations are not revisited.
+const REPORT_RESCAN_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 const TERMINAL_TASK = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
@@ -388,15 +455,23 @@ export const make = Effect.gen(function* () {
     }),
   );
 
-  // Timers and report requests live in memory; a restart re-arms running investigations and
-  // re-asks for reports, which the keyed command ids make idempotent.
+  // Timers and report requests live in memory. A restart re-arms running investigations, and
+  // re-asks for the report of one that ended while the server was down (recently: an old one's
+  // planner has long moved on). The report checks for its own message, so a repeat is a no-op.
   yield* forkParked(
     logged(
       "investigation startup scan failed",
       Effect.gen(function* () {
+        const cutoff = DateTime.formatIso(
+          DateTime.subtract(yield* DateTime.now, { milliseconds: REPORT_RESCAN_WINDOW_MS }),
+        );
         const rows = yield* sql<{ readonly thread_id: string }>`
           SELECT thread_id FROM orchestration_v2_projection_ledgers
-          WHERE payload_json LIKE '%"investigation":%'
+          WHERE json_extract(payload_json, '$.investigation.status') = 'running'
+            OR (
+              json_extract(payload_json, '$.investigation.status') IN ('solved', 'exhausted')
+              AND json_extract(payload_json, '$.investigation.endedAt') >= ${cutoff}
+            )
         `;
         for (const row of rows) {
           const threadId = ThreadId.make(row.thread_id);

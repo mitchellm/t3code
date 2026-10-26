@@ -14,7 +14,11 @@ import { applyLedgerEvent } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
-import { APPROACHES_ITEM_ID, investigationEffects } from "./Investigation.ts";
+import {
+  APPROACHES_ITEM_ID,
+  investigationDelegationProblem,
+  investigationEffects,
+} from "./Investigation.ts";
 import {
   type LedgerCommand,
   ledgerEventFromPlan,
@@ -237,5 +241,135 @@ describe("investigation state machine", () => {
     assert.isTrue(
       Result.isSuccess(planLedgerCommand({ command: addVariant, ledger: refuted, now: at(8) })),
     );
+  });
+
+  /** An item outside Approaches that the ordinary judge already passed. */
+  function judgedOutside(): Ledger {
+    let ledger = step(
+      running(),
+      {
+        type: "ledger.item.add",
+        commandId,
+        threadId,
+        ledgerId,
+        items: [{ id: id("x"), title: "Side work", acceptance: "self-written" }],
+      },
+      at(6),
+    ).ledger;
+    ledger = step(
+      ledger,
+      {
+        type: "ledger.item.update",
+        commandId,
+        threadId,
+        ledgerId,
+        itemId: id("x"),
+        status: "in_progress",
+        evidence: "It works.",
+        createdBy: "agent",
+      },
+      at(7),
+    ).ledger;
+    // `ledger_request_judgement` records a verdict without a pending close request.
+    return step(ledger, recordVerdict("x", "pass"), at(8)).ledger;
+  }
+
+  it("refuses moving a judged item under Approaches, so the refuter cannot be skipped", () => {
+    const moveAndClose = planLedgerCommand({
+      command: {
+        type: "ledger.item.update",
+        commandId,
+        threadId,
+        ledgerId,
+        itemId: id("x"),
+        parentItemId: APPROACHES_ITEM_ID,
+        status: "closed",
+        createdBy: "agent",
+      },
+      ledger: judgedOutside(),
+      now: at(9),
+    });
+    assert.isTrue(Result.isFailure(moveAndClose));
+  });
+
+  it("refuses moving an item into or out of Approaches, which would dodge the parallel cap", () => {
+    const base = step(
+      running(),
+      {
+        type: "ledger.item.add",
+        commandId,
+        threadId,
+        ledgerId,
+        items: [{ id: id("x"), title: "Side work", acceptance: "" }],
+      },
+      at(6),
+    ).ledger;
+    const moveIn = planLedgerCommand({
+      command: {
+        type: "ledger.item.update",
+        commandId,
+        threadId,
+        ledgerId,
+        itemId: id("x"),
+        parentItemId: APPROACHES_ITEM_ID,
+      },
+      ledger: base,
+      now: at(7),
+    });
+    assert.isTrue(Result.isFailure(moveIn), "a fourth live approach by moving one in");
+    const moveOut = planLedgerCommand({
+      command: {
+        type: "ledger.item.update",
+        commandId,
+        threadId,
+        ledgerId,
+        itemId: id("b"),
+        parentItemId: null,
+      },
+      ledger: base,
+      now: at(7),
+    });
+    assert.isTrue(Result.isFailure(moveOut), "freeing a slot by moving one out");
+  });
+
+  it("delegate_task is refused once the investigation has ended, and allowed while it runs", () => {
+    const thesis = running();
+    assert.strictEqual(investigationDelegationProblem(thesis), undefined);
+    const solved = step(thesis, recordVerdict("a", "pass"), at(4)).ledger;
+    assert.include(investigationDelegationProblem(solved) ?? "", "has ended (solved");
+    // Reopening the ledger hands the thread back to ordinary work.
+    const reopened = step(
+      solved,
+      { type: "ledger.reopen", commandId, threadId, ledgerId },
+      at(5),
+    ).ledger;
+    assert.strictEqual(investigationDelegationProblem(reopened), undefined);
+  });
+
+  it("only a refuter's pass solves it: a plain pass on an approach item does not", () => {
+    // The verdict is stamped as a refutation only when the item was an approach when judged.
+    const { ledger } = step(running(), recordVerdict("a", "pass"), at(4));
+    const solved = ledger.items.find((item) => item.id === id("a"));
+    assert.strictEqual(solved?.verdict?.refuter, true);
+    const unstamped: Ledger = {
+      ...judgedOutside(),
+      items: judgedOutside().items.map((item) =>
+        item.id === id("x") ? { ...item, parentItemId: APPROACHES_ITEM_ID } : item,
+      ),
+    };
+    const closed = step(
+      unstamped,
+      {
+        type: "ledger.item.update",
+        commandId,
+        threadId,
+        ledgerId,
+        itemId: id("x"),
+        status: "closed",
+        createdBy: "agent",
+      },
+      at(9),
+    ).ledger;
+    assert.strictEqual(closed.investigation?.status, "running");
   });
 });

@@ -15,6 +15,7 @@ import * as Fiber from "effect/Fiber";
 import * as Result from "effect/Result";
 import * as TestClock from "effect/testing/TestClock";
 
+import type { ModelRate, RateTable } from "../usage/usagePricing.ts";
 import { investigationEffects } from "./Investigation.ts";
 import {
   awaitInvestigationDeadline,
@@ -29,11 +30,23 @@ import { ledgerEventFromPlan, type LedgerCommand, planLedgerCommand } from "./Ta
 
 const threadId = ThreadId.make("thread:investigate");
 
+/** The usage records of a thread the fake serves; only the fields the spend walk reads. */
+interface FakeThreadUsage {
+  readonly providerTurns: ReadonlyArray<unknown>;
+  readonly runs: ReadonlyArray<unknown>;
+  readonly subagents: ReadonlyArray<unknown>;
+}
+
 /**
  * An orchestrator that keeps one ledger and runs ledger commands through the real planner, so the
  * service is tested against the same transitions the server commits.
  */
-function fakeOrchestrator() {
+function fakeOrchestrator(
+  options: {
+    readonly usage?: Readonly<Record<string, FakeThreadUsage>>;
+    readonly rates?: RateTable;
+  } = {},
+) {
   let ledger: Ledger | undefined;
   const dispatched: Array<OrchestrationV2ServerCommand> = [];
   const stopEffects: Array<string> = [];
@@ -66,12 +79,13 @@ function fakeOrchestrator() {
       }
       return { sequence: dispatched.length, storedEvents: [] };
     });
-  const getThreadRecords = () =>
+  const getThreadRecords = (id: ThreadId) =>
     Effect.sync(() => ({
-      ledger,
+      ledger: id === threadId ? ledger : undefined,
       subagents: [],
       providerTurns: [],
       runs: [],
+      ...options.usage?.[id],
       messages: dispatched.flatMap((command) =>
         command.type === "message.dispatch" ? [{ id: command.messageId }] : [],
       ),
@@ -79,7 +93,7 @@ function fakeOrchestrator() {
   const deps = {
     // The fake answers every field the service reads; the generic signature cannot be matched.
     orchestrator: { dispatch, getThreadRecords } as unknown as InvestigationDeps["orchestrator"],
-    rateTable: Effect.succeed(new Map()),
+    rateTable: Effect.succeed(options.rates ?? new Map()),
   } satisfies InvestigationDeps;
   return { deps, dispatched, stopEffects, ledger: () => ledger };
 }
@@ -174,11 +188,83 @@ describe("InvestigationService", () => {
       const ended = fake.ledger()!;
       assert.strictEqual(ended.investigation?.status, "stopped");
       assert.deepStrictEqual(fake.stopEffects, ["delegated-tasks.stop"]);
+      // The planner's own turn stops too, as a user's Stop (no agent reason).
+      const plannerStop = fake.dispatched.find((command) => command.type === "thread.stop");
+      assert.isTrue(
+        plannerStop?.type === "thread.stop" &&
+          plannerStop.threadId === threadId &&
+          plannerStop.reason === undefined,
+      );
       const sent = fake.dispatched.length;
       yield* requestInvestigationReport(fake.deps, threadId, ended.id, ended.investigation!);
       assert.strictEqual(fake.dispatched.length, sent);
       const again = yield* Effect.result(stopInvestigation(fake.deps, threadId));
       assert.isTrue(Result.isFailure(again));
+    }),
+  );
+
+  const dollarsOnly = { ...startInput, budget: { usd: 0.5 } } as const;
+  const turn = (node: string, outputTokens: number) => ({
+    nodeId: node,
+    startedAt: DateTime.makeUnsafe("2100-01-01T00:00:00.000Z"),
+    turnTokenUsage: { inputTokens: 0, outputTokens },
+  });
+  const run = (node: string) => ({ rootNodeId: node, modelSelection: { model: "priced-model" } });
+  const rate: ModelRate = {
+    inputCostPerToken: 0,
+    outputCostPerToken: 0.001,
+    cacheReadCostPerToken: 0,
+    cacheCreationCostPerToken: 0,
+    fast: null,
+    ultrafast: null,
+  };
+
+  it.effect("records spend on the record, counting tasks under tasks, and ends on dollars", () =>
+    Effect.gen(function* () {
+      const child = ThreadId.make("thread:child");
+      const grandchild = ThreadId.make("thread:grandchild");
+      const task = (childThreadId: ThreadId) => ({ origin: "app_owned", childThreadId });
+      const fake = fakeOrchestrator({
+        rates: new Map([["priced-model", rate]]),
+        usage: {
+          [threadId]: {
+            providerTurns: [turn("n0", 100)],
+            runs: [run("n0")],
+            subagents: [task(child)],
+          },
+          [child]: {
+            providerTurns: [turn("n1", 300)],
+            runs: [run("n1")],
+            subagents: [task(grandchild)],
+          },
+          [grandchild]: { providerTurns: [turn("n2", 400)], runs: [run("n2")], subagents: [] },
+        },
+      });
+      yield* startInvestigation(fake.deps, dollarsOnly);
+      yield* checkInvestigationBudget(fake.deps, threadId);
+      // 100 + 300 + 400 output tokens at $0.001: the grandchild's $0.40 is what tips it over.
+      const ended = fake.ledger()!.investigation!;
+      assert.strictEqual(ended.status, "exhausted");
+      const spend = fake.dispatched.find(
+        (command) => command.type === "ledger.investigation.spend",
+      );
+      assert.isTrue(spend?.type === "ledger.investigation.spend" && spend.spentUsd > 0.79);
+    }),
+  );
+
+  it.effect("without rates, a dollars-only budget says its cost is unknown instead of ending", () =>
+    Effect.gen(function* () {
+      const fake = fakeOrchestrator({
+        usage: {
+          [threadId]: { providerTurns: [turn("n0", 5_000)], runs: [run("n0")], subagents: [] },
+        },
+      });
+      yield* startInvestigation(fake.deps, dollarsOnly);
+      yield* checkInvestigationBudget(fake.deps, threadId);
+      const investigation = fake.ledger()!.investigation!;
+      assert.strictEqual(investigation.status, "running");
+      assert.strictEqual(investigation.costUnknown, true);
+      assert.strictEqual(investigation.spentUsd, 0);
     }),
   );
 });

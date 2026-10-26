@@ -569,6 +569,14 @@ export function useComposerSend(input: ComposerSendInput) {
         threadId: activeThread.id,
         prompt: promptForSend,
         modelSelection: ctxSelectedModelSelection,
+        hasAttachments:
+          composerImages.length +
+            composerFiles.length +
+            composerTerminalContexts.length +
+            composerPreviewAnnotations.length +
+            composerReviewComments.length +
+            composerThreadContexts.length >
+          0,
         clearPrompt: () => {
           promptRef.current = "";
           clearComposerDraftContent(composerDraftTarget);

@@ -47,34 +47,43 @@ function BudgetLine({ investigation }: { investigation: LedgerInvestigation }) {
   // A UTC minute stamp ("YYYY-MM-DDTHH:MM"): elapsed time shows whole minutes, so it re-renders
   // once a minute and nothing animates.
   const nowMinute = useNowMinute();
+  // Spend comes from the server's last dollar check; the client has no rates to price it.
+  const spentUsd = investigation.spentUsd ?? 0;
   const use = investigationBudgetUse({
     investigation,
     nowMs: Date.parse(`${nowMinute}:00.000Z`),
-    spentUsd: 0,
+    spentUsd,
   });
-  const elapsed = `${minutes(use.elapsedMs)} min elapsed`;
-  const limits = formatInvestigationBudget(investigation);
+  const parts = [
+    ...(use.limitMs === null
+      ? []
+      : [`${minutes(use.elapsedMs)} of ${investigation.budget.minutes} min`]),
+    ...(use.limitUsd === null ? [] : [`$${spentUsd.toFixed(2)} of $${use.limitUsd.toFixed(2)}`]),
+  ];
   return (
     <div className="flex flex-col gap-1">
       <p className="text-xs tabular-nums text-muted-foreground">
-        {elapsed} of {limits}
-        {investigation.budget.usd === undefined ? "" : ". Spend is checked as turns finish"}
+        {parts.join(", ")}
+        {use.limitUsd === null ? "" : ", spend checked as turns finish"}
       </p>
-      {use.limitMs === null ? null : (
+      {investigation.costUnknown === true ? (
+        <p className="text-2xs text-warning">
+          Cost unknown: some usage could not be priced, so the dollar budget may not end it.
+        </p>
+      ) : null}
+      <div
+        role="progressbar"
+        aria-label={`Budget used (${formatInvestigationBudget(investigation)})`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(use.fraction * 100)}
+        className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+      >
         <div
-          role="progressbar"
-          aria-label="Time budget used"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(use.fraction * 100)}
-          className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-        >
-          <div
-            className={use.fraction >= 1 ? "h-full bg-warning" : "h-full bg-info"}
-            style={{ width: `${Math.round(use.fraction * 100)}%` }}
-          />
-        </div>
-      )}
+          className={use.fraction >= 1 ? "h-full bg-warning" : "h-full bg-info"}
+          style={{ width: `${Math.round(use.fraction * 100)}%` }}
+        />
+      </div>
     </div>
   );
 }

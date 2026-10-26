@@ -551,6 +551,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "ledger.item.judgement.started":
     case "ledger.investigation.start":
     case "ledger.investigation.end":
+    case "ledger.investigation.spend":
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.wake-policy":
@@ -12125,6 +12126,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "ledger.item.judgement.started":
       case "ledger.investigation.start":
       case "ledger.investigation.end":
+      case "ledger.investigation.spend":
         acceptsNoEvents = (yield* dispatchLedgerCommand(command, events, effects)).redundant;
         break;
       default:

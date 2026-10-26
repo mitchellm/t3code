@@ -176,11 +176,22 @@ export function useComposerInvestigateSend() {
     readonly threadId: ThreadId;
     readonly prompt: string;
     readonly modelSelection: ModelSelection;
+    /** Images, files or attached context: the goal travels as text only. */
+    readonly hasAttachments: boolean;
     readonly clearPrompt: () => void;
   }): Promise<boolean> => {
     const key = threadKey(input.environmentId, input.threadId);
     const draft = useInvestigateDrafts.getState().drafts[key];
     if (draft === undefined) return false;
+    if (input.hasAttachments) {
+      toastManager.add({
+        type: "warning",
+        title: "Not started yet",
+        description:
+          "An investigation's goal is text only. Remove the attachments, or turn off Investigate to send them as a normal message.",
+      });
+      return true;
+    }
     const start = buildInvestigateStart(draft, input.prompt);
     if (!start.ok) {
       toastManager.add({ type: "warning", title: "Not started yet", description: start.problem });

@@ -22,11 +22,18 @@ import type { LedgerCommand, LedgerRejection, PlannedLedgerEvent } from "./TaskL
 
 export type InvestigationCommand = Extract<
   LedgerCommand,
-  { readonly type: "ledger.investigation.start" | "ledger.investigation.end" }
+  {
+    readonly type:
+      | "ledger.investigation.start"
+      | "ledger.investigation.end"
+      | "ledger.investigation.spend";
+  }
 >;
 
 export const isInvestigationCommand = (command: LedgerCommand): command is InvestigationCommand =>
-  command.type === "ledger.investigation.start" || command.type === "ledger.investigation.end";
+  command.type === "ledger.investigation.start" ||
+  command.type === "ledger.investigation.end" ||
+  command.type === "ledger.investigation.spend";
 
 export const APPROACHES_ITEM_ID = LedgerItemId.make("approaches");
 const LEDGER_TITLE_MAX = 120;
@@ -197,42 +204,131 @@ export function planInvestigationCommand(input: {
   if (investigation === undefined) {
     return Result.fail(`Ledger ${ledger.id} is not an investigation.`);
   }
-  // A deadline or Stop that lands after the investigation ended changes nothing.
+  // A deadline, Stop or spend report that lands after the investigation ended changes nothing.
   if (investigation.status !== "running") return Result.succeed([]);
+  if (command.type === "ledger.investigation.spend") {
+    return Result.succeed(planInvestigationSpend(ledger, command, now));
+  }
   return Result.succeed(
     endEvents(ledger, investigation, { status: command.status, reason: command.reason }, now),
   );
 }
 
-/** Refuses approaches beyond the parallel limit: live approaches plus the new ones. */
-export function investigationAddProblem(
+/**
+ * What the investigation refuses on top of the ledger's own rules. Approaches never move in or out
+ * of the Approaches item: a moved item could carry a verdict from the ordinary judge, or free or
+ * take a slot past the parallel limit. New and revived approaches must fit the limit.
+ */
+export function investigationCommandProblem(
   command: LedgerCommand,
   ledger: Ledger | undefined,
 ): string | undefined {
   const investigation = ledger?.investigation;
-  if (command.type !== "ledger.item.add" || ledger === undefined || investigation === undefined) {
-    return undefined;
+  if (ledger === undefined || investigation === undefined) return undefined;
+  const live = () =>
+    ledger.items.filter((item) => isApproachItem(investigation, item) && isLiveApproach(item))
+      .length;
+  const overCap = (adding: number) =>
+    live() + adding > investigation.parallelApproaches
+      ? `The investigation runs at most ${investigation.parallelApproaches} approaches at once; ${live()} are still being explored or judged. Add more once one is refuted.`
+      : undefined;
+  if (command.type === "ledger.item.add") {
+    const added = command.items.filter(
+      (draft) =>
+        draft.parentItemId === investigation.approachesItemId && draft.deferReason === undefined,
+    ).length;
+    if (added === 0) return undefined;
+    if (investigation.status !== "running") {
+      return `The investigation has ended (${investigation.status}); it takes no new approaches.`;
+    }
+    return overCap(added);
   }
-  const added = command.items.filter(
-    (draft) =>
-      draft.parentItemId === investigation.approachesItemId && draft.deferReason === undefined,
-  ).length;
-  if (added === 0) return undefined;
-  if (investigation.status !== "running") {
-    return `The investigation has ended (${investigation.status}); it takes no new approaches.`;
+  if (command.type !== "ledger.item.update") return undefined;
+  const item = ledger.items.find(({ id }) => id === command.itemId);
+  if (item === undefined) return undefined;
+  if (command.parentItemId !== undefined) {
+    if (item.id === investigation.approachesItemId) {
+      return `The ${investigation.approachesItemId} item holds the investigation's approaches and cannot move.`;
+    }
+    const wasApproach = isApproachItem(investigation, item);
+    const becomesApproach = command.parentItemId === investigation.approachesItemId;
+    if (wasApproach !== becomesApproach) {
+      return wasApproach
+        ? `Item ${item.id} is an approach and cannot leave ${investigation.approachesItemId}.`
+        : `Item ${item.id} cannot move under ${investigation.approachesItemId}. Add a new approach item instead, so the refuter judges it.`;
+    }
   }
-  const live = ledger.items.filter(
-    (item) => isApproachItem(investigation, item) && isLiveApproach(item),
-  ).length;
-  if (live + added > investigation.parallelApproaches) {
-    return `The investigation runs at most ${investigation.parallelApproaches} approaches at once; ${live} are still being explored or judged. Add more once one is refuted.`;
-  }
-  return undefined;
+  // Reviving a finished approach takes a slot like adding one.
+  const revives =
+    isApproachItem(investigation, item) &&
+    !isUnfinished(item) &&
+    (command.status === "open" || command.status === "in_progress");
+  return revives ? overCap(1) : undefined;
 }
 
 /**
- * The events a command planned, plus the solve they cause: an approach item becoming closed can
- * only be a passing verdict (the ledger requires a judge), so it ends the investigation.
+ * Marks a verdict recorded on an approach as the refuter's, which judged it (the judge picks the
+ * refuter prompt by the same test). Any marker the command carried is replaced, so only this
+ * planner attests it.
+ */
+export function stampRefuterVerdict(
+  command: LedgerCommand,
+  ledger: Ledger | undefined,
+  planned: ReadonlyArray<PlannedLedgerEvent>,
+): ReadonlyArray<PlannedLedgerEvent> {
+  if (command.type !== "ledger.item.verdict.record") return planned;
+  const investigation = ledger?.investigation;
+  const before = ledger?.items.find(({ id }) => id === command.itemId);
+  const refuter =
+    investigation !== undefined && before !== undefined && isApproachItem(investigation, before);
+  return planned.map((event) => {
+    if (event.type !== "ledger.item.updated" || event.payload.item.id !== command.itemId) {
+      return event;
+    }
+    const verdict = event.payload.item.verdict;
+    if (verdict === null) return event;
+    const { refuter: _claimed, ...plain } = verdict;
+    return {
+      ...event,
+      payload: {
+        ...event.payload,
+        item: { ...event.payload.item, verdict: refuter ? { ...plain, refuter: true } : plain },
+      },
+    };
+  });
+}
+
+/** Server-only spend report: changes the record only when the figure or its certainty moved. */
+export function planInvestigationSpend(
+  ledger: Ledger | undefined,
+  input: { readonly spentUsd: number; readonly costUnknown: boolean },
+  now: DateTime.Utc,
+): ReadonlyArray<PlannedLedgerEvent> {
+  const investigation = ledger?.investigation;
+  if (ledger === undefined || investigation?.status !== "running") return [];
+  const spentUsd = Math.round(input.spentUsd * 100) / 100;
+  if (
+    investigation.spentUsd === spentUsd &&
+    (investigation.costUnknown === true) === input.costUnknown
+  ) {
+    return [];
+  }
+  const { costUnknown: _old, ...rest } = investigation;
+  return [
+    {
+      type: "ledger.investigation.updated",
+      payload: {
+        ledgerId: ledger.id,
+        investigation: { ...rest, spentUsd, ...(input.costUnknown ? { costUnknown: true } : {}) },
+        updatedAt: now,
+      },
+    },
+  ];
+}
+
+/**
+ * The events a command planned, plus the solve they cause: an approach closing on a refuter's
+ * pass. A close carried by any other verdict does not count, whatever path brought it there.
  */
 export function followInvestigation(
   ledger: Ledger | undefined,
@@ -244,6 +340,8 @@ export function followInvestigation(
   const solvedItem = planned.flatMap((event) =>
     event.type === "ledger.item.updated" &&
     event.payload.item.status === "closed" &&
+    event.payload.item.verdict?.outcome === "pass" &&
+    event.payload.item.verdict.refuter === true &&
     isApproachItem(investigation, event.payload.item) &&
     ledger.items.find(({ id }) => id === event.payload.item.id)?.status !== "closed"
       ? [event.payload.item]
@@ -267,6 +365,17 @@ export function followInvestigation(
     ],
   };
   return [...planned, ...endEvents(after, investigation, { status: "solved", solvedItem }, now)];
+}
+
+/**
+ * Why `delegate_task` refuses on a thread whose investigation has ended, while its ledger is still
+ * the closed investigation ledger (a reopened or replaced ledger lifts it).
+ */
+export function investigationDelegationProblem(ledger: Ledger | undefined): string | undefined {
+  const investigation = ledger?.investigation;
+  if (ledger === undefined || investigation === undefined) return undefined;
+  if (investigation.status === "running" || ledger.closedAt === null) return undefined;
+  return `This thread's investigation has ended (${investigation.status}${investigation.endReason === undefined ? "" : `: ${investigation.endReason}`}), and its workers were stopped. Do not start new ones; write the report, or ask the user before starting new work.`;
 }
 
 /** Ending an investigation stops every delegated task under the thread, committed with the end. */

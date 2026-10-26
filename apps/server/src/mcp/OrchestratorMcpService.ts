@@ -129,6 +129,7 @@ import {
   startBackgroundJudgement,
 } from "./LedgerJudgement.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
+import { investigationDelegationProblem } from "../orchestration-v2/Investigation.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -2433,6 +2434,14 @@ const make = Effect.gen(function* () {
         operation,
       });
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
+      // Fork: an ended investigation's workers were stopped on purpose; do not start more.
+      if (!isRetryOfAcceptedDelegation && operation !== JUDGE_DELEGATION_OPERATION) {
+        const { ledger } = yield* threadManagement
+          .getThreadRecords(scope.thread.threadId, ["ledger"])
+          .pipe(Effect.mapError(threadManagementFailure));
+        const ended = investigationDelegationProblem(ledger);
+        if (ended !== undefined) return yield* failure("invalid_request", ended);
+      }
       // An explicit target always wins; the role only picks a default.
       const target = yield* resolveTargetRechecking({
         parent,
