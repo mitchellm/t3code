@@ -24,7 +24,6 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import { runOrchestratorV2Scenario } from "../orchestration-v2/testkit/OrchestratorScenario.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import * as LedgerJudgeLauncher from "./LedgerJudgeLauncher.ts";
 import * as LedgerMcpService from "./LedgerMcpService.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 
@@ -146,12 +145,6 @@ it.effect("creates and reads a ledger through the real orchestrator and projecti
   }).pipe(
     Effect.provide(
       LedgerMcpService.layer.pipe(
-        // This ledger has no judge, so nothing is ever started.
-        Layer.provide(
-          Layer.succeed(LedgerJudgeLauncher.LedgerJudgeLauncher)({
-            start: () => Effect.die("no judge expected"),
-          }),
-        ),
         Layer.provideMerge(layerThreads),
         Layer.provideMerge(layerOrchestrator),
         Layer.provideMerge(NodeCrypto.layer),

@@ -69,6 +69,7 @@ import {
   LedgerReopenedPayloadJson,
   LedgerVerdictRecordCommand,
   LedgerJudgementAbandonCommand,
+  LedgerJudgementStartedCommand,
   LedgerJson,
 } from "./ledger.ts";
 import { ThreadLoadout } from "./loadout.ts";
@@ -1217,7 +1218,15 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
     Schema.Struct({
       kind: Schema.Literal("ledger_continue"),
       round: PositiveInt,
-      items: Schema.Array(Schema.Struct({ id: LedgerItemId, status: LedgerItemStatus })),
+      items: Schema.Array(
+        Schema.Struct({
+          id: LedgerItemId,
+          status: LedgerItemStatus,
+          // A judge's verdict or hand-back is progress even when the status did not change.
+          judging: Schema.optionalKey(Schema.Boolean),
+          judgements: Schema.optionalKey(NonNegativeInt),
+        }),
+      ),
     }),
     Schema.Struct({ kind: Schema.Literal("system") }),
   ],
@@ -3455,6 +3464,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
   }),
   LedgerVerdictRecordCommand,
   LedgerJudgementAbandonCommand,
+  LedgerJudgementStartedCommand,
   /**
    * Internal so no client can mark a request saved without the value being
    * stored.

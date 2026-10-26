@@ -14,7 +14,7 @@ export type LedgerAutoContinueDecision =
       readonly type: "continue";
       readonly round: number;
       readonly open: ReadonlyArray<LedgerItem>;
-      readonly items: ReadonlyArray<Pick<LedgerItem, "id" | "status">>;
+      readonly items: ReadonlyArray<LedgerProgressMark>;
     }
   | {
       readonly type: "stuck";
@@ -30,11 +30,21 @@ type LedgerContinueMessage = Pick<
 const isOpen = (item: Pick<LedgerItem, "status">) =>
   item.status === "open" || item.status === "in_progress";
 
-const signatureOf = (items: ReadonlyArray<Pick<LedgerItem, "id" | "status">>) =>
+/** What a follow-up records per item; a judge's hand-back changes it without a status change. */
+export type LedgerProgressMark = Pick<LedgerItem, "id" | "status" | "judging" | "judgements">;
+
+const signatureOf = (items: ReadonlyArray<LedgerProgressMark>) =>
   items
-    .map((item) => `${item.id}:${item.status}`)
+    .map((item) => `${item.id}:${item.status}:${item.judging === true}:${item.judgements ?? 0}`)
     .sort()
     .join("\n");
+
+const progressMark = ({ id, status, judging, judgements }: LedgerItem): LedgerProgressMark => ({
+  id,
+  status,
+  ...(judging === true ? { judging } : {}),
+  ...(judgements === undefined ? {} : { judgements }),
+});
 
 /**
  * Each follow-up records its round and the item statuses it was sent against, so the streak
@@ -52,7 +62,7 @@ export function decideLedgerAutoContinue(input: {
   if (open.length === 0) return { type: "idle" };
 
   let streak = 0;
-  let previous: ReadonlyArray<Pick<LedgerItem, "id" | "status">> | undefined;
+  let previous: ReadonlyArray<LedgerProgressMark> | undefined;
   for (let index = input.messages.length - 1; index >= 0; index -= 1) {
     const message = input.messages[index]!;
     if (message.role !== "user") continue;
@@ -67,7 +77,7 @@ export function decideLedgerAutoContinue(input: {
     }
   }
 
-  const items = ledger.items.map(({ id, status }) => ({ id, status }));
+  const items = ledger.items.map(progressMark);
   if (streak >= LEDGER_AUTO_CONTINUE_CAP) {
     return { type: "stuck", reason: "cap", openIds: open.map((item) => item.id) };
   }

@@ -6,13 +6,14 @@ import {
   LedgerItemId,
   type LedgerItem,
   type LedgerItemVerdict,
+  NodeId,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
-import { type LedgerCommand, planLedgerCommand } from "./TaskLedger.ts";
+import { type LedgerCommand, ledgerJudgeEffects, planLedgerCommand } from "./TaskLedger.ts";
 
 const earlier = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
 const now = DateTime.makeUnsafe("2026-01-01T00:05:00.000Z");
@@ -371,5 +372,164 @@ describe("automatic judge", () => {
       true,
     );
     assert.include(failureOf(plan(update("L1", { status: "closed" }), blocked)), "L0");
+  });
+});
+
+describe("deferring work others wait on", () => {
+  const ledger = ledgerOf([
+    item("L1"),
+    item("L2", { blockedBy: [id("L1")] }),
+    item("L3", { status: "closed", evidence: "ok", closedAt: earlier, blockedBy: [id("L1")] }),
+  ]);
+
+  it("refuses to defer an item unfinished work depends on, naming the dependents", () => {
+    const refused = failureOf(
+      plan(update("L1", { status: "deferred", deferReason: "later" }), ledger),
+    );
+    assert.include(refused, "L2");
+    assert.notInclude(refused, "L3");
+    // Once its dependents are deferred too it can go.
+    const dependentsDeferred = ledgerOf([
+      item("L1"),
+      item("L2", { blockedBy: [id("L1")], status: "deferred", deferReason: "later" }),
+    ]);
+    assert.equal(
+      updatedItem(
+        plan(update("L1", { status: "deferred", deferReason: "later" }), dependentsDeferred),
+      )?.status,
+      "deferred",
+    );
+  });
+
+  it("refuses new work that waits on a deferred item", () => {
+    const withDeferred = ledgerOf([item("D", { status: "deferred", deferReason: "later" })]);
+    assert.include(
+      failureOf(plan(add([draft("N", { blockedBy: ["D"] })]), withDeferred)),
+      "deferred",
+    );
+  });
+});
+
+describe("what the agent may set aside on a judged ledger", () => {
+  const judgedLedger = ledgerOf(
+    [item("S", { status: "in_progress", evidence: "half" }), item("N")],
+    true,
+  );
+  const asAgent = (name: string, fields: UpdateFields) =>
+    plan({ ...update(name, fields), createdBy: "agent" } as LedgerCommand, judgedLedger);
+
+  it("refuses the agent dropping, deferring or un-starting work it started", () => {
+    for (const fields of [
+      { status: "dropped", dropReason: "too hard" },
+      { status: "deferred", deferReason: "later" },
+      { status: "open" },
+    ] as const) {
+      assert.include(failureOf(asAgent("S", fields)), "ask the user", fields.status);
+    }
+  });
+
+  it("lets the agent defer work it never started, and the user set aside anything", () => {
+    assert.equal(
+      updatedItem(asAgent("N", { status: "deferred", deferReason: "later" }))?.status,
+      "deferred",
+    );
+    assert.equal(
+      updatedItem(plan(update("S", { status: "dropped", dropReason: "not needed" }), judgedLedger))
+        ?.status,
+      "dropped",
+    );
+  });
+
+  it("does not restrict the agent on a ledger without a judge", () => {
+    const plain = ledgerOf([item("S", { status: "in_progress", evidence: "half" })]);
+    const dropped = plan(
+      {
+        ...update("S", { status: "dropped", dropReason: "moot" }),
+        createdBy: "agent",
+      } as LedgerCommand,
+      plain,
+    );
+    assert.equal(updatedItem(dropped)?.status, "dropped");
+  });
+});
+
+describe("judge start bookkeeping", () => {
+  const judgingAt = DateTime.makeUnsafe("2026-01-01T00:04:00.000Z");
+  const judging = ledgerOf(
+    [item("L1", { status: "in_progress", evidence: "ok", judging: true, updatedAt: judgingAt })],
+    true,
+  );
+  const started = (requestedAt: DateTime.Utc): LedgerCommand => ({
+    type: "ledger.item.judgement.started",
+    commandId,
+    threadId,
+    ledgerId,
+    itemId: id("L1"),
+    requestedAt,
+    taskId: NodeId.make("task:judge"),
+  });
+
+  it("records the judge task for the request that started it, and only that one", () => {
+    const recorded = updatedItem(plan(started(judgingAt), judging));
+    assert.equal(recorded?.judgeTaskId, "task:judge");
+    // The request stamp stays, since it keys the judge's effect and delegation.
+    assert.equal(DateTime.toEpochMillis(recorded!.updatedAt), DateTime.toEpochMillis(judgingAt));
+    const stale = plan(started(earlier), judging);
+    assert.deepEqual(Result.isSuccess(stale) ? stale.success : "failed", []);
+  });
+
+  it("forgets the task once a verdict settles the item", () => {
+    const withTask = ledgerOf(
+      [
+        item("L1", {
+          status: "in_progress",
+          evidence: "ok",
+          judging: true,
+          judgeTaskId: NodeId.make("task:judge"),
+        }),
+      ],
+      true,
+    );
+    const settled = updatedItem(
+      plan(
+        {
+          type: "ledger.item.verdict.record",
+          commandId,
+          threadId,
+          ledgerId,
+          itemId: id("L1"),
+          verdict: {
+            outcome: "fail",
+            judge: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" },
+            notes: "no",
+            at: now,
+          },
+        },
+        withTask,
+      ),
+    );
+    assert.notProperty(settled ?? {}, "judgeTaskId");
+  });
+
+  it("emits one start effect per close request, keyed by ledger, item and request stamp", () => {
+    const ledger = ledgerOf([item("L1", { status: "in_progress", evidence: "ok" })], true);
+    const command = update("L1", { status: "closed" });
+    const planned = plan(command, ledger);
+    const effects = ledgerJudgeEffects(
+      command,
+      ledger,
+      Result.isSuccess(planned) ? planned.success : [],
+    );
+    assert.deepEqual(
+      effects.map((effect) => effect.id),
+      [`effect:ledger-judge:${ledgerId}:L1:${DateTime.formatIso(now)}`],
+    );
+    // A repeat while judging plans nothing, so it starts nothing.
+    const judgingLedger = ledgerOf([updatedItem(planned)!], true);
+    const repeat = plan(command, judgingLedger);
+    assert.deepEqual(
+      ledgerJudgeEffects(command, judgingLedger, Result.isSuccess(repeat) ? repeat.success : []),
+      [],
+    );
   });
 });

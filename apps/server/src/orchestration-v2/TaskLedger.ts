@@ -9,8 +9,10 @@ import type {
   OrchestrationV2InternalCommand,
   ProviderInstanceId,
 } from "@t3tools/contracts";
-import type * as DateTime from "effect/DateTime";
+import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
+
+import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 
 export type LedgerEventBody = Extract<
   OrchestrationV2DomainEvent,
@@ -118,7 +120,13 @@ function newItem(draft: LedgerItemDraft, now: DateTime.Utc): LedgerItem {
 
 /** Drops an optional key rather than storing it empty, so stored items stay as small as before. */
 function withOptional<
-  Key extends "blockedBy" | "parentItemId" | "deferReason" | "judging" | "judgeError",
+  Key extends
+    | "blockedBy"
+    | "parentItemId"
+    | "deferReason"
+    | "judging"
+    | "judgeTaskId"
+    | "judgeError",
 >(item: LedgerItem, key: Key, value: LedgerItem[Key] | undefined): LedgerItem {
   // Only optional keys are accepted, so the item stays a complete LedgerItem either way.
   const { [key]: _removed, ...rest } = item;
@@ -185,19 +193,35 @@ function structureProblem(items: ReadonlyArray<LedgerItem>): string | undefined 
   return undefined;
 }
 
-/** A child that still has work cannot sit under a closed parent. */
-function closedParentProblem(
+/**
+ * Placement checks for items being added or changed: a child that still has work cannot sit under
+ * a closed parent, and unfinished work cannot wait on a deferred item, which never finishes in
+ * this task.
+ */
+function placementProblem(
   items: ReadonlyArray<LedgerItem>,
   changed: ReadonlyArray<LedgerItem>,
 ): string | undefined {
+  const byId = new Map(items.map((item) => [item.id as string, item]));
   for (const item of changed) {
-    if (item.parentItemId === undefined || !isUnfinished(item)) continue;
-    const parent = items.find(({ id }) => id === item.parentItemId);
+    if (!isUnfinished(item)) continue;
+    const parent = item.parentItemId === undefined ? undefined : byId.get(item.parentItemId);
     if (parent?.status === "closed") {
       return `Parent item ${parent.id} is closed. Reopen it before giving it unfinished sub-items.`;
     }
+    const deferred = (item.blockedBy ?? []).find((id) => byId.get(id)?.status === "deferred");
+    if (deferred !== undefined) {
+      return `Item ${item.id} cannot wait on ${deferred}, which is deferred. Drop the dependency or defer ${item.id} too.`;
+    }
   }
   return undefined;
+}
+
+/** Deferring an item that unfinished work waits on would block that work for good. */
+function dependentsOf(ledger: Ledger, item: LedgerItem): ReadonlyArray<LedgerItem> {
+  return ledger.items.filter(
+    (candidate) => isUnfinished(candidate) && (candidate.blockedBy ?? []).includes(item.id),
+  );
 }
 
 function draftProblem(drafts: ReadonlyArray<LedgerItemDraft>): string | undefined {
@@ -253,7 +277,10 @@ export function planLedgerCommand(input: {
       return reject(`Duplicate checkpoint id ${duplicateCheckpoint}.`);
     }
     const createdItems = command.items.map((draft) => newItem(draft, now));
-    const createProblem = draftProblem(command.items) ?? structureProblem(createdItems);
+    const createProblem =
+      draftProblem(command.items) ??
+      structureProblem(createdItems) ??
+      placementProblem(createdItems, createdItems);
     if (createProblem !== undefined) return reject(createProblem);
     // A closed ledger's flag must not leak into its replacement, so only the input counts here.
     const stampedRequiresJudge = input.requiresJudge === true;
@@ -326,7 +353,7 @@ export function planLedgerCommand(input: {
       const added = command.items.map((draft) => newItem(draft, now));
       const all = [...ledger.items, ...added];
       const addProblem =
-        draftProblem(command.items) ?? structureProblem(all) ?? closedParentProblem(all, added);
+        draftProblem(command.items) ?? structureProblem(all) ?? placementProblem(all, added);
       if (addProblem !== undefined) return reject(addProblem);
       return Result.succeed([
         {
@@ -371,11 +398,7 @@ export function planLedgerCommand(input: {
       };
       // Without a pending close request a verdict only unlocks closing; the agent closes it.
       if (item.judging !== true) return itemUpdated(ledger.id, recorded, now);
-      const settled = withOptional(
-        withOptional(recorded, "judging", undefined),
-        "judgeError",
-        undefined,
-      );
+      const settled = withOptional(endJudging(recorded), "judgeError", undefined);
       // A blocker or sub-item reopened while the judge ran: keep the pass, leave the close to
       // the agent, whose next close request then succeeds without another judge.
       const closes =
@@ -397,13 +420,20 @@ export function planLedgerCommand(input: {
       if (item.judging !== true) return Result.succeed([]);
       return itemUpdated(
         ledger.id,
-        withOptional(
-          { ...withOptional(item, "judging", undefined), updatedAt: now },
-          "judgeError",
-          command.reason,
-        ),
+        withOptional({ ...endJudging(item), updatedAt: now }, "judgeError", command.reason),
         now,
       );
+    }
+    case "ledger.item.judgement.started": {
+      const item = ledger.items.find(({ id }) => id === command.itemId);
+      if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
+      // Only the request that started this judge may claim it; a settled or newer one ignores it.
+      const current =
+        item.judging === true &&
+        DateTime.toEpochMillis(item.updatedAt) === DateTime.toEpochMillis(command.requestedAt);
+      if (!current || item.judgeTaskId === command.taskId) return Result.succeed([]);
+      // `updatedAt` stays the request's stamp, which keys the judge's effects and delegation.
+      return itemUpdated(ledger.id, { ...item, judgeTaskId: command.taskId }, now);
     }
     case "ledger.item.update": {
       const item = ledger.items.find(({ id }) => id === command.itemId);
@@ -420,7 +450,7 @@ export function planLedgerCommand(input: {
         if (repeatsClose) return Result.succeed([]);
         if (command.status !== "dropped") {
           return reject(
-            `Item ${item.id} is being judged. Wait for the verdict, which closes it or hands it back with the judge's notes, or drop it.`,
+            `Item ${item.id} is being judged. Wait for the verdict, which closes it or hands it back with the judge's notes.`,
           );
         }
       }
@@ -429,6 +459,27 @@ export function planLedgerCommand(input: {
 
       if (changesStatus && !LEGAL_TRANSITIONS[item.status].includes(target)) {
         return reject(`Item ${item.id} cannot go from ${item.status} to ${target}.`);
+      }
+      // On a judged ledger, work the agent started ends only through the judge; setting it aside
+      // is the user's call. Deferring or dropping work it never started stays open to it.
+      if (
+        command.createdBy === "agent" &&
+        requiresJudge &&
+        changesStatus &&
+        item.status === "in_progress" &&
+        (target === "deferred" || target === "dropped" || target === "open")
+      ) {
+        return reject(
+          `Item ${item.id} is in progress on a judged ledger. Close it with evidence for the judge, or ask the user to defer or drop it.`,
+        );
+      }
+      if (changesStatus && target === "deferred") {
+        const dependents = dependentsOf(ledger, item);
+        if (dependents.length > 0) {
+          return reject(
+            `Item ${item.id} cannot be deferred while unfinished items wait on it: ${describeItems(dependents)}. Defer them first or drop the dependency.`,
+          );
+        }
       }
       if (!changesStatus && (item.status === "closed" || item.status === "dropped")) {
         return reject(`Item ${item.id} is ${item.status}. Reopen it to change it.`);
@@ -452,7 +503,7 @@ export function planLedgerCommand(input: {
         const items = ledger.items.map((candidate) =>
           candidate.id === item.id ? structured : candidate,
         );
-        const problem = structureProblem(items) ?? closedParentProblem(items, [structured]);
+        const problem = structureProblem(items) ?? placementProblem(items, [structured]);
         if (problem !== undefined) return reject(problem);
       }
 
@@ -541,7 +592,7 @@ export function planLedgerCommand(input: {
           ledger.id,
           {
             ...withOptional(
-              withOptional(structured, "deferReason", undefined),
+              withOptional(endJudging(structured), "deferReason", undefined),
               "judgeError",
               undefined,
             ),
@@ -569,7 +620,7 @@ export function planLedgerCommand(input: {
         updatedAt: now,
       };
       next = withOptional(next, "deferReason", target === "deferred" ? deferReason : undefined);
-      if (target === "dropped") next = withOptional(next, "judging", undefined);
+      if (target === "dropped") next = endJudging(next);
       if (changesStatus || evidence !== item.evidence) {
         next = withOptional(next, "judgeError", undefined);
       }
@@ -585,6 +636,41 @@ export function planLedgerCommand(input: {
       return itemUpdated(ledger.id, next, now);
     }
   }
+}
+
+const endJudging = (item: LedgerItem): LedgerItem =>
+  withOptional(withOptional(item, "judging", undefined), "judgeTaskId", undefined);
+
+/**
+ * The judge each newly judging item needs, committed with the event that made it judging, so a
+ * close from any client starts one and a crash before it runs leaves it in the outbox. Keyed by
+ * ledger, item and request stamp: a replay is the same effect and the same delegation.
+ */
+export function ledgerJudgeEffects(
+  command: LedgerCommand,
+  ledger: Ledger | undefined,
+  planned: ReadonlyArray<PlannedLedgerEvent>,
+): ReadonlyArray<PendingOrchestrationEffectV2> {
+  return planned.flatMap((event) => {
+    if (event.type !== "ledger.item.updated" || event.payload.item.judging !== true) return [];
+    const { item } = event.payload;
+    const before = ledger?.items.find(({ id }) => id === item.id);
+    if (before?.judging === true) return [];
+    const requestedAt = DateTime.formatIso(item.updatedAt);
+    return [
+      {
+        id: `effect:ledger-judge:${event.payload.ledgerId}:${item.id}:${requestedAt}`,
+        commandId: command.commandId,
+        threadId: command.threadId,
+        request: {
+          type: "ledger-judge.start",
+          ledgerId: event.payload.ledgerId,
+          itemId: item.id,
+          requestedAt,
+        },
+      },
+    ];
+  });
 }
 
 function unfinishedChildren(ledger: Ledger, parent: LedgerItem): ReadonlyArray<LedgerItem> {

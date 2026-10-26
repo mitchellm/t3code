@@ -20,7 +20,6 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import * as LedgerJudgeLauncher from "./LedgerJudgeLauncher.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
 import { dispatchFailure, unavailable } from "./threadAccess.ts";
@@ -116,7 +115,6 @@ const make = Effect.gen(function* () {
       Effect.orDie,
     );
   const threads = yield* ThreadManagementService.ThreadManagementService;
-  const judges = yield* LedgerJudgeLauncher.LedgerJudgeLauncher;
 
   const loadOwnLedger = Effect.fn("LedgerMcpService.loadOwnLedger")(function* (
     scope: McpInvocationScope,
@@ -302,7 +300,7 @@ const make = Effect.gen(function* () {
         "Pass status, evidence, a reason, blockedBy or parentItemId to update.",
       );
     }
-    const result = yield* onExisting(
+    return yield* onExisting(
       "update-item",
       scope,
       input,
@@ -310,6 +308,8 @@ const make = Effect.gen(function* () {
         type: "ledger.item.update",
         ...common,
         itemId: input.itemId,
+        // Every ledger tool call is the agent's; the planner holds it to what the user may do.
+        createdBy: "agent",
         ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
         ...(input.dropReason === undefined ? {} : { dropReason: input.dropReason }),
@@ -334,15 +334,6 @@ const make = Effect.gen(function* () {
         );
       },
     );
-    // Started after the close request is durable, and again on a retry: the launcher joins a
-    // judge already running, and after a restart this is what resumes a stranded one.
-    if (
-      input.status === "closed" &&
-      result.ledger?.items.some((item) => item.id === input.itemId && item.judging) === true
-    ) {
-      yield* judges.start(scope, input.itemId);
-    }
-    return result;
   });
 
   const setCheckpoint = Effect.fn("LedgerMcpService.setCheckpoint")(function* (
@@ -396,7 +387,5 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   LedgerMcpService,
   never,
-  | Crypto.Crypto
-  | ThreadManagementService.ThreadManagementService
-  | LedgerJudgeLauncher.LedgerJudgeLauncher
+  Crypto.Crypto | ThreadManagementService.ThreadManagementService
 > = Layer.effect(LedgerMcpService, make);

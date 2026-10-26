@@ -2,6 +2,8 @@ import {
   CheckpointId,
   CheckpointScopeId,
   CommandId,
+  LedgerId,
+  LedgerItemId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -119,6 +121,14 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("delegated-tasks.stop"),
     reason: Schema.optional(Schema.String),
   }),
+  // Fork: starts the judge for a ledger close request. Only starts it: the verdict lands later.
+  Schema.Struct({
+    type: Schema.Literal("ledger-judge.start"),
+    ledgerId: LedgerId,
+    itemId: LedgerItemId,
+    /** The judging item's `updatedAt`; a later close request makes this one stale. */
+    requestedAt: Schema.String,
+  }),
 ]);
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
@@ -133,6 +143,8 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "attachment.cleanup",
   "thread-title.generate",
   "delegated-tasks.stop",
+  // The delegation is keyed by the request, so a replay rejoins the judge it already started.
+  "ledger-judge.start",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const PROCESS_BOUND_EFFECT_TYPES = [

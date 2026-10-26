@@ -25,7 +25,6 @@ import {
   type LedgerCommand,
 } from "../../../orchestration-v2/TaskLedger.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
-import * as LedgerJudgeLauncher from "../../LedgerJudgeLauncher.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "../../McpToolAccess.testkit.ts";
@@ -132,19 +131,11 @@ const makeFakeThreads = () => {
         return { sequence, storedEvents: [] };
       }),
   });
-  const started: Array<string> = [];
-  const launcher = Layer.succeed(LedgerJudgeLauncher.LedgerJudgeLauncher)({
-    start: (_scope, itemId) => Effect.sync(() => void started.push(itemId)),
-  });
-  return { layer: Layer.merge(layer, launcher), ledgers, planned: () => planned, started };
+  return { layer, ledgers, planned: () => planned };
 };
 
 const withServer = <A, E>(
-  fake: {
-    readonly layer: Layer.Layer<
-      ThreadManagement.ThreadManagementService | LedgerJudgeLauncher.LedgerJudgeLauncher
-    >;
-  },
+  fake: { readonly layer: Layer.Layer<ThreadManagement.ThreadManagementService> },
   body: (
     call: (
       name: string,
@@ -327,37 +318,47 @@ it.effect("takes blockers, sub-items and deferral, and reads them back in tree o
   );
 });
 
-it.effect("starts the judge itself when an item is closed on a judged ledger", () => {
-  const fake = makeFakeThreads();
-  return withServer(fake, (call) =>
-    Effect.gen(function* () {
-      yield* call("ledger_create", { title: "Ship", items: twoItems });
-      // The orchestrator stamps the gate from the loadout; the fake planner reads it from here.
-      fake.ledgers.set(ownThread, { ...fake.ledgers.get(ownThread)!, requiresJudge: true });
+it.effect(
+  "turns a close on a judged ledger into a judge request the agent cannot set aside",
+  () => {
+    const fake = makeFakeThreads();
+    return withServer(fake, (call) =>
+      Effect.gen(function* () {
+        yield* call("ledger_create", { title: "Ship", items: twoItems });
+        // The orchestrator stamps the gate from the loadout; the fake planner reads it from here.
+        fake.ledgers.set(ownThread, { ...fake.ledgers.get(ownThread)!, requiresJudge: true });
 
-      const closing = yield* call("ledger_update_item", {
-        itemId: "L1",
-        status: "closed",
-        evidence: "parser.test.ts: 12 passed",
-      });
-      expect(failureOf(closing)).toBeUndefined();
-      expect(closing.structuredContent).toMatchObject({
-        ledger: {
-          items: expect.arrayContaining([
-            expect.objectContaining({ id: "L1", status: "in_progress", judging: true }),
-          ]),
-        },
-      });
-      expect(fake.started).toEqual(["L1"]);
-      // Asking again while it is judged changes nothing and does not fail.
-      const again = yield* call("ledger_update_item", { itemId: "L1", status: "closed" });
-      expect(failureOf(again)).toBeUndefined();
-      // A plain status change starts no judge.
-      yield* call("ledger_update_item", { itemId: "L2", status: "in_progress" });
-      expect(fake.started.filter((id) => id === "L2")).toEqual([]);
-    }),
-  );
-});
+        const closing = yield* call("ledger_update_item", {
+          itemId: "L1",
+          status: "closed",
+          evidence: "parser.test.ts: 12 passed",
+        });
+        expect(failureOf(closing)).toBeUndefined();
+        expect(closing.structuredContent).toMatchObject({
+          ledger: {
+            items: expect.arrayContaining([
+              expect.objectContaining({ id: "L1", status: "in_progress", judging: true }),
+            ]),
+          },
+        });
+        // Asking again while it is judged changes nothing and does not fail.
+        const again = yield* call("ledger_update_item", { itemId: "L1", status: "closed" });
+        expect(failureOf(again)).toBeUndefined();
+        // Work the agent started on a judged ledger is the user's to set aside.
+        yield* call("ledger_update_item", { itemId: "L2", status: "in_progress" });
+        expect(
+          failureOf(
+            yield* call("ledger_update_item", {
+              itemId: "L2",
+              status: "dropped",
+              dropReason: "too hard",
+            }),
+          ),
+        ).toMatchObject({ message: expect.stringContaining("ask the user") });
+      }),
+    );
+  },
+);
 
 it.effect("rejects a caller outside a thread and a credential without orchestration", () =>
   withServer(makeFakeThreads(), (call) =>

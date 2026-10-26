@@ -5,6 +5,7 @@ import {
   LedgerCheckpointId,
   LedgerId,
   LedgerItemId,
+  NodeId,
   NonNegativeInt,
   ThreadId,
   TrimmedNonEmptyString,
@@ -61,9 +62,11 @@ export const LedgerItem = Schema.Struct({
    * server sets or clears it; the verdict closes the item (pass) or hands it back (fail).
    */
   judging: Schema.optionalKey(Schema.Boolean),
+  /** The delegated judge task for the pending close request, once the server started it. */
+  judgeTaskId: Schema.optionalKey(NodeId),
   /**
-   * Why the last automatic judgement ended without a verdict (the judge could not start, failed,
-   * or outlived the wait). Not a failing verdict: the work was never judged.
+   * Why the last automatic judgement ended without a verdict (the judge could not start or did
+   * not finish). Not a failing verdict: the work was never judged.
    */
   judgeError: Schema.optionalKey(Schema.String),
   createdAt: Schema.DateTimeUtc,
@@ -180,6 +183,11 @@ export const LedgerCommands = [
     blockedBy: Schema.optional(Schema.Array(LedgerItemId)),
     /** Null moves the item to the top level. */
     parentItemId: Schema.optional(Schema.NullOr(LedgerItemId)),
+    /**
+     * The ledger MCP tools stamp "agent"; a client sends nothing, which means the user. Claiming
+     * "agent" only narrows what the command may do, so a client gains nothing by it.
+     */
+    createdBy: Schema.optional(Schema.Literals(["user", "agent"])),
     // No verdict and no judging flag: only the server attests a verdict, via the internal
     // `ledger.item.verdict.record`, and only the planner starts a judgement.
   }).check(
@@ -236,6 +244,18 @@ export const LedgerJudgementAbandonCommand = Schema.Struct({
   ledgerId: LedgerId,
   itemId: LedgerItemId,
   reason: TrimmedNonEmptyString,
+});
+
+/** Server-only: records the judge task a pending close request started. */
+export const LedgerJudgementStartedCommand = Schema.Struct({
+  type: Schema.Literal("ledger.item.judgement.started"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  ledgerId: LedgerId,
+  itemId: LedgerItemId,
+  /** The item's `updatedAt` when the close request made it judging; a later request is stale. */
+  requestedAt: Schema.DateTimeUtc,
+  taskId: NodeId,
 });
 
 /** Payload of `ledger.item.added`: only the newly added items, which readers upsert. */
