@@ -126,7 +126,8 @@ function withOptional<
     | "deferReason"
     | "judging"
     | "judgeTaskId"
-    | "judgeError",
+    | "judgeError"
+    | "judgementsAtReopen",
 >(item: LedgerItem, key: Key, value: LedgerItem[Key] | undefined): LedgerItem {
   // Only optional keys are accepted, so the item stays a complete LedgerItem either way.
   const { [key]: _removed, ...rest } = item;
@@ -400,12 +401,13 @@ export function planLedgerCommand(input: {
       if (command.judgedEvidence !== undefined && command.judgedEvidence !== item.evidence) {
         return reject(`Item ${item.id} evidence changed while it was being judged.`);
       }
-      const recorded: LedgerItem = {
-        ...item,
-        verdict: command.verdict,
-        judgements: (item.judgements ?? 0) + 1,
-        updatedAt: now,
-      };
+      const judgements = (item.judgements ?? 0) + 1;
+      // A pass restarts the failure count the replan nudge reads (LedgerReplan.judgeFailures).
+      const recorded: LedgerItem = withOptional(
+        { ...item, verdict: command.verdict, judgements, updatedAt: now },
+        "judgementsAtReopen",
+        command.verdict.outcome === "pass" ? judgements : item.judgementsAtReopen,
+      );
       // Without a pending close request a verdict only unlocks closing; the agent closes it.
       if (item.judging !== true) return itemUpdated(ledger.id, recorded, now);
       // Unstamped on a judging item it only records, keeping the request's stamp intact.
@@ -544,7 +546,8 @@ export function planLedgerCommand(input: {
           item.status === "deferred"
             ? { ...revived, status: "open", updatedAt: now }
             : {
-                ...revived,
+                // Starting over restarts the failure count the replan nudge reads.
+                ...withOptional(revived, "judgementsAtReopen", item.judgements),
                 status: "open",
                 evidence: null,
                 dropReason: null,

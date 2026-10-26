@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import { progressMark } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -14,6 +15,7 @@ import {
   decideStopHookNudge,
   judgeFailures,
   LEDGER_JUDGE_FAILURE_REPLAN_THRESHOLD,
+  ledgerReplanText,
 } from "./LedgerReplan.ts";
 
 const at = DateTime.makeUnsafe(Date.UTC(2026, 9, 26));
@@ -69,11 +71,7 @@ const followUp = (
     source: {
       kind: "ledger_continue",
       round,
-      items: ledger.items.map(({ id, status, judgements }) => ({
-        id,
-        status,
-        ...(judgements === undefined ? {} : { judgements }),
-      })),
+      items: ledger.items.map(progressMark),
       ...(replan === undefined
         ? {}
         : {
@@ -93,6 +91,43 @@ describe("judgeFailures", () => {
     expect(judgeFailures(failedJudge("a", 3))).toBe(3);
     expect(judgeFailures(item("a", { verdict: verdict("pass"), judgements: 3 }))).toBe(0);
     expect(judgeFailures(item("a"))).toBe(0);
+  });
+
+  it("counts only failures since the item was last reopened or passed", () => {
+    expect(judgeFailures({ ...failedJudge("a", 4), judgementsAtReopen: 3 })).toBe(1);
+  });
+});
+
+describe("stall replan items", () => {
+  it("lists only items the agent can act on, keeping a repeatedly failed item's judge notes", () => {
+    const ledger = ledgerOf(
+      item("a", { blockedBy: [LedgerItemId.make("item:b")] }),
+      failedJudge("b", 3),
+      { ...failedJudge("c", 1), judging: true },
+    );
+    // b already had its judge replan this streak, so this round is the stall's.
+    const decision = decideLedgerFollowUp({
+      ledger,
+      messages: [userMessage, followUp(1, ledger, { reason: "judge", itemIds: ["item:b"] })],
+    });
+    expect(decision).toEqual({ type: "stuck", reason: "stalled", openIds: expect.any(Array) });
+
+    const stalled = decideLedgerFollowUp({ ledger, messages: [userMessage, followUp(1, ledger)] });
+    expect(stalled).toMatchObject({ type: "replan", reason: "stalled", replanItemIds: ["item:b"] });
+    if (stalled.type !== "replan") return;
+    const text = ledgerReplanText({ ledger, reason: "stalled", items: stalled.replanItems });
+    expect(text).toContain("the parser still drops trailing commas");
+    expect(text).not.toContain("item:a");
+    expect(text).not.toContain("item:c");
+
+    const nudge = decideStopHookNudge({
+      ledger,
+      open: ledger.items,
+      unchangedBlocks: 3,
+      limit: 3,
+      judgeReplanned: new Set(["item:b"]),
+    });
+    expect(nudge).toMatchObject({ type: "replan", reason: "stalled", items: [ledger.items[1]] });
   });
 });
 
@@ -183,24 +218,21 @@ describe("decideLedgerFollowUp", () => {
 
 describe("decideStopHookNudge", () => {
   const open = [item("a"), failedJudge("b", 3)];
+  const ledger = ledgerOf(...open);
   const limit = 3;
 
   it("blocks, then replans at the no-progress limit, then allows", () => {
     const none = new Set<string>(["item:b"]);
-    expect(decideStopHookNudge({ open, unchangedBlocks: 0, limit, judgeReplanned: none })).toEqual({
-      type: "block",
-    });
-    expect(
-      decideStopHookNudge({ open, unchangedBlocks: limit, limit, judgeReplanned: none }),
-    ).toMatchObject({ type: "replan", reason: "stalled", items: open });
-    expect(
-      decideStopHookNudge({ open, unchangedBlocks: limit + 1, limit, judgeReplanned: none }),
-    ).toEqual({ type: "allow" });
+    const nudge = (unchangedBlocks: number) =>
+      decideStopHookNudge({ ledger, open, unchangedBlocks, limit, judgeReplanned: none });
+    expect(nudge(0)).toEqual({ type: "block" });
+    expect(nudge(limit)).toMatchObject({ type: "replan", reason: "stalled", items: open });
+    expect(nudge(limit + 1)).toEqual({ type: "allow" });
   });
 
   it("replans an item the judge failed repeatedly, unless already replanned this prompt", () => {
     expect(
-      decideStopHookNudge({ open, unchangedBlocks: 0, limit, judgeReplanned: new Set() }),
+      decideStopHookNudge({ ledger, open, unchangedBlocks: 0, limit, judgeReplanned: new Set() }),
     ).toMatchObject({ type: "replan", reason: "judge", items: [open[1]] });
   });
 });

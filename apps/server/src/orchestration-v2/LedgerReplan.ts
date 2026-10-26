@@ -9,6 +9,7 @@ import {
   decideLedgerAutoContinue,
   type LedgerAutoContinueDecision,
   type LedgerProgressMark,
+  partitionLedgerFollowUp,
   progressMark,
 } from "@t3tools/shared/taskLedger";
 
@@ -28,30 +29,39 @@ const isOpen = (item: Pick<LedgerItem, "status">) =>
   item.status === "open" || item.status === "in_progress";
 
 /**
- * The projection keeps how many verdicts an item got and the latest one, not every outcome. A pass
- * normally closes the item, so on an item still open whose latest verdict failed, the count is its
- * failures; a pass that left it open (a blocker reopened mid-judgement) is the rare overcount.
+ * The projection keeps how many verdicts an item got, not each outcome, so failures are the
+ * verdicts since the planner's baseline (last reopen or last pass), while the latest one failed.
  */
-export const judgeFailures = (item: Pick<LedgerItem, "verdict" | "judgements">): number =>
-  item.verdict?.outcome === "fail" ? (item.judgements ?? 0) : 0;
+export const judgeFailures = (
+  item: Pick<LedgerItem, "verdict" | "judgements" | "judgementsAtReopen">,
+): number =>
+  item.verdict?.outcome === "fail" ? (item.judgements ?? 0) - (item.judgementsAtReopen ?? 0) : 0;
+
+const isJudgeReplanDue = (item: LedgerItem) =>
+  item.judging !== true && judgeFailures(item) >= LEDGER_JUDGE_FAILURE_REPLAN_THRESHOLD;
+
+/**
+ * A stall replan names only what the agent can act on now; an item waiting on a blocker or on the
+ * judge is replanned through the item that holds it up. With nothing actionable, every open item.
+ */
+function stalledItems(ledger: Ledger, open: ReadonlyArray<LedgerItem>): ReadonlyArray<LedgerItem> {
+  const { actionable } = partitionLedgerFollowUp(ledger, open);
+  return actionable.length === 0 ? open : actionable.map(({ item }) => item);
+}
 
 /** Open items handed back by the judge often enough to need a new plan, not yet replanned. */
 function judgeReplanDue(
   open: ReadonlyArray<LedgerItem>,
   alreadyReplanned: ReadonlySet<string>,
 ): ReadonlyArray<LedgerItem> {
-  return open.filter(
-    (item) =>
-      item.judging !== true &&
-      !alreadyReplanned.has(item.id) &&
-      judgeFailures(item) >= LEDGER_JUDGE_FAILURE_REPLAN_THRESHOLD,
-  );
+  return open.filter((item) => !alreadyReplanned.has(item.id) && isJudgeReplanDue(item));
 }
 
-const itemLines = (reason: LedgerReplanReason, items: ReadonlyArray<LedgerItem>) => {
+const itemLines = (items: ReadonlyArray<LedgerItem>) => {
   const lines = items.slice(0, ITEMS_SHOWN).map((item) => {
     const head = `- ${item.id} [${item.status}] ${item.title}\n  Acceptance: ${clip(item.acceptance, ACCEPTANCE_MAX_CHARS)}`;
-    if (reason !== "judge" || item.verdict === null) return head;
+    // A stall replan keeps the judge's notes too: they say why the item is stuck.
+    if (item.verdict === null || !isJudgeReplanDue(item)) return head;
     return `${head}\n  Failed the judge ${judgeFailures(item)} times; last notes: ${clip(item.verdict.notes, NOTES_MAX_CHARS)}`;
   });
   const hidden = items.length - ITEMS_SHOWN;
@@ -75,7 +85,7 @@ export function ledgerReplanText(input: {
   return [
     why,
     "Re-read the ledger (ledger_read). For each item below decide one of: split it into smaller sub-items (ledger_add_items with parentItemId); rewrite its acceptance so it can actually be met (drop it with a reason and add a replacement item); mark it blocked by something new (add the blocker as an item and set blockedBy); or defer it with a reason. Record the decision in the ledger, then continue with the new plan.",
-    ...itemLines(reason, items),
+    ...itemLines(items),
     reason === "stalled"
       ? "If the ledger is still unchanged after this, automatic follow-ups stop and the user is asked to look."
       : "",
@@ -135,16 +145,19 @@ export function decideLedgerFollowUp(input: LedgerFollowUpInput): LedgerFollowUp
   if (base.type === "stuck" && base.reason === "cap") return base;
   const history = replanHistory(input.messages);
   if (base.type === "stuck") {
+    // Any replan, the judge's included, is this stall's one replan: a judge replan that moved
+    // nothing has used it up, so the stall stops here rather than replanning again.
     if (history.latestWasReplan) return base;
     const open = ledger.items.filter(isOpen);
+    const stuck = stalledItems(ledger, open);
     return {
       type: "replan",
       reason: "stalled",
       round: history.streak + 1,
       open,
       items: ledger.items.map(progressMark),
-      replanItems: open,
-      replanItemIds: open.map((item) => item.id),
+      replanItems: stuck,
+      replanItemIds: stuck.map((item) => item.id),
     };
   }
   const due = judgeReplanDue(base.open, history.judgeReplanned);
@@ -173,14 +186,17 @@ export type StopHookNudge =
  * is what this prompt already replanned for the judge.
  */
 export function decideStopHookNudge(input: {
+  readonly ledger: Ledger;
   readonly open: ReadonlyArray<LedgerItem>;
   readonly unchangedBlocks: number;
   readonly limit: number;
   readonly judgeReplanned: ReadonlySet<string>;
 }): StopHookNudge {
   if (input.unchangedBlocks > input.limit) return { type: "allow" };
+  // A judge replan block counts toward the limit, so with no progress it shortens the run of
+  // plain blocks before the stall replan rather than adding one.
   if (input.unchangedBlocks === input.limit) {
-    return { type: "replan", reason: "stalled", items: input.open };
+    return { type: "replan", reason: "stalled", items: stalledItems(input.ledger, input.open) };
   }
   const due = judgeReplanDue(input.open, input.judgeReplanned);
   return due.length === 0 ? { type: "block" } : { type: "replan", reason: "judge", items: due };

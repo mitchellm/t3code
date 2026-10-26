@@ -569,6 +569,29 @@ it.effect("replans an item the judge failed three times, naming it", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("counts judge failures only since the item was reopened", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = yield* setup("judge-fails-reopened");
+    for (let failure = 0; failure < 3; failure += 1) yield* recordFailure(threadId, "a");
+    yield* updateItem(threadId, "a", "closed");
+    yield* orchestrator.dispatch({
+      type: "ledger.item.update",
+      commandId: CommandId.make(nextId("reopen")),
+      threadId,
+      ledgerId,
+      itemId: itemId("a"),
+      status: "open",
+    });
+    yield* recordFailure(threadId, "a");
+    yield* sendUserMessage(threadId);
+    yield* completeLatest(threadId);
+    const followUp = (yield* autoContinues(threadId)).at(-1);
+    assert.equal(roundOf(followUp), 1);
+    assert.isUndefined(replanOf(followUp));
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect(
   "stays off after the user cancels the queued follow-up, even for a later server wake",
   () =>

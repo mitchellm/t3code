@@ -179,6 +179,32 @@ describe("Stop hook", () => {
     expect(await fire("Stop", stop(true))).toEqual({});
   });
 
+  it(`allows the stop at the ${HARNESS_STOP_BLOCK_CEILING}-block ceiling even when a judge replan is due`, async () => {
+    const current: Current = { value: undefined };
+    const { fire } = make(ledgerReader(current));
+    const judgeFailed = (times: number): LedgerItem => ({
+      ...item("L2", "in_progress"),
+      judgements: times,
+      verdict: {
+        outcome: "fail",
+        judge: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" },
+        notes: "Still wrong",
+        at,
+      },
+    });
+    for (let index = 0; index < HARNESS_STOP_BLOCK_CEILING; index++) {
+      current.value = state(
+        ledgerOf([item("L1", "open", { evidence: `attempt ${index}` }), judgeFailed(1)]),
+      );
+      expect((await fire("Stop", stop(index > 0))).decision).toBe("block");
+    }
+    // The third failure lands on the stop that hits the ceiling: the ceiling still wins.
+    current.value = state(ledgerOf([item("L1", "open", { evidence: "last" }), judgeFailed(3)]));
+    expect(await fire("Stop", stop(true))).toEqual({});
+    // The replan was not spent on the allowed stop, so the next prompt gets it.
+    expect(String((await fire("Stop", stop(false))).reason)).toContain("failed the judge");
+  });
+
   it("replans an item the judge failed three times, naming it, once per prompt", async () => {
     const failed: LedgerItem = {
       ...item("L2", "in_progress"),

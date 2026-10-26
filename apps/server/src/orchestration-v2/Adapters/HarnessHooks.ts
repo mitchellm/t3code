@@ -247,6 +247,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         }
         // Fork: the limit's last block asks for a replan, so the stop is allowed one block later.
         const nudge = decideStopHookNudge({
+          ledger,
           open,
           unchangedBlocks: consecutiveBlocks,
           limit: HARNESS_STOP_BLOCK_LIMIT,
