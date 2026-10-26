@@ -16,9 +16,8 @@ export const OrchestrationRunBuildModeInput = Schema.Struct({
 export type OrchestrationRunBuildModeInput = typeof OrchestrationRunBuildModeInput.Type;
 
 export const OrchestrationRunBuildModeResult = Schema.Struct({
+  /** For an audit this means started: its findings reach the ledger when the judge finishes. */
   action: BuildModeAction,
-  /** Audit only: how many findings were appended to the ledger. */
-  findings: Schema.optionalKey(Schema.Number),
 });
 export type OrchestrationRunBuildModeResult = typeof OrchestrationRunBuildModeResult.Type;
 

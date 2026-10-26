@@ -147,9 +147,9 @@ function ledgerSection(ledger: Ledger): ReadonlyArray<string> {
 }
 
 /**
- * The first message of a fresh provider session. Pinned rules are not repeated: every turn's
- * provider input already carries them (RunExecutionService composes project rules, user pins and
- * agent pins into `pinnedRules`), and a new session receives them like any other.
+ * The first message of a fresh provider session. Pins are not repeated: only the Claude and Codex
+ * adapters deliver `pinnedRules`, on every turn and so also after a reset; other providers get
+ * none either way. A reset ends any native goal, as the new native thread has none.
  */
 export function resetSeedText(input: {
   readonly ledger: Ledger | undefined;

@@ -28,7 +28,7 @@ const ACTIONS: ReadonlyArray<{
   { action: "build", label: "Build", busyLabel: "Starting…" },
   { action: "compact_and_build", label: "Compact and build", busyLabel: "Starting…" },
   { action: "reset_and_build", label: "Reset and build", busyLabel: "Starting…" },
-  { action: "audit", label: "Audit", busyLabel: "Auditing…" },
+  { action: "audit", label: "Audit", busyLabel: "Starting…" },
 ];
 
 export function BuildModeBar({
@@ -75,19 +75,16 @@ export function BuildModeBar({
     if (result._tag === "Failure") {
       toastManager.add({
         type: "error",
-        title: action === "audit" ? "The audit did not finish" : "Could not start the build",
+        title: action === "audit" ? "Could not start the audit" : "Could not start the build",
         description: formatEnvironmentQueryError(result.cause),
       });
       return;
     }
     if (action === "audit") {
-      const findings = result.value.findings ?? 0;
       toastManager.add({
-        type: "success",
-        title: findings === 0 ? "Audit found nothing to fix" : "Audit added findings",
-        ...(findings === 0
-          ? {}
-          : { description: `${findings} item${findings === 1 ? "" : "s"} added to the ledger.` }),
+        type: "info",
+        title: "Audit started",
+        description: "The judge's findings will appear in the ledger when it finishes.",
       });
       return;
     }

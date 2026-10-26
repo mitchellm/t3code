@@ -44,6 +44,7 @@ function makeAdapter(input: {
   readonly selection: typeof CLAUDE_MODEL_SELECTION;
   readonly capabilities: OrchestrationV2ProviderCapabilities;
   readonly captured: Ref.Ref<ReadonlyArray<CapturedTurn>>;
+  readonly failResumeOnce: Ref.Ref<boolean>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   const driver = ProviderDriverKind.make(
     input.capabilities === ClaudeProviderCapabilitiesV2 ? "claudeAgent" : "codex",
@@ -102,7 +103,13 @@ function makeAdapter(input: {
                 updatedAt: createdAt,
               } satisfies OrchestrationV2ProviderThread;
             }),
-          resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+          resumeThread: ({ providerThread }) =>
+            Effect.gen(function* () {
+              if (yield* Ref.getAndSet(input.failResumeOnce, false)) {
+                return yield* unused("simulated native resume failure");
+              }
+              return providerThread;
+            }),
           compactThread: (turnInput) => runtime.startTurn(turnInput),
           startTurn: (turnInput) =>
             Effect.gen(function* () {
@@ -157,44 +164,88 @@ function makeAdapter(input: {
   };
 }
 
+const sendTurn = (
+  orchestrator: Orchestrator.OrchestratorV2["Service"],
+  ordinal: number,
+  fresh: boolean,
+) =>
+  orchestrator.dispatch({
+    type: "message.dispatch",
+    commandId: CommandId.make(`fresh:${ordinal}`),
+    messageId: MessageId.make(`fresh:${ordinal}`),
+    threadId,
+    createdBy: "user",
+    creationSource: "web",
+    text: `Turn ${ordinal}`,
+    attachments: [],
+    ...(fresh ? { freshProviderThread: true as const } : {}),
+    dispatchMode: { type: "start_immediately" },
+  });
+
+const awaitCompleted = (
+  orchestrator: Orchestrator.OrchestratorV2["Service"],
+  worker: EffectWorker.OrchestrationEffectWorkerV2["Service"],
+  ordinal: number,
+) =>
+  orchestrator.streamStoredEvents.pipe(
+    Stream.filter(
+      ({ event }) =>
+        event.type === "run.updated" &&
+        event.payload.ordinal === ordinal &&
+        event.payload.status === "completed",
+    ),
+    Stream.runHead,
+    Effect.andThen(worker.drain()),
+  );
+
+type StepError =
+  | Effect.Error<ReturnType<typeof sendTurn>>
+  | Effect.Error<ReturnType<typeof awaitCompleted>>;
+
+interface ScenarioSteps {
+  readonly orchestrator: Orchestrator.OrchestratorV2["Service"];
+  readonly worker: EffectWorker.OrchestrationEffectWorkerV2["Service"];
+  readonly send: (ordinal: number, fresh: boolean) => ReturnType<typeof sendTurn>;
+  readonly completed: (ordinal: number) => ReturnType<typeof awaitCompleted>;
+  readonly failResumeOnce: Ref.Ref<boolean>;
+}
+
+const detachActiveSession = (steps: ScenarioSteps, commandId: string) =>
+  Effect.gen(function* () {
+    const projection = yield* steps.orchestrator.getThreadProjection(threadId);
+    const active = projection.providerThreads.find(
+      (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+    )!;
+    yield* steps.orchestrator.dispatch({
+      type: "provider-session.detach",
+      commandId: CommandId.make(commandId),
+      threadId,
+      providerSessionId: active.providerSessionId!,
+    });
+    yield* steps.worker.drain();
+  });
+
 const runScenario = (
   name: string,
   selection: typeof CLAUDE_MODEL_SELECTION,
   capabilities: OrchestrationV2ProviderCapabilities,
+  hooks: {
+    readonly beforeFresh?: (steps: ScenarioSteps) => Effect.Effect<void, StepError>;
+    readonly afterFresh?: (steps: ScenarioSteps) => Effect.Effect<void, StepError>;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const cwd = yield* checkpointWorkspace(`fresh-provider-thread-${name}`);
     const captured = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+    const failResumeOnce = yield* Ref.make(false);
     const registry = ProviderAdapterRegistry.layerFromAdapters([
-      makeAdapter({ selection, capabilities, captured }),
+      makeAdapter({ selection, capabilities, captured, failResumeOnce }),
     ]);
     return yield* Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-      const completed = (ordinal: number) =>
-        orchestrator.streamStoredEvents.pipe(
-          Stream.filter(
-            ({ event }) =>
-              event.type === "run.updated" &&
-              event.payload.ordinal === ordinal &&
-              event.payload.status === "completed",
-          ),
-          Stream.runHead,
-          Effect.andThen(worker.drain()),
-        );
-      const send = (ordinal: number, fresh: boolean) =>
-        orchestrator.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make(`fresh:${ordinal}`),
-          messageId: MessageId.make(`fresh:${ordinal}`),
-          threadId,
-          createdBy: "user",
-          creationSource: "web",
-          text: `Turn ${ordinal}`,
-          attachments: [],
-          ...(fresh ? { freshProviderThread: true as const } : {}),
-          dispatchMode: { type: "start_immediately" },
-        });
+      const completed = (ordinal: number) => awaitCompleted(orchestrator, worker, ordinal);
+      const send = (ordinal: number, fresh: boolean) => sendTurn(orchestrator, ordinal, fresh);
       yield* orchestrator.dispatch({
         type: "thread.create",
         commandId: CommandId.make("fresh:create"),
@@ -213,12 +264,19 @@ const runScenario = (
       yield* completed(1);
       yield* send(2, false);
       yield* completed(2);
+      const steps: ScenarioSteps = { orchestrator, worker, send, completed, failResumeOnce };
+      if (hooks.beforeFresh !== undefined) yield* hooks.beforeFresh(steps);
       yield* send(3, true);
       yield* completed(3);
+      if (hooks.afterFresh !== undefined) yield* hooks.afterFresh(steps);
       const projection = yield* orchestrator.getThreadProjection(threadId);
+      const lastOrdinal = projection.runs.length;
       const events = yield* orchestrator.streamStoredEvents.pipe(
         Stream.takeUntil(
-          ({ event }) => event.type === "run.updated" && event.payload.ordinal === 3,
+          ({ event }) =>
+            event.type === "run.updated" &&
+            event.payload.ordinal === lastOrdinal &&
+            event.payload.status === "completed",
         ),
         Stream.runCollect,
       );
@@ -299,6 +357,55 @@ describe("freshProviderThread", () => {
     ),
   );
 
+  it.live("does not detach a session that is already gone", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { turns, events } = yield* runScenario(
+          "already-detached",
+          CLAUDE_MODEL_SELECTION,
+          ClaudeProviderCapabilitiesV2,
+          { beforeFresh: (steps) => detachActiveSession(steps, "detach-before-fresh") },
+        );
+        const detached = events.flatMap(({ event }) =>
+          event.type === "provider-session.detached" ? [event.payload.providerSessionId] : [],
+        );
+        // Only the explicit detach: the fresh start does not detach the same session again.
+        assert.deepEqual(detached, [turns[1]!.providerSessionId]);
+      }),
+    ),
+  );
+
+  it.live("a resume fallback after a reset summarizes only the runs since the reset", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { projection } = yield* runScenario(
+          "fallback-after-reset",
+          CLAUDE_MODEL_SELECTION,
+          ClaudeProviderCapabilitiesV2,
+          {
+            afterFresh: (steps) =>
+              Effect.gen(function* () {
+                // Unload the fresh thread so run 4 must resume it natively, and fail that resume.
+                yield* detachActiveSession(steps, "detach-after-fresh");
+                yield* Ref.set(steps.failResumeOnce, true);
+                yield* steps.send(4, false);
+                yield* steps.completed(4);
+              }),
+          },
+        );
+        const fallback = projection.contextHandoffs.find(
+          (handoff) => handoff.coveredRunOrdinals.to === 3 && handoff.targetRunId !== null,
+        );
+        assert.isDefined(fallback);
+        assert.deepEqual(fallback!.coveredRunOrdinals, { from: 3, to: 3 });
+        const summary = JSON.stringify(fallback);
+        assert.include(summary, "Turn 3");
+        assert.notInclude(summary, "Turn 1");
+        assert.notInclude(summary, "Turn 2");
+      }),
+    ),
+  );
+
   it.live("refuses to queue or steer a fresh start", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -309,6 +416,7 @@ describe("freshProviderThread", () => {
             selection: CLAUDE_MODEL_SELECTION,
             capabilities: ClaudeProviderCapabilitiesV2,
             captured,
+            failResumeOnce: yield* Ref.make(false),
           }),
         ]);
         yield* Effect.gen(function* () {

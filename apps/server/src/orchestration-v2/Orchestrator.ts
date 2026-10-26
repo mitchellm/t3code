@@ -6055,6 +6055,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...(command.freshProviderThread === true ? { freshProviderThread: true as const } : {}),
         ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
           ? { workspacePreparation: dispatchMode.workspaceStrategy }
           : {}),
@@ -6254,12 +6255,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       // Fork: a fresh thread on a one-thread-per-session provider leaves the old session idle.
+      // As in dispatchProviderSessionDetach, only a session still bound to this thread detaches.
+      // A reset ends any native goal: the new native thread has none, so it is not copied over.
       const retiredSessionId = storedActiveProviderThread?.providerSessionId ?? null;
       if (
         command.freshProviderThread === true &&
         storedActiveProviderThread !== undefined &&
         retiredSessionId !== null &&
-        retiredSessionId !== providerSessionId
+        retiredSessionId !== providerSessionId &&
+        projection.providerSessions.some((session) => session.id === retiredSessionId)
       ) {
         yield* emitEvent({
           type: "provider-session.detached",
