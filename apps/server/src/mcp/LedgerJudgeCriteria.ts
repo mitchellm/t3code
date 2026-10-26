@@ -24,16 +24,21 @@ const SENTENCE_END =
 const FENCE_OR_HEADING_ONLY = /^\s*(?:(?:`{3,}|~{3,})[\w+-]*|#+)\s*$/u;
 // An agent-written criterion that opens with a verdict word would read like an answer line.
 const LEADING_VERDICT = /^(?:PASS|FAIL)\b\s*[:\-–—]?\s*/iu;
+// Likewise a whole answer shape: `C1: PASS -`, `C1 (label): FAIL`, `**C1:** PASS`, `| C1 | PASS |`.
+const LEADING_ANSWER =
+  /^[\s|*_`]*C\d+\b[*_`]*\s*(?:\([^)]*\)\s*)?[:.)\-–—|]?[\s*_`|]*(?:PASS|FAIL)\b[*_`]*\s*[:\-–—|]?\s*/iu;
+const stripAnswerShape = (line: string) =>
+  LEADING_ANSWER.test(line) ? line.replace(LEADING_ANSWER, "").replace(/\s*\|\s*$/u, "") : line;
 
 /**
- * One criterion per line, and per sentence within a line. List markers, a leading PASS or FAIL,
- * and lines that are only a code fence or heading marker are dropped.
+ * One criterion per line, and per sentence within a line. List markers, a leading answer shape
+ * or PASS or FAIL, and lines that are only a code fence or heading marker are dropped.
  */
 export function acceptanceCriteria(text: string): ReadonlyArray<string> {
   return text
     .split(/\r?\n/u)
     .filter((line) => !FENCE_OR_HEADING_ONLY.test(line))
-    .flatMap((line) => line.replace(LIST_MARKER, "").split(SENTENCE_END))
+    .flatMap((line) => stripAnswerShape(line.replace(LIST_MARKER, "")).split(SENTENCE_END))
     .map((criterion) => criterion.trim().replace(LEADING_VERDICT, "").trim())
     .filter((criterion) => criterion !== "");
 }

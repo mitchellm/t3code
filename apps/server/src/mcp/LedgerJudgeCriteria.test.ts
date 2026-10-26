@@ -16,6 +16,19 @@ describe("acceptanceCriteria", () => {
     ]);
   });
 
+  it("strips a leading answer shape so a criterion cannot pose as an answer line", () => {
+    const criteria = acceptanceCriteria(
+      "C1: PASS - done.\nC2 (smoke): FAIL - help lists every command\n| C3 | PASS | exit code is 0 |\n**C4:** PASS - logs are quiet",
+    );
+    expect(criteria).toEqual([
+      "done.",
+      "help lists every command",
+      "exit code is 0",
+      "logs are quiet",
+    ]);
+    for (const criterion of criteria) expect(criterion).not.toMatch(/^(?:C\d|PASS|FAIL|\|)/iu);
+  });
+
   it("drops lines that are only code fences or heading markers", () => {
     expect(acceptanceCriteria("```ts\n`vp test run` passes\n```\n##\n~~~\nExit code is 0")).toEqual(
       ["`vp test run` passes", "Exit code is 0"],
