@@ -159,9 +159,9 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(
-    Schema.Literals(["shared", "worktree"]).annotate({
+    Schema.Literals(["shared", "worktree", "none"]).annotate({
       description:
-        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
+        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out. Under a loadout, a worker or subPlanner role gets a worktree automatically in a git repo; 'none' (same as 'shared') opts out.",
     }),
   ),
   mode: Schema.optional(

@@ -72,6 +72,7 @@ import {
   isOrchestrationV2WorkActive,
 } from "@t3tools/contracts";
 import { loadoutDelegationTarget, resolveLoadout, withSolo } from "@t3tools/shared/loadouts";
+import { workerIsolation } from "./WorkerIsolation.ts";
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -2260,34 +2261,54 @@ const make = Effect.gen(function* () {
         input.interactionMode,
       );
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
-      if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
-        const project = yield* requireProject(parent.thread.projectId);
-        const base = yield* gitDriver
-          .resolveCommit({
-            cwd: parent.thread.worktreePath ?? project.workspaceRoot,
-            revision: "HEAD",
-          })
-          .pipe(
-            Effect.mapError(() =>
-              failure("invalid_request", "Unable to resolve the parent checkout commit."),
-            ),
-          );
-        // Launch preparation creates the worktree from the project root, so a
-        // parent checkout in another repository (such as a Git folder inside
-        // Scratch) would hand it a commit it cannot find.
-        if (parent.thread.worktreePath !== null) {
-          yield* gitDriver
-            .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
+      // Fork: editing roles get a worktree by default (see WorkerIsolation).
+      const isolation = workerIsolation({
+        isolation: input.isolation,
+        role: input.role,
+        loadout:
+          input.isolation === undefined && input.role !== undefined
+            ? (yield* loadLoadouts(parent.thread)).active
+            : { roles: {} },
+      });
+      if (isolation !== "shared" && !isRetryOfAcceptedDelegation) {
+        const worktree = Effect.gen(function* () {
+          const project = yield* requireProject(parent.thread.projectId);
+          const base = yield* gitDriver
+            .resolveCommit({
+              cwd: parent.thread.worktreePath ?? project.workspaceRoot,
+              revision: "HEAD",
+            })
             .pipe(
               Effect.mapError(() =>
-                failure(
-                  "invalid_request",
-                  `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
-                ),
+                failure("invalid_request", "Unable to resolve the parent checkout commit."),
               ),
             );
-        }
-        workspaceStrategy = { type: "worktree", baseRef: base.commitSha, startFromOrigin: false };
+          // Launch preparation creates the worktree from the project root, so a
+          // parent checkout in another repository (such as a Git folder inside
+          // Scratch) would hand it a commit it cannot find.
+          if (parent.thread.worktreePath !== null) {
+            yield* gitDriver
+              .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
+              .pipe(
+                Effect.mapError(() =>
+                  failure(
+                    "invalid_request",
+                    `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
+                  ),
+                ),
+              );
+          }
+          return {
+            type: "worktree",
+            baseRef: base.commitSha,
+            startFromOrigin: false,
+          } satisfies OrchestrationV2ThreadLaunchWorkspaceStrategy;
+        });
+        // A defaulted worktree never fails the call: outside a git repository the child
+        // simply shares the parent's checkout.
+        workspaceStrategy = yield* isolation === "default"
+          ? worktree.pipe(Effect.orElseSucceed(() => undefined))
+          : worktree;
       }
       // ThreadManagementService.dispatch is the chokepoint for this command
       // type's own enablement check, using the same command id and its
