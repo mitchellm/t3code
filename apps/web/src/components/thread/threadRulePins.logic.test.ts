@@ -14,6 +14,36 @@ const pin = (id: string, sourceMessageId: string | null = null, text = `Pin ${id
   createdAt: "2026-10-23T00:00:00.000Z",
 });
 
+describe("agent pins and the user's budget", () => {
+  const agentPin = (id: string, text: string) => ({
+    ...pin(id, null, text),
+    author: "agent" as const,
+  });
+
+  it("does not count agent pins toward the user's pin count or total length", () => {
+    const agents = Array.from({ length: THREAD_RULE_PINS_MAX_COUNT }, (_, i) =>
+      agentPin(`a${i}`, "x".repeat(500)),
+    );
+    expect(messagePinState({ messageId: "m1", text: "Be terse.", pins: agents })).toEqual({
+      kind: "available",
+    });
+    expect(
+      rulePinDraftIssue({
+        draft: "y".repeat(THREAD_RULE_PIN_TEXT_MAX_LENGTH),
+        current: null,
+        pins: [
+          ...agents,
+          pin(
+            "u1",
+            null,
+            "z".repeat(THREAD_RULE_PINS_TOTAL_MAX_LENGTH - THREAD_RULE_PIN_TEXT_MAX_LENGTH),
+          ),
+        ],
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("messagePinState", () => {
   it("offers a message with text that is not pinned yet", () => {
     expect(messagePinState({ messageId: "m1", text: "Be terse.", pins: [] })).toEqual({

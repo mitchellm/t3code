@@ -207,6 +207,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
       {
         id: "pin-1",
         text: "Never touch generated/ files.",
+        author: "user" as const,
         sourceMessageId: null,
         createdAt: "2026-10-23T00:00:00.000Z",
       },

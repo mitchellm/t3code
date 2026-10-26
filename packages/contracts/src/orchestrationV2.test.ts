@@ -55,7 +55,24 @@ describe("thread rule pins", () => {
       Schema.Struct({ rulePins: OrchestrationV2AppThread.fields.rulePins }),
     );
     expect(decodeField({})).toEqual({});
-    expect(decodeField({ rulePins: [pin] }).rulePins).toEqual([pin]);
+    expect(decodeField({ rulePins: [pin] }).rulePins).toEqual([{ ...pin, author: "user" }]);
+  });
+
+  it("decodes a stored pin with no author as the user's, and keeps an agent author", () => {
+    const decodePin = Schema.decodeUnknownSync(ThreadRulePin);
+    expect(decodePin(pin).author).toBe("user");
+    expect(decodePin({ ...pin, author: "agent" }).author).toBe("agent");
+    expect(() => decodePin({ ...pin, author: "model" })).toThrow();
+  });
+
+  it("carries the author on the add and remove commands", () => {
+    const base = { commandId: "command-1", threadId: "thread-1", pinId: "pin-1" };
+    expect(
+      decodeCommand({ ...base, type: "thread.rule-pin.add", text: "Note", author: "agent" }),
+    ).toMatchObject({ author: "agent" });
+    expect(
+      decodeCommand({ ...base, type: "thread.rule-pin.remove", author: "agent" }),
+    ).toMatchObject({ author: "agent" });
   });
 
   it("rejects over-cap text on the commands instead of truncating it", () => {

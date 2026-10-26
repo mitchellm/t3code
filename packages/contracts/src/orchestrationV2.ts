@@ -435,6 +435,12 @@ const ThreadRulePinText = TrimmedNonEmptyString.check(
   Schema.isMaxLength(THREAD_RULE_PIN_TEXT_MAX_LENGTH),
 );
 
+/** Fork: an agent's pins are short notes on its own thread, so they get tighter caps. */
+export const AGENT_RULE_PIN_TEXT_MAX_LENGTH = 500;
+export const AGENT_RULE_PINS_MAX_COUNT = 10;
+export const ThreadRulePinAuthor = Schema.Literals(["user", "agent"]);
+export type ThreadRulePinAuthor = typeof ThreadRulePinAuthor.Type;
+
 /**
  * Text the user wants delivered verbatim on every turn of one thread, and kept
  * through compaction. `text` is a copy: a pinned message that is later edited
@@ -444,6 +450,11 @@ export const ThreadRulePin = Schema.Struct({
   /** Chosen by the client that adds it, so a retried add cannot create two pins. */
   id: TrimmedNonEmptyString,
   text: TrimmedNonEmptyString,
+  /**
+   * Fork: who wrote it. Pins stored before authors existed were all the user's. Agent pins are
+   * re-sent under their own heading so the model can tell its own notes from the user's rules.
+   */
+  author: ThreadRulePinAuthor.pipe(Schema.withDecodingDefault(Effect.succeed("user" as const))),
   /** Set when the pin was made from a message; informational once copied. */
   sourceMessageId: Schema.NullOr(MessageId),
   createdAt: IsoDateTime,
@@ -3041,6 +3052,8 @@ export const OrchestrationV2Command = Schema.Union([
     pinId: TrimmedNonEmptyString,
     text: Schema.optional(ThreadRulePinText),
     sourceMessageId: Schema.optional(MessageId),
+    /** Fork: absent means the user. The agent MCP tool sends "agent". */
+    author: Schema.optional(ThreadRulePinAuthor),
   }).check(
     Schema.makeFilter(
       (command) =>
@@ -3060,6 +3073,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     pinId: TrimmedNonEmptyString,
+    /** Fork: "agent" means the agent is removing, which only its own pins allow. */
+    author: Schema.optional(ThreadRulePinAuthor),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.link"),

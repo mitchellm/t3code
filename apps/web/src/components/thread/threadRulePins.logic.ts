@@ -6,7 +6,8 @@ import {
 } from "@t3tools/contracts";
 import { hasUnresolvedComposerContext } from "@t3tools/shared/composerContextReferences";
 
-type PinLike = Pick<ThreadRulePin, "id" | "text" | "sourceMessageId">;
+type PinLike = Pick<ThreadRulePin, "id" | "text" | "sourceMessageId"> &
+  Partial<Pick<ThreadRulePin, "author">>;
 
 export type MessagePinState =
   | { readonly kind: "available" }
@@ -38,13 +39,15 @@ export function messagePinState(input: {
   if (text.length > THREAD_RULE_PIN_TEXT_MAX_LENGTH) {
     return { kind: "unavailable", reason: "This message is too long to pin." };
   }
-  if (input.pins.length >= THREAD_RULE_PINS_MAX_COUNT) {
+  // Agent pins have their own budget, so only the user's count here.
+  const userPins = input.pins.filter((pin) => pin.author !== "agent");
+  if (userPins.length >= THREAD_RULE_PINS_MAX_COUNT) {
     return {
       kind: "unavailable",
       reason: `A thread holds at most ${THREAD_RULE_PINS_MAX_COUNT} pins.`,
     };
   }
-  if (totalLength(input.pins) + text.length > THREAD_RULE_PINS_TOTAL_MAX_LENGTH) {
+  if (totalLength(userPins) + text.length > THREAD_RULE_PINS_TOTAL_MAX_LENGTH) {
     return {
       kind: "unavailable",
       reason: "This thread's pins are full. Unpin or shorten one to pin this message.",
@@ -62,13 +65,17 @@ export type RulePinDraftIssue = "empty" | "too-long" | "total-too-long" | "uncha
 export function rulePinDraftIssue(input: {
   readonly draft: string;
   readonly current: Pick<ThreadRulePin, "id" | "text"> | null;
-  readonly pins?: ReadonlyArray<Pick<ThreadRulePin, "id" | "text">>;
+  readonly pins?: ReadonlyArray<
+    Pick<ThreadRulePin, "id" | "text"> & Partial<Pick<ThreadRulePin, "author">>
+  >;
 }): RulePinDraftIssue | null {
   const draft = input.draft.trim();
   if (draft === "") return "empty";
   if (draft.length > THREAD_RULE_PIN_TEXT_MAX_LENGTH) return "too-long";
   if (input.current !== null && draft === input.current.text.trim()) return "unchanged";
-  const others = (input.pins ?? []).filter((pin) => pin.id !== input.current?.id);
+  const others = (input.pins ?? []).filter(
+    (pin) => pin.id !== input.current?.id && pin.author !== "agent",
+  );
   if (totalLength(others) + draft.length > THREAD_RULE_PINS_TOTAL_MAX_LENGTH) {
     return "total-too-long";
   }

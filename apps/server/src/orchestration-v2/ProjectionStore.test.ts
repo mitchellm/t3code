@@ -6404,12 +6404,14 @@ it.effect.each([
       {
         id: "pin-1",
         text: "Never touch generated/ files.\nSecond `line`",
+        author: "user" as const,
         sourceMessageId: MessageId.make("message:rule-pins"),
         createdAt: "2026-10-23T00:00:00.000Z",
       },
       {
         id: "pin-2",
         text: "Be terse.",
+        author: "user" as const,
         sourceMessageId: null,
         createdAt: "2026-10-23T00:01:00.000Z",
       },
