@@ -11,6 +11,7 @@ import { useThreadLedgerIfSupported } from "~/hooks/useThreadLedgerIfSupported";
 import { Badge } from "../ui/badge";
 import { ThreadTabSection } from "../thread/ThreadOverviewTab";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
+import { BuildModeBar } from "./BuildModeBar";
 
 const ITEM_STATUS_PRESENTATION: Record<
   LedgerItem["status"],
@@ -140,6 +141,8 @@ export function ThreadLedgerDetailsSection({ threadRef }: { threadRef: ScopedThr
   return (
     <ThreadDetailsSection headingId="thread-details-ledger-heading" title="Task ledger">
       <ThreadLedgerView ledger={ledger} />
+      {/* Fork: a ledger made while planning offers the plan card's build actions. */}
+      <BuildModeBar threadRef={threadRef} className="px-2.5 pt-2" />
     </ThreadDetailsSection>
   );
 }
@@ -151,6 +154,7 @@ export function ThreadLedgerOverviewSection({ threadRef }: { threadRef: ScopedTh
   return (
     <ThreadTabSection title="Task ledger">
       <ThreadLedgerView ledger={ledger} />
+      <BuildModeBar threadRef={threadRef} className="px-2.5 pt-2" />
     </ThreadTabSection>
   );
 }

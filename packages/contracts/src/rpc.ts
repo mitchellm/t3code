@@ -164,6 +164,11 @@ import {
   TaskRetro,
 } from "./taskRetro.ts";
 import {
+  OrchestrationBuildModeError,
+  OrchestrationRunBuildModeInput,
+  OrchestrationRunBuildModeResult,
+} from "./buildMode.ts";
+import {
   OrchestrationGetTaskTimingError,
   OrchestrationGetTaskTimingInput,
   TaskTimingSummary,
@@ -1773,6 +1778,13 @@ const WsOrchestrationV2ResolveTaskRetroRpc = Rpc.make(
   },
 );
 
+// Fork: Build / Compact and build / Reset and build / Audit.
+const WsOrchestrationV2RunBuildModeRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.runBuildMode, {
+  payload: OrchestrationRunBuildModeInput,
+  success: OrchestrationRunBuildModeResult,
+  error: Schema.Union([OrchestrationBuildModeError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationV2GetArchivedShellSnapshotRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
   {
@@ -2233,6 +2245,7 @@ export const ForkWsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetTaskRetroRpc,
   WsOrchestrationV2RunTaskRetroRpc,
   WsOrchestrationV2ResolveTaskRetroRpc,
+  WsOrchestrationV2RunBuildModeRpc,
 ).middleware(RpcScopeAuthorization);
 
 export const WsRpcGroup = UpstreamWsRpcGroup.merge(ForkWsRpcGroup);
