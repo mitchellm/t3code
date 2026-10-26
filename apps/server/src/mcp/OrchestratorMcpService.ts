@@ -1977,7 +1977,7 @@ const make = Effect.gen(function* () {
           Effect.map(({ messages }) => messages.map(({ text }) => text)),
           Effect.mapError(threadManagementFailure),
         ),
-      recordVerdict: ({ itemId, judgedEvidence, verdict, taskId }) =>
+      recordVerdict: ({ itemId, judgedEvidence, verdict, taskId, judgingRequestedAt }) =>
         threadManagement
           .dispatch({
             type: "ledger.item.verdict.record",
@@ -1991,6 +1991,7 @@ const make = Effect.gen(function* () {
             itemId,
             verdict,
             judgedEvidence,
+            ...(judgingRequestedAt === undefined ? {} : { judgingRequestedAt }),
           })
           .pipe(
             Effect.map(({ sequence }) => sequence),

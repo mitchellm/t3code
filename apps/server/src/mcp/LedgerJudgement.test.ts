@@ -295,8 +295,10 @@ it.effect(
 const backgroundHarness = (options: {
   /** What delegating returns: the judge as it starts, or why it could not. */
   readonly started?: JudgeRun | OrchestratorMcpFailure;
-  /** The judge task as read later, when it has ended. */
+  /** The judge task once it has ended; reads return it after `finish()`. */
   readonly ended?: JudgeRun;
+  /** The judge ends between delegating and its task being recorded. */
+  readonly endsBeforeRecorded?: boolean;
 }) => {
   let ledger = ledgerOf({}, [item({ judging: true })]);
   const requestedAt = DateTime.formatIso(ledger.items[0]!.updatedAt);
@@ -323,19 +325,20 @@ const backgroundHarness = (options: {
     ledgerId: ledger.id,
   });
   const started = options.started ?? run({ status: "running", summary: null });
+  const running = "taskId" in started ? started : run({ status: "running", summary: null });
+  let current = running;
+  const finish = () => {
+    current = options.ended ?? running;
+  };
   const ports: BackgroundJudgementPorts = {
     delegate: (input) =>
       Effect.suspend(() => {
         delegated.push(input.prompt);
         return "taskId" in started ? Effect.succeed(started) : Effect.fail(started);
       }),
-    readTask: () =>
-      Effect.succeed(
-        options.ended ??
-          ("taskId" in started ? started : run({ status: "running", summary: null })),
-      ),
+    readTask: () => Effect.sync(() => current),
     userMessages: () => Effect.sync(() => delegated),
-    recordVerdict: ({ itemId: judgedItem, judgedEvidence, verdict }) =>
+    recordVerdict: ({ itemId: judgedItem, judgedEvidence, verdict, judgingRequestedAt }) =>
       Effect.sync(() =>
         apply({
           type: "ledger.item.verdict.record",
@@ -343,27 +346,56 @@ const backgroundHarness = (options: {
           itemId: judgedItem,
           verdict,
           judgedEvidence,
+          ...(judgingRequestedAt === undefined ? {} : { judgingRequestedAt }),
         }),
       ),
     started: ({ itemId: judgedItem, taskId }) =>
-      Effect.sync(() =>
-        apply({
+      Effect.sync(() => {
+        const sequence = apply({
           type: "ledger.item.judgement.started",
           ...common(),
           itemId: judgedItem,
           requestedAt: ledger.items[0]!.updatedAt,
           taskId,
-        }),
-      ),
+        });
+        // The judge's terminal event fires before this record commits, so nothing settles it.
+        if (options.endsBeforeRecorded === true) finish();
+        return sequence;
+      }),
     abandon: ({ itemId: abandoned, reason }) =>
       Effect.sync(() =>
         apply({ type: "ledger.item.judgement.abandon", ...common(), itemId: abandoned, reason }),
       ),
   };
   const start = () => startBackgroundJudgement({ ledger, itemId, requestedAt, ports });
-  const settle = () => settleBackgroundJudgement({ ledger, taskId: "task:judge" as NodeId, ports });
+  const settle = () =>
+    Effect.suspend(() => {
+      finish();
+      return settleBackgroundJudgement({ ledger, taskId: "task:judge" as NodeId, ports });
+    });
   return { ports, delegated, start, settle, ledger: () => ledger };
 };
+
+it.effect("settles a judge that ended before its task was recorded", () => {
+  const harnessed = backgroundHarness({ ended: run(), endsBeforeRecorded: true });
+  return Effect.gen(function* () {
+    yield* harnessed.start();
+    const judged = harnessed.ledger().items[0];
+    expect(judged?.status).toBe("closed");
+    expect(judged?.verdict?.outcome).toBe("pass");
+  });
+});
+
+it.effect("refuses an explicit judgement of an item the server is already judging", () => {
+  const { ports, delegated } = harness();
+  return Effect.gen(function* () {
+    const exit = yield* Effect.exit(
+      requestJudgement({ ledger: ledgerOf({}, [item({ judging: true })]), itemId, ports }),
+    );
+    expect(failureOf(exit)?.message).toContain("already being judged");
+    expect(delegated).toEqual([]);
+  });
+});
 
 it.effect("starts the judge without waiting, then closes the item when it passes", () => {
   const harnessed = backgroundHarness({ ended: run() });

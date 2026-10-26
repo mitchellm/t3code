@@ -384,6 +384,16 @@ export function planLedgerCommand(input: {
     case "ledger.item.verdict.record": {
       const item = ledger.items.find(({ id }) => id === command.itemId);
       if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
+      // A verdict for a close request that was since settled (by the user, a drop, another
+      // verdict) or replaced by a newer one answers nothing current, so it changes nothing.
+      const answersCurrentRequest =
+        item.judging === true &&
+        command.judgingRequestedAt !== undefined &&
+        DateTime.toEpochMillis(item.updatedAt) ===
+          DateTime.toEpochMillis(command.judgingRequestedAt);
+      if (command.judgingRequestedAt !== undefined && !answersCurrentRequest) {
+        return Result.succeed([]);
+      }
       if (item.status === "closed" || item.status === "dropped" || item.status === "deferred") {
         return reject(`Item ${item.id} is ${item.status}. Reopen it before judging it.`);
       }
@@ -398,6 +408,10 @@ export function planLedgerCommand(input: {
       };
       // Without a pending close request a verdict only unlocks closing; the agent closes it.
       if (item.judging !== true) return itemUpdated(ledger.id, recorded, now);
+      // Unstamped on a judging item it only records, keeping the request's stamp intact.
+      if (!answersCurrentRequest) {
+        return itemUpdated(ledger.id, { ...recorded, updatedAt: item.updatedAt }, now);
+      }
       const settled = withOptional(endJudging(recorded), "judgeError", undefined);
       // A blocker or sub-item reopened while the judge ran: keep the pass, leave the close to
       // the agent, whose next close request then succeeds without another judge.
@@ -438,7 +452,10 @@ export function planLedgerCommand(input: {
     case "ledger.item.update": {
       const item = ledger.items.find(({ id }) => id === command.itemId);
       if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
-      if (item.judging === true) {
+      const byAgent = command.createdBy === "agent";
+      // The user is the authority over the ledger: their close is final, judge or no judge.
+      const userCloses = !byAgent && command.status === "closed";
+      if (item.judging === true && !userCloses) {
         const repeatsClose =
           command.status === "closed" &&
           (command.evidence === undefined || command.evidence === item.evidence) &&
@@ -463,7 +480,7 @@ export function planLedgerCommand(input: {
       // On a judged ledger, work the agent started ends only through the judge; setting it aside
       // is the user's call. Deferring or dropping work it never started stays open to it.
       if (
-        command.createdBy === "agent" &&
+        byAgent &&
         requiresJudge &&
         changesStatus &&
         item.status === "in_progress" &&
@@ -585,9 +602,9 @@ export function planLedgerCommand(input: {
       // A verdict judged the evidence as it stood, so changed evidence needs a fresh one;
       // otherwise pass, edit the evidence, close would sidestep the judge gate.
       const verdict = evidence === item.evidence ? item.verdict : null;
-      if (target === "closed" && requiresJudge && verdict?.outcome !== "pass") {
-        // The close becomes a request: the server's judge runs and its verdict settles it, so
-        // the agent never has to ask, and cannot close past it.
+      if (target === "closed" && byAgent && requiresJudge && verdict?.outcome !== "pass") {
+        // The agent's close becomes a request: the server's judge runs and its verdict settles
+        // it, so the agent never has to ask, and cannot close past it.
         return itemUpdated(
           ledger.id,
           {
@@ -620,7 +637,8 @@ export function planLedgerCommand(input: {
         updatedAt: now,
       };
       next = withOptional(next, "deferReason", target === "deferred" ? deferReason : undefined);
-      if (target === "dropped") next = endJudging(next);
+      // A drop, or the user's close, ends any judgement; its late verdict is then ignored.
+      if (target === "dropped" || target === "closed") next = endJudging(next);
       if (changesStatus || evidence !== item.evidence) {
         next = withOptional(next, "judgeError", undefined);
       }

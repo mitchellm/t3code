@@ -61,6 +61,8 @@ const closeItem: LedgerCommand = {
   ledgerId,
   itemId,
   status: "closed",
+  // The agent's close: the judge gate applies to it, while a user's close is final.
+  createdBy: "agent",
 };
 
 describe("planLedgerCommand judge gate", () => {

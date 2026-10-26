@@ -234,6 +234,12 @@ export const LedgerVerdictRecordCommand = Schema.Struct({
   verdict: LedgerItemVerdict,
   /** The evidence the judge was shown; a verdict for evidence that has since changed is stale. */
   judgedEvidence: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * The close request this verdict answers (the judging item's `updatedAt`). With it the verdict
+   * settles that request, and is ignored once a newer request or a settlement replaced it.
+   * Without it the verdict only records, as an explicit judgement does.
+   */
+  judgingRequestedAt: Schema.optionalKey(Schema.DateTimeUtc),
 });
 
 /** Server-only: ends an automatic judgement that produced no verdict, handing the item back. */
