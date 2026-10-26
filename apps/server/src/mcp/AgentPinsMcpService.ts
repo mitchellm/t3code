@@ -12,6 +12,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import { normalizeCarriageReturns } from "../orchestration-v2/threadRulePins.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { dispatchFailure, unavailable } from "./threadAccess.ts";
@@ -95,9 +96,10 @@ const make = Effect.gen(function* () {
     scope: McpInvocationScope,
     input: AgentPinMcpAddInput,
   ) {
-    // Derived from the text, so a retry after a lost reply names the same pin and is a no-op.
+    // Derived from the text the planner will store, so a retry after a lost reply names the same
+    // pin and is a no-op even when the retry differs only in CR versus LF.
     const digest = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(input.text.trim()))
+      .digest("SHA-256", new TextEncoder().encode(normalizeCarriageReturns(input.text).trim()))
       .pipe(Effect.orDie);
     const pinId = `agent-pin-${hex(digest.slice(0, 12))}`;
     return yield* send(scope, "add", ({ commandId, threadId }) => ({

@@ -21,9 +21,30 @@ const AGENT_NOTES_INTRO =
 // a note could start a "line" of its own that escapes the quote. Built from code points so no raw
 // line terminator sits in this source.
 const LINE_BREAK_CHARS = [0x2028, 0x2029, 0x85].map((code) => String.fromCodePoint(code)).join("");
-const ANY_LINE_BREAK = new RegExp(`\\r\\n|[\\r\\n${LINE_BREAK_CHARS}]`, "g");
+// VT, FF and the C0 file/group/record separators also break lines for some renderers and models.
+const ANY_LINE_BREAK = new RegExp(`\\r\\n|[\\r\\n\\v\\f\\x1c-\\x1e${LINE_BREAK_CHARS}]`, "g");
 
 const normalizeLineBreaks = (text: string) => text.replace(ANY_LINE_BREAK, "\n");
+
+/** Only CRLF and CR are folded to a newline; anything else odd is rejected, not repaired. */
+export const normalizeCarriageReturns = (text: string) => text.replace(/\r\n|\r/g, "\n");
+
+/** The first C0 control other than newline and tab, or DEL, NEL, LS or PS; null when clean. */
+function forbiddenControlCharacter(text: string): string | null {
+  for (const char of text) {
+    const code = char.codePointAt(0)!;
+    if (
+      (code < 0x20 && code !== 0x0a && code !== 0x09) ||
+      code === 0x7f ||
+      code === 0x85 ||
+      code === 0x2028 ||
+      code === 0x2029
+    ) {
+      return `U+${code.toString(16).toUpperCase().padStart(4, "0")}`;
+    }
+  }
+  return null;
+}
 
 /**
  * The text delivered to providers for one turn: project rules, then the user's
@@ -152,7 +173,7 @@ export function planRulePinChange(input: {
       // as the copy button does, so no raw link tokens reach the model.
       const text =
         command.sourceMessageId === undefined
-          ? (author === "agent" ? normalizeLineBreaks(command.text!) : command.text!).trim()
+          ? (author === "agent" ? normalizeCarriageReturns(command.text!) : command.text!).trim()
           : input.sourceMessage?.id === command.sourceMessageId
             ? replaceComposerContextReferences(
                 input.sourceMessage.text,
@@ -160,6 +181,15 @@ export function planRulePinChange(input: {
               ).trim()
             : undefined;
       if (text === undefined) return rejected(`Message ${command.sourceMessageId} was not found.`);
+      if (author === "agent") {
+        // Checked before trim, which would silently drop a leading or trailing VT or FF.
+        const forbidden = forbiddenControlCharacter(normalizeCarriageReturns(command.text!));
+        if (forbidden !== null) {
+          return rejected(
+            `An agent pin cannot contain the control character ${forbidden}. Use plain text with newlines and tabs only.`,
+          );
+        }
+      }
       const existing = pins.find((pin) => pin.id === command.pinId);
       if (existing !== undefined) {
         // A client retry after a lost reply repeats the same add.
