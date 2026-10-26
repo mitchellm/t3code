@@ -4,6 +4,8 @@ import {
   type Ledger,
   MessageId,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ProviderSession,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type RunId,
   type ThreadId,
@@ -63,6 +65,22 @@ function continuationText(
   ].join("\n\n");
 }
 
+function providerBlocksStopWithOpenLedger(
+  records: {
+    readonly providerThreads: ReadonlyArray<OrchestrationV2ProviderThread>;
+    readonly providerSessions: ReadonlyArray<OrchestrationV2ProviderSession>;
+  },
+  run: OrchestrationV2Run,
+): boolean {
+  const sessionId = records.providerThreads.find(
+    ({ id }) => id === run.providerThreadId,
+  )?.providerSessionId;
+  return (
+    records.providerSessions.find(({ id }) => id === sessionId)?.capabilities.context
+      .blocksStopWithOpenLedger === true
+  );
+}
+
 const NOTICE_TITLES_SHOWN = 3;
 const NOTICE_TITLE_MAX_CHARS = 48;
 
@@ -98,7 +116,15 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   const { orchestrator } = deps;
   const records = yield* orchestrator.getThreadRecords(
     input.threadId,
-    ["runs", "runtimeRequests", "ledger", "turnItems", "providerThreads", "subagents"],
+    [
+      "runs",
+      "runtimeRequests",
+      "ledger",
+      "turnItems",
+      "providerThreads",
+      "providerSessions",
+      "subagents",
+    ],
     { turnItemTypes: ["run_interrupt_request"] },
   );
   const { thread, runs, runtimeRequests, ledger, turnItems, providerThreads, subagents } = records;
@@ -106,6 +132,8 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   // Failed runs never reach checkpoint capture and a usage limit is a failure, so only a normal
   // completion gets here; a stopped or cancelled run must not be restarted behind the user.
   if (run?.status !== "completed") return;
+  // Fork: a provider that blocks its own stop already kept the agent going inside the run.
+  if (providerBlocksStopWithOpenLedger(records, run)) return;
   if (
     ledger === undefined ||
     ledger.closedAt !== null ||

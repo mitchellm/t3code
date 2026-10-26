@@ -49,12 +49,20 @@ export interface CodexRuntimeInfo {
 export function buildCodexPinnedRulesContext(
   pinnedRules: string,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
-  if (pinnedRules === "") return {};
-  if (Buffer.byteLength(pinnedRules) <= CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES) {
-    return { pinned_rules: { kind: "application", value: pinnedRules } };
+  return buildCodexChunkedContext("pinned_rules", pinnedRules);
+}
+
+/** Fork: trusted text under `key`, split across numbered keys like pinned rules. */
+export function buildCodexChunkedContext(
+  key: string,
+  text: string,
+): Record<string, V2TurnStartParams__AdditionalContextEntry> {
+  if (text === "") return {};
+  if (Buffer.byteLength(text) <= CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES) {
+    return { [key]: { kind: "application", value: text } };
   }
   const chunks: Array<string> = [];
-  let rest = pinnedRules;
+  let rest = text;
   while (Buffer.byteLength(rest) > CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES) {
     // Longest prefix within the cap, counted in whole characters.
     let end = 0;
@@ -73,7 +81,7 @@ export function buildCodexPinnedRulesContext(
   chunks.push(rest);
   return Object.fromEntries(
     chunks.map((value, index) => [
-      `pinned_rules_${String(index + 1).padStart(2, "0")}`,
+      `${key}_${String(index + 1).padStart(2, "0")}`,
       { kind: "application" as const, value },
     ]),
   );

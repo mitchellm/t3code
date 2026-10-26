@@ -101,8 +101,10 @@ import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import {
   buildCodexAdditionalContext,
+  buildCodexChunkedContext,
   buildCodexPinnedRulesContext,
 } from "../../provider/CodexDeveloperInstructions.ts";
+import { formatLedgerBlock } from "./HarnessHooks.ts";
 import {
   describeMcpElicitation,
   toMcpElicitationResponse,
@@ -740,6 +742,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
     readonly pinnedRules?: string;
+    readonly ledgerState?: string;
   }) {
     const runtimeModeDefaults = codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
     const approvalPolicy =
@@ -778,7 +781,11 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
         : undefined;
     // The user wrote these rules, so they are trusted (developer role on
     // restore). They do not depend on the T3 MCP, and they are not app text.
-    const pinnedContext = buildCodexPinnedRulesContext(input.pinnedRules ?? "");
+    const pinnedContext = {
+      ...buildCodexPinnedRulesContext(input.pinnedRules ?? ""),
+      // Fork: server-written from the thread's ledger, so trusted like the rules.
+      ...buildCodexChunkedContext("ledger_state", input.ledgerState ?? ""),
+    };
     const additionalContext =
       t3Context === undefined &&
       Object.keys(pinnedContext).length === 0 &&
@@ -6276,6 +6283,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+            const ledgerState =
+              turnInput.harness === undefined
+                ? undefined
+                : formatLedgerBlock((yield* turnInput.harness.readLedgerState)?.ledger);
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
@@ -6289,6 +6300,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ...(turnInput.pinnedRules === undefined
                 ? {}
                 : { pinnedRules: turnInput.pinnedRules }),
+              ...(ledgerState === undefined ? {} : { ledgerState }),
             });
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);

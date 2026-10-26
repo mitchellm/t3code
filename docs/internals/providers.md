@@ -141,6 +141,8 @@ re-reads both on every call to `readPinnedRules`, so the hook sees pin edits, an
 rules it delivered itself as well as the ones the session opened with. Pins live on the thread
 payload and change through `thread.metadata-updated`, an event every older client already decodes.
 
+Fork: Claude keeps task-ledger discipline inside its own loop through SDK hooks built in [HarnessHooks](../../apps/server/src/orchestration-v2/Adapters/HarnessHooks.ts) from thread-scoped reads, because its session outlives the turn that opened it. Its Stop hook blocks a stop while ledger items are open, at most three times in a row without ledger progress, so the adapter declares `context.blocksStopWithOpenLedger` and `LedgerAutoContinue` stands aside for it; other providers keep the server's between-turn auto-continue. The compact hook re-sends a capped ledger block with the pinned rules. Codex instead receives that block as trusted `ledger_state` context each turn, re-injected after compaction. Only Claude enforces a `managers` loadout (`context.enforcesManagersStructure`), by denying the top-level thread's edit and shell tools; Codex has no pre-tool hook, so there the structure is advisory.
+
 Capabilities must describe what the provider can actually do. Antigravity can capture workspace
 checkpoints but cannot roll back its conversation. The [checkpoint boundary](./overview.md#turn-completion-and-checkpoints)
 therefore rejects revert before touching files. Native permission and question option IDs must

@@ -760,6 +760,89 @@ it.effect("waits for a running delegated task instead of nudging the agent", () 
   }).pipe(Effect.provide(layerTest)),
 );
 
+/** Puts the latest run on a provider session whose adapter keeps the agent going itself. */
+const runOnSessionThatBlocksStops = (threadId: ThreadId, blocksStops: boolean) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const providerSessionId = ProviderSessionId.make(`provider-session:${threadId}`);
+    const providerThreadId = ProviderThreadId.make(`provider-thread:${threadId}`);
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(nextId("event:session")),
+          type: "provider-session.attached",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: providerSessionId,
+            driver: adapter.driver,
+            providerInstanceId: instanceId,
+            status: "ready",
+            cwd: "/workspace",
+            model: null,
+            capabilities: {
+              ...CodexProviderCapabilitiesV2,
+              context: {
+                ...CodexProviderCapabilitiesV2.context,
+                blocksStopWithOpenLedger: blocksStops,
+              },
+            },
+            createdAt: now,
+            updatedAt: now,
+            lastError: null,
+          },
+        },
+        {
+          id: EventId.make(nextId("event:provider-thread")),
+          type: "provider-thread.updated",
+          threadId,
+          driver: adapter.driver,
+          occurredAt: now,
+          payload: {
+            id: providerThreadId,
+            driver: adapter.driver,
+            providerInstanceId: instanceId,
+            providerSessionId,
+            appThreadId: threadId,
+            ownerNodeId: null,
+            nativeThreadRef: null,
+            nativeConversationHeadRef: null,
+            status: "idle",
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            pendingBackgroundTasks: [],
+            contextUsage: null,
+            nativeMetadata: null,
+            goal: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      ],
+    });
+    const run = yield* latestRun(threadId);
+    const event = yield* endRun({ ...run, providerThreadId });
+    yield* afterRun(event);
+  });
+
+it.effect.each([
+  { blocksStops: true, followUps: 0 },
+  { blocksStops: false, followUps: 1 },
+])(
+  "leaves the ledger to a provider that blocks its own stop (blocks: $blocksStops)",
+  ({ blocksStops, followUps }) =>
+    Effect.gen(function* () {
+      const threadId = yield* setup(`provider-blocks-stop-${blocksStops}`);
+      yield* sendUserMessage(threadId);
+      yield* runOnSessionThatBlocksStops(threadId, blocksStops);
+      assert.equal((yield* autoContinues(threadId)).length, followUps);
+      assert.equal((yield* stopNotices(threadId)).length, 0);
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("truncates a long item title in the stop notice", () =>
   Effect.gen(function* () {
     const threadId = yield* setup("long-title", ["a"]);

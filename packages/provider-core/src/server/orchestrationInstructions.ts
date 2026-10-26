@@ -25,7 +25,7 @@ Ordinary coding tasks need no T3 tools.
 
 For multi-step work that spans many turns or has several deliverables, itemize it with \`ledger_create\` and keep it current with \`ledger_update_item\`; close an item only with concrete evidence (test output, a commit, file:line). The thread is auto-continued while items stay open. Skip the ledger for quick questions and one-step changes.
 
-Every thread starts solo: do the work yourself on your own model. Size the task before writing a ledger, and call \`t3_loadout_propose\` with a reason only when it earns more structure (several independent modules, or work that needs a separate judge). If the user already chose a loadout, keep to it. Under a loadout, pass \`role\` (\`worker\`, \`explorer\`, \`subPlanner\`) to \`delegate_task\` instead of a target. When \`ledger_read\` shows \`requiresJudge\`, an item closes only after \`ledger_request_judgement\` returns a passing verdict for its current evidence.`,
+Every thread starts solo: do the work yourself on your own model. Size the task before writing a ledger, and call \`t3_loadout_propose\` with a reason only when it earns more structure (several independent modules, or work that needs a separate judge). If the user already chose a loadout, keep to it. Under a loadout, pass \`role\` (\`worker\`, \`explorer\`, \`subPlanner\`) to \`delegate_task\` instead of a target. Under a \`managers\` loadout you plan and review only: delegate every edit and shell command to a \`worker\` or \`subPlanner\`. When \`ledger_read\` shows \`requiresJudge\`, an item closes only after \`ledger_request_judgement\` returns a passing verdict for its current evidence.`,
 ];
 
 export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `

@@ -10,6 +10,9 @@ import {
   CheckpointId,
   CodexSettings,
   EnvironmentId,
+  type Ledger,
+  LedgerId,
+  LedgerItemId,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -61,6 +64,7 @@ import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
+import { formatLedgerBlock } from "./HarnessHooks.ts";
 import { makeReplayServerConfig, withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
 
@@ -1981,6 +1985,164 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
       ),
     ),
+  );
+
+  it.effect("chunks a long ledger_state in order under the value cap", () =>
+    Effect.gen(function* () {
+      const ledgerState = Array.from(
+        { length: 120 },
+        (_, i) => `Line ${i}: ${"q".repeat(60)}`,
+      ).join("\n");
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "ledger-chunks",
+        codexInput: [{ type: "text", text: "work" }],
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        ledgerState,
+      });
+      const entries = Object.entries(params.additionalContext ?? {}).filter(([key]) =>
+        key.startsWith("ledger_state"),
+      );
+      assert.isAbove(entries.length, 1);
+      assert.equal(entries.map(([, entry]) => entry.value).join(""), ledgerState);
+      for (const [, entry] of entries) {
+        assert.equal(entry.kind, "application");
+        assert.isAtMost(Buffer.byteLength(entry.value), 4_000);
+      }
+    }),
+  );
+
+  it.effect(
+    "sends the thread's ledger as trusted ledger_state and restores it after compaction",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "ledger-thread";
+          const nativeTurnId = "ledger-turn";
+          const now = yield* DateTime.now;
+          const ledger: Ledger = {
+            id: LedgerId.make("ledger:codex"),
+            threadId: ThreadId.make("thread:codex-ledger"),
+            title: "Ship the ledger block",
+            startState: "nothing",
+            checkpoints: [],
+            winConditions: ["Codex keeps the ledger after compaction"],
+            items: [
+              {
+                id: LedgerItemId.make("L3"),
+                title: "Restore ledger_state",
+                acceptance: "inject_items carries it",
+                status: "in_progress",
+                evidence: null,
+                dropReason: null,
+                verdict: null,
+                createdAt: now,
+                updatedAt: now,
+                closedAt: null,
+              },
+            ],
+            createdAt: now,
+            updatedAt: now,
+            closedAt: null,
+          };
+          const ledgerState = formatLedgerBlock(ledger)!;
+          const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "work" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            ledgerState,
+          });
+          assert.deepEqual(params.additionalContext?.["ledger_state"], {
+            kind: "application",
+            value: ledgerState,
+          });
+          const entries = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+          const transcript = makeCodexReplayTranscript({
+            scenario: "restore-ledger-state",
+            entries: [
+              ...entries.slice(0, 5),
+              {
+                type: "expect_outbound",
+                label: "ledger turn",
+                frame: { id: 3, method: "turn/start", params },
+              },
+              ...entries.slice(6),
+              {
+                type: "emit_inbound",
+                label: "compacted",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    item: { type: "contextCompaction", id: "compact-ledger" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                label: "restore ledger",
+                frame: {
+                  id: 4,
+                  method: "thread/inject_items",
+                  params: {
+                    threadId: nativeThreadId,
+                    items: [
+                      {
+                        type: "message",
+                        role: "developer",
+                        content: [
+                          {
+                            type: "input_text",
+                            text: `<ledger_state>${ledgerState}</ledger_state>`,
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              },
+              { type: "emit_inbound", label: "restored", frame: { id: 4, result: {} } },
+              {
+                type: "emit_inbound",
+                label: "done",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          yield* harness.runtime.startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("ledger-attempt"),
+              text: "work",
+            }),
+            harness: {
+              readLedgerState: Effect.succeed({
+                ledger,
+                userInterrupted: false,
+                delegatedWorkActive: false,
+              }),
+              readStructure: Effect.succeed("solo"),
+            },
+          });
+          yield* harness.firstTerminal;
+          assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
   );
 
   it.effect("compacts Codex with the native RPC and completes the compaction turn", () =>

@@ -1,4 +1,8 @@
-import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
+import type {
+  Ledger,
+  LoadoutStructure,
+  OrchestrationV2HistoricalMessage,
+} from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
@@ -439,6 +443,26 @@ export interface ProviderAdapterV2TurnInput {
    * logged), so a failed read is distinct from "no rules" and never throws.
    */
   readonly readPinnedRules?: Effect.Effect<string | undefined>;
+  /** Fork: thread state the harness reads mid-turn (Claude hooks, Codex ledger_state). */
+  readonly harness?: ProviderAdapterV2HarnessPort;
+}
+
+/**
+ * Fork: thread-scoped reads, so a provider session that outlives the turn that opened it still
+ * sees the current state. Each resolves undefined when the read failed (already logged).
+ */
+export interface ProviderAdapterV2HarnessPort {
+  readonly readLedgerState: Effect.Effect<ProviderAdapterV2HarnessLedgerState | undefined>;
+  readonly readStructure: Effect.Effect<LoadoutStructure | undefined>;
+}
+
+export interface ProviderAdapterV2HarnessLedgerState {
+  /** Null when the thread has no ledger. */
+  readonly ledger: Ledger | null;
+  /** The person stopped the thread's latest run. */
+  readonly userInterrupted: boolean;
+  /** A delegated task is still working, so the agent is legitimately waiting. */
+  readonly delegatedWorkActive: boolean;
 }
 
 export interface ProviderAdapterV2SteerInput {
