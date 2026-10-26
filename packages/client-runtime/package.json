@@ -307,6 +307,10 @@
       "types": "./src/state/threadCheckpoints.ts",
       "default": "./src/state/threadCheckpoints.ts"
     },
+    "./state/thread-overview": {
+      "types": "./src/state/threadOverview.ts",
+      "default": "./src/state/threadOverview.ts"
+    },
     "./state/thread-ledger": {
       "types": "./src/state/threadLedger.ts",
       "default": "./src/state/threadLedger.ts"
