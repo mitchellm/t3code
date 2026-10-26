@@ -77,6 +77,17 @@ export const Ledger = Schema.Struct({
 });
 export type Ledger = typeof Ledger.Type;
 
+/**
+ * The ledger as a thread list needs it. Dropped items are out of `total`, and a ledger with
+ * nothing left to measure has no summary at all.
+ */
+export const LedgerProgress = Schema.Struct({
+  closed: NonNegativeInt,
+  open: NonNegativeInt,
+  total: NonNegativeInt,
+});
+export type LedgerProgress = typeof LedgerProgress.Type;
+
 export const LedgerItemVerdictJson = LedgerItemVerdict.mapFields((fields) => ({
   ...fields,
   at: Schema.DateTimeUtcFromString,

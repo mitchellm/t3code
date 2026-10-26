@@ -57,6 +57,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   ChartNoAxesColumnIcon,
+  LayoutDashboardIcon,
   CheckIcon,
   ChevronRightIcon,
   CornerLeftUpIcon,
@@ -1623,6 +1624,17 @@ function OpenCommandPaletteDialog(props: {
         await openExplorerView(createSavedView("list").id);
       },
     });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:overview",
+    searchTerms: ["overview", "threads", "dashboard", "ledger", "status", "running", "waiting"],
+    title: "Open overview",
+    icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/overview" });
+    },
+  });
 
   actionItems.push({
     kind: "action",
