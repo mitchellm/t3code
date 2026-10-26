@@ -80,6 +80,7 @@ export function decideThreadLoadout(
 /** The slice of a provider snapshot needed to turn a role into a delegation target. */
 export interface LoadoutProviderView {
   readonly instanceId: string;
+  readonly enabled?: boolean | undefined;
   readonly models: ReadonlyArray<{
     readonly slug: string;
     readonly capabilities?:
@@ -127,8 +128,20 @@ export function loadoutRoleTarget(
   role: LoadoutRole,
   providers: ReadonlyArray<LoadoutProviderView>,
 ): OrchestratorMcpTarget | undefined {
+  const { fallback, ...own } = role;
+  return (
+    modelTarget(own, providers) ??
+    (fallback === undefined ? undefined : modelTarget(fallback, providers))
+  );
+}
+
+function modelTarget(
+  role: Omit<LoadoutRole, "fallback">,
+  providers: ReadonlyArray<LoadoutProviderView>,
+): OrchestratorMcpTarget | undefined {
   const provider = providers.find(({ instanceId }) => instanceId === role.instanceId);
-  if (provider === undefined) return undefined;
+  // Fork: a disabled instance cannot run, so it counts as gone and the fallback applies.
+  if (provider === undefined || provider.enabled === false) return undefined;
   const model = provider.models.find(({ slug }) => slug === role.model);
   // An empty list means the provider cannot enumerate models, so the role's model is trusted.
   if (model === undefined && provider.models.length > 0) return undefined;

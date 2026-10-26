@@ -257,6 +257,60 @@ describe("loadoutRoleTarget", () => {
     ).toEqual({ providerInstanceId: claude, model: "claude-sonnet-5-5" });
   });
 
+  describe("fallback", () => {
+    const codex = ProviderInstanceId.make("codex");
+    const judge: LoadoutRole = {
+      instanceId: codex,
+      model: "gpt-6.1-sol",
+      fallback: { instanceId: claude, model: "claude-sonnet-5-5", effort: "high" },
+    };
+
+    it("prefers the role itself when it resolves", () => {
+      expect(
+        loadoutRoleTarget(judge, [
+          provider(codex, ["gpt-6.1-sol"]),
+          provider(claude, ["claude-sonnet-5-5"]),
+        ]),
+      ).toEqual({ providerInstanceId: codex, model: "gpt-6.1-sol" });
+    });
+
+    it("uses the fallback when the instance or the model is missing", () => {
+      const expected = {
+        providerInstanceId: claude,
+        model: "claude-sonnet-5-5",
+        options: [{ id: "effort", value: "high" }],
+      };
+      expect(loadoutRoleTarget(judge, [provider(claude, ["claude-sonnet-5-5"])])).toEqual(expected);
+      expect(
+        loadoutRoleTarget(judge, [
+          provider(codex, ["gpt-6-astra"]),
+          provider(claude, ["claude-sonnet-5-5"]),
+        ]),
+      ).toEqual(expected);
+    });
+
+    it("treats a disabled instance as missing", () => {
+      const disabled = { ...provider(codex, ["gpt-6.1-sol"]), enabled: false };
+      expect(
+        loadoutRoleTarget(judge, [disabled, provider(claude, ["claude-sonnet-5-5"])]),
+      ).toMatchObject({ providerInstanceId: claude });
+      expect(loadoutRoleTarget({ instanceId: codex, model: "gpt-6.1-sol" }, [disabled])).toBe(
+        undefined,
+      );
+    });
+
+    it("is undefined when neither resolves, and never silently the thread's model", () => {
+      expect(loadoutRoleTarget(judge, [])).toBeUndefined();
+    });
+
+    it("resolves through loadoutDelegationTarget for the judge role", () => {
+      const loadout: Loadout = { id: "x", name: "X", description: "", roles: { judge } };
+      expect(
+        loadoutDelegationTarget(loadout, "judge", [provider(claude, ["claude-sonnet-5-5"])]),
+      ).toMatchObject({ providerInstanceId: claude });
+    });
+  });
+
   it("degrades to undefined when the instance or model is missing", () => {
     expect(loadoutRoleTarget(sonnet, [])).toBeUndefined();
     expect(loadoutRoleTarget(sonnet, [provider(claude, ["claude-opus-5-5"])])).toBeUndefined();

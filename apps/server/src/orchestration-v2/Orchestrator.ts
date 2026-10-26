@@ -11715,9 +11715,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const judge = loadout.roles.judge;
             if (!loadoutHasJudge(loadout) || judge === undefined) return false;
             const adapterIds = yield* providerAdapters.list();
-            return (
-              adapterIds.includes(judge.instanceId) &&
-              resolveProjectProviderInstanceEnabled(settings, thread.projectId, judge.instanceId)
+            // Fork: a judge that can fall back is still satisfiable when its first choice is not.
+            return [judge, ...(judge.fallback === undefined ? [] : [judge.fallback])].some(
+              ({ instanceId }) =>
+                adapterIds.includes(instanceId) &&
+                resolveProjectProviderInstanceEnabled(settings, thread.projectId, instanceId),
             );
           })
         : undefined;

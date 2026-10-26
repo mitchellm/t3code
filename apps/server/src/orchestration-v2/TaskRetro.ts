@@ -95,7 +95,7 @@ const isRoleName = (role: string): role is LoadoutRoleName =>
 const describeRole = (name: string, role: LoadoutRole | undefined) =>
   role === undefined
     ? `${name}: thread's own model`
-    : `${name}: ${role.instanceId} ${role.model}${role.effort === undefined ? "" : ` (${role.effort})`}`;
+    : `${name}: ${role.instanceId} ${role.model}${role.effort === undefined ? "" : ` (${role.effort})`}${role.fallback === undefined ? "" : `, else ${role.fallback.instanceId} ${role.fallback.model}`}`;
 
 const describeLoadout = (loadout: Loadout) =>
   [

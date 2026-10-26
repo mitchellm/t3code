@@ -36,6 +36,12 @@ describe("summarizeLoadoutRoles", () => {
     expect(summary("read-only-sweep")).toBe("Haiku explores");
   });
 
+  it("names the judge's vendor when it is not Claude", () => {
+    expect(summary("cross-check")).toBe(
+      "Opus xhigh plans · Haiku explores · Sonnet works · GPT high judges",
+    );
+  });
+
   it("describes solo as having no delegated roles", () => {
     expect(summary("solo")).toBe("No delegated roles");
   });
@@ -47,7 +53,7 @@ describe("summarizeLoadoutRoles", () => {
       description: "",
       roles: { subPlanner: { instanceId: claude, model: "gpt-5.5", effort: "high" } },
     };
-    expect(summarizeLoadoutRoles(loadout)).toBe("gpt-5.5 high sub-plans");
+    expect(summarizeLoadoutRoles(loadout)).toBe("GPT high sub-plans");
   });
 });
 
@@ -59,6 +65,20 @@ describe("loadoutRoleIssues", () => {
     for (const loadout of DEFAULT_LOADOUTS) {
       expect(loadoutRoleIssues(loadout, catalog)).toEqual([]);
     }
+  });
+
+  it("does not flag a judge whose fallback still resolves, and flags it when neither does", () => {
+    const crossCheck = resolveLoadout(DEFAULT_LOADOUTS, "cross-check");
+    const opusOnly = [
+      provider(claude, ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]),
+    ];
+    expect(loadoutRoleIssues(crossCheck, opusOnly)).toEqual([]);
+    expect(
+      loadoutRoleIssues(crossCheck, [provider(claude, ["claude-sonnet-5-5", "claude-haiku-5-5"])]),
+    ).toEqual([
+      { role: "planner", issue: "missing_model" },
+      { role: "judge", issue: "missing_instance" },
+    ]);
   });
 
   it("flags every preset role when the catalog lacks the instance, and delegation degrades", () => {

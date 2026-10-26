@@ -19,12 +19,18 @@ const ROLE_VERBS: Record<LoadoutRoleName, string> = {
 
 const CLAUDE_FAMILY = /\b(opus|sonnet|haiku|fable)\b/iu;
 
-/** "claude-opus-5-5" reads as "Opus"; a model that is not a Claude family shows its slug. */
+const GPT_FAMILY = /^gpt\b/iu;
+
+/**
+ * "claude-opus-5-5" reads as "Opus" and "gpt-6.1-sol" as "GPT", so the line shows which vendor
+ * judges; any other model shows its slug.
+ */
 export function loadoutModelShortName(model: string): string {
   const family = CLAUDE_FAMILY.exec(model)?.[1];
-  return family === undefined
-    ? model
-    : `${family.charAt(0).toUpperCase()}${family.slice(1).toLowerCase()}`;
+  if (family !== undefined) {
+    return `${family.charAt(0).toUpperCase()}${family.slice(1).toLowerCase()}`;
+  }
+  return GPT_FAMILY.test(model) ? "GPT" : model;
 }
 
 const roleSegment = (name: LoadoutRoleName, role: LoadoutRole): string =>
@@ -54,7 +60,20 @@ export interface LoadoutRoleIssue {
  */
 export function loadoutRoleIssue(
   role: LoadoutRole,
-  providers: ReadonlyArray<LoadoutProviderView & { readonly enabled?: boolean }>,
+  providers: ReadonlyArray<LoadoutProviderView>,
+): LoadoutRoleIssueKind | null {
+  const own = modelIssue(role, providers);
+  // A role that still resolves through its fallback works, so it is not reported as broken.
+  return own !== null &&
+    role.fallback !== undefined &&
+    modelIssue(role.fallback, providers) === null
+    ? null
+    : own;
+}
+
+function modelIssue(
+  role: Omit<LoadoutRole, "fallback">,
+  providers: ReadonlyArray<LoadoutProviderView>,
 ): LoadoutRoleIssueKind | null {
   const provider = providers.find(({ instanceId }) => instanceId === role.instanceId);
   if (provider === undefined) return "missing_instance";
@@ -67,7 +86,7 @@ export function loadoutRoleIssue(
 
 export function loadoutRoleIssues(
   loadout: Loadout,
-  providers: ReadonlyArray<LoadoutProviderView & { readonly enabled?: boolean }>,
+  providers: ReadonlyArray<LoadoutProviderView>,
 ): ReadonlyArray<LoadoutRoleIssue> {
   return LOADOUT_ROLE_NAMES.flatMap((name) => {
     const role = loadout.roles[name];
