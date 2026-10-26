@@ -154,6 +154,11 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:resolve-task-retro",
       tag: ORCHESTRATION_V2_WS_METHODS.resolveTaskRetro,
     }),
+    // Fork: Build / Compact and build / Reset and build / Audit. Gate on the `buildModes` capability.
+    runBuildMode: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:run-build-mode",
+      tag: ORCHESTRATION_V2_WS_METHODS.runBuildMode,
+    }),
     archivedShellSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:archived-shell-snapshot",
       tag: ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,

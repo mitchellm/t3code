@@ -247,6 +247,7 @@ export const make = Effect.gen(function* () {
       threadPreviews: true,
       taskTiming: true,
       taskRetro: true,
+      buildModes: true,
       threadPinning: true,
       threadPinReorder: true,
       threadActiveReorder: true,

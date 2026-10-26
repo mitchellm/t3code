@@ -38,6 +38,7 @@ import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeReco
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
 import * as TaskRetroService from "./orchestration-v2/TaskRetroService.ts";
+import * as BuildModeService from "./orchestration-v2/BuildModeService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -589,6 +590,16 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       yield* runStartupPhase("task-retro.sweep", taskRetro.value.sweep()).pipe(
         Effect.catch((cause) =>
           Effect.logWarning("Failed to sweep stale retro threads", { cause }),
+        ),
+        forkParked,
+      );
+    }
+    // Fork: likewise for a plan audit's judge thread.
+    const buildModes = yield* Effect.serviceOption(BuildModeService.BuildModeService);
+    if (Option.isSome(buildModes)) {
+      yield* runStartupPhase("build-mode.sweep", buildModes.value.sweep()).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Failed to sweep stale audit threads", { cause }),
         ),
         forkParked,
       );

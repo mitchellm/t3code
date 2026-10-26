@@ -695,6 +695,8 @@ export const OrchestrationV2Run = Schema.Struct({
   checkpointId: Schema.NullOr(CheckpointId),
   contextHandoffId: Schema.NullOr(ContextHandoffId),
   restartContinuationOfRunId: Schema.optional(RunId),
+  /** Fork: this run started a fresh native conversation; earlier runs are not in its context. */
+  freshProviderThread: Schema.optional(Schema.Literal(true)),
   delegatedTaskId: Schema.optional(NodeId),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
@@ -3212,6 +3214,8 @@ export const OrchestrationV2Command = Schema.Union([
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
+    /** Fork: start a new native conversation on this thread; the old transcript stays visible. */
+    freshProviderThread: Schema.optional(Schema.Literal(true)),
     delegatedCompletion: Schema.optional(
       Schema.Struct({
         parentRunId: RunId,
@@ -3530,6 +3534,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getTaskRetro: "orchestration.getTaskRetro",
   runTaskRetro: "orchestration.runTaskRetro",
   resolveTaskRetro: "orchestration.resolveTaskRetro",
+  runBuildMode: "orchestration.runBuildMode",
   searchThread: "orchestration.searchThread",
   searchThreadStream: "orchestration.searchThreadStream",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",

@@ -42,6 +42,7 @@ import {
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import { contextStartOrdinal } from "./FreshProviderThread.ts";
 import { makeHarnessThreadReads } from "./HarnessState.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -807,6 +808,8 @@ export const layer: Layer.Layer<
           type: "provider_resume_fallback",
         });
         const createdAt = yield* DateTime.now;
+        // Fork: after a Reset and build the summary starts at the reset, not the first run.
+        const startOrdinal = contextStartOrdinal(projection.runs, run);
         const handoff = yield* contextHandoffService.prepareProviderHandoff({
           threadId: projection.thread.id,
           targetRunId: run.id,
@@ -815,15 +818,18 @@ export const layer: Layer.Layer<
           toProviderThreadId: providerThread.id,
           fromProviderInstanceId: providerThread.providerInstanceId,
           toProviderInstanceId: run.providerInstanceId,
-          coveredRunOrdinals: { from: 1, to: Math.max(1, run.ordinal - 1) },
+          coveredRunOrdinals: { from: startOrdinal, to: Math.max(startOrdinal, run.ordinal - 1) },
           strategy: "full_thread_summary",
-          runs: projection.runs,
-          items: (yield* projectionStore.getTurnStartHistory(input.threadId)).filter(
-            (item) =>
-              item.runId === null ||
-              projection.runs.some(
-                (source) => source.id === item.runId && source.ordinal < run.ordinal,
-              ),
+          runs: projection.runs.filter((source) => source.ordinal >= startOrdinal),
+          items: (yield* projectionStore.getTurnStartHistory(input.threadId)).filter((item) =>
+            item.runId === null
+              ? startOrdinal === 1
+              : projection.runs.some(
+                  (source) =>
+                    source.id === item.runId &&
+                    source.ordinal >= startOrdinal &&
+                    source.ordinal < run.ordinal,
+                ),
           ),
           createdAt,
         });

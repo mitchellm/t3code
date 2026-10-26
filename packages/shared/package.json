@@ -255,6 +255,10 @@
       "types": "./src/taskLedger.ts",
       "import": "./src/taskLedger.ts"
     },
+    "./buildModes": {
+      "types": "./src/buildModes.ts",
+      "import": "./src/buildModes.ts"
+    },
     "./composerTrigger": {
       "types": "./src/composerTrigger.ts",
       "import": "./src/composerTrigger.ts"

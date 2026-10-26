@@ -945,6 +945,11 @@ function appendContextHandoffId(
   return handoffId === null ? handoffIds : Array.from(new Set([...handoffIds, handoffId]));
 }
 
+// Fork: Reset and build (BuildModeService).
+const FRESH_PROVIDER_THREAD_BUSY =
+  "A fresh provider thread starts immediately, on a thread with no active or queued turn.";
+const FRESH_PROVIDER_THREAD_DETACH_REASON = "Started a fresh native thread for this thread.";
+
 function rootProviderThreadsForProvider(
   projection: Pick<OrchestrationV2ThreadProjection, "providerThreads" | "thread">,
   providerInstanceId: ModelSelection["instanceId"],
@@ -5354,6 +5359,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: "Notifications must be server- or provider-created queued messages.",
       });
     }
+    // Fork: a fresh native thread replaces the conversation only between turns.
+    if (command.freshProviderThread === true && dispatchMode.type !== "start_immediately") {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: FRESH_PROVIDER_THREAD_BUSY,
+      });
+    }
     let delegatedCompletion: OrchestrationV2ConversationMessage["delegatedCompletion"] | undefined;
     if (command.delegatedCompletion !== undefined) {
       const requestedCompletion = command.delegatedCompletion;
@@ -5512,9 +5525,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return;
     }
 
-    const activeProviderThread = projection.providerThreads.find(
+    const storedActiveProviderThread = projection.providerThreads.find(
       (candidate) => candidate.id === projection.thread.activeProviderThreadId,
     );
+    // Fork: with no active provider thread the run starts a new one, as on a thread's first turn.
+    const activeProviderThread =
+      command.freshProviderThread === true ? undefined : storedActiveProviderThread;
     const activeRun = projection.runs.find(isBlockingRun);
     // A message queued during worktree setup can arrive after that setup failed
     // without a worktree. It waits, held, like the messages queued before the
@@ -5535,6 +5551,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
     const shouldQueue = queueBehindRun !== undefined && startsOrQueuesRun;
+    if (command.freshProviderThread === true && shouldQueue) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: FRESH_PROVIDER_THREAD_BUSY,
+      });
+    }
     // Client messages resume held queues; server continuations and scheduled tasks do not.
     // Provider failure or usage limits re-hold the queue. Failed worktree setup keeps it held
     // until a worktree exists, so queued messages cannot start in the project checkout.
@@ -6035,6 +6058,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...(command.freshProviderThread === true ? { freshProviderThread: true as const } : {}),
         ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
           ? { workspacePreparation: dispatchMode.workspaceStrategy }
           : {}),
@@ -6232,6 +6256,43 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: preparationTurnItem,
         });
+      }
+      // Fork: a fresh thread on a one-thread-per-session provider leaves the old session idle.
+      // As in dispatchProviderSessionDetach, only a session still bound to this thread detaches.
+      // A reset ends any native goal: the new native thread has none, so it is not copied over.
+      const retiredSessionId = storedActiveProviderThread?.providerSessionId ?? null;
+      if (
+        command.freshProviderThread === true &&
+        storedActiveProviderThread !== undefined &&
+        retiredSessionId !== null &&
+        retiredSessionId !== providerSessionId &&
+        projection.providerSessions.some((session) => session.id === retiredSessionId)
+      ) {
+        yield* emitEvent({
+          type: "provider-session.detached",
+          threadId: command.threadId,
+          driver: storedActiveProviderThread.driver,
+          providerInstanceId: storedActiveProviderThread.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            providerSessionId: retiredSessionId,
+            detachedAt: now,
+            reason: FRESH_PROVIDER_THREAD_DETACH_REASON,
+          },
+        });
+        yield* Ref.update(effects, (existing) => [
+          ...existing,
+          {
+            id: `effect:${command.commandId}:provider-session.detach:${retiredSessionId}`,
+            commandId: command.commandId,
+            threadId: command.threadId,
+            request: {
+              type: "provider-session.detach",
+              providerSessionId: retiredSessionId,
+              detail: FRESH_PROVIDER_THREAD_DETACH_REASON,
+            },
+          } satisfies PendingOrchestrationEffectV2,
+        ]);
       }
       const pendingEffect = {
         id: `effect:${command.commandId}:provider-turn.start:${runId}`,
