@@ -38,6 +38,23 @@ const ItemDraft = Schema.Struct({
   acceptance: Schema.String.annotate({
     description: "What must be true, and how it is checked, for this item to count as done.",
   }),
+  blockedBy: Schema.optionalKey(
+    Schema.Array(LedgerMcpItemKey).annotate({
+      description:
+        "Items that must be closed or dropped before this one can start or close. Same ledger, no cycles.",
+    }),
+  ),
+  parentItemId: Schema.optionalKey(
+    LedgerMcpItemKey.annotate({
+      description: "Make this a sub-item of that item; the parent cannot close while it is open.",
+    }),
+  ),
+  deferReason: Schema.optionalKey(
+    Schema.String.annotate({
+      description:
+        "Record out-of-scope work without doing it: the item starts deferred, with this reason. It is kept for later and not auto-continued.",
+    }),
+  ),
 });
 
 const CheckpointDraft = Schema.Struct({
@@ -72,6 +89,19 @@ export const LedgerMcpUpdateItemInput = Schema.Struct({
     }),
   ),
   dropReason: Schema.optional(Schema.String.annotate({ description: "Why the item is dropped." })),
+  deferReason: Schema.optional(
+    Schema.String.annotate({ description: "Why the item is deferred (status deferred)." }),
+  ),
+  blockedBy: Schema.optional(
+    Schema.Array(LedgerMcpItemKey).annotate({
+      description: "Replaces the item's blockers; [] clears them.",
+    }),
+  ),
+  parentItemId: Schema.optional(
+    Schema.NullOr(LedgerMcpItemKey).annotate({
+      description: "Moves the item under that parent; null moves it to the top level.",
+    }),
+  ),
   clientRequestId: Schema.optional(LedgerMcpClientRequestId),
 });
 export type LedgerMcpUpdateItemInput = typeof LedgerMcpUpdateItemInput.Type;
@@ -101,13 +131,14 @@ export const LedgerMcpSnapshot = Schema.Struct({
   closed: Schema.Boolean,
   requiresJudge: Schema.Boolean.annotate({
     description:
-      "True when an item can close only after ledger_request_judgement returns a passing verdict for its current evidence.",
+      "True when an item closes only on a passing judge verdict. Closing such an item starts the judge automatically: the item shows judging, then closes on a pass or comes back in_progress with the judge's notes.",
   }),
   counts: Schema.Struct({
     open: NonNegativeInt,
     in_progress: NonNegativeInt,
     closed: NonNegativeInt,
     dropped: NonNegativeInt,
+    deferred: NonNegativeInt,
   }),
   unfinished: NonNegativeInt.annotate({
     description: "Open plus in_progress items; the thread is auto-continued while this is above 0.",
@@ -121,9 +152,25 @@ export const LedgerMcpSnapshot = Schema.Struct({
       title: Schema.String,
       acceptance: Schema.String,
       status: LedgerItemStatus,
+      /** Tree order: each parent is followed by its sub-items, one level deeper. */
+      depth: NonNegativeInt,
+      parentItemId: Schema.NullOr(Schema.String),
+      blockedBy: Schema.Array(Schema.String),
+      waitingOn: Schema.Array(Schema.String).annotate({
+        description:
+          "Blockers not yet closed or dropped; the item cannot start or close until empty.",
+      }),
       evidence: Schema.NullOr(Schema.String),
       dropReason: Schema.NullOr(Schema.String),
+      deferReason: Schema.NullOr(Schema.String),
+      judging: Schema.Boolean.annotate({
+        description: "The server's judge is checking this item's close request.",
+      }),
       verdict: Schema.NullOr(Schema.Literals(["pass", "fail"])),
+      verdictNotes: Schema.NullOr(Schema.String),
+      judgeError: Schema.NullOr(Schema.String).annotate({
+        description: "Why the last automatic judgement ended without a verdict.",
+      }),
       judgements: NonNegativeInt.annotate({
         description: "How many times this item has been judged, across reopening and new evidence.",
       }),

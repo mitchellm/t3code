@@ -111,7 +111,7 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
   }
   const item = ledger.items.find(({ id }) => id === input.itemId);
   if (item === undefined) return yield* invalid(`Unknown item ${input.itemId}.`);
-  if (item.status === "closed" || item.status === "dropped") {
+  if (item.status === "closed" || item.status === "dropped" || item.status === "deferred") {
     return yield* invalid(`Item ${item.id} is ${item.status}. Reopen it before judging it.`);
   }
   const evidence = item.evidence;
@@ -125,11 +125,16 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
   const run = yield* ports.delegate({
     prompt,
     title: `Judge ${item.id}: ${item.title}`,
-    // The attempt count makes a re-ask after a recorded verdict a new delegation, and the prompt
-    // stands in for every field it quotes (titles, acceptance, evidence), so editing any of them
-    // starts a fresh judge instead of rejoining one that holds a stale prompt. A retry after a
-    // timeout with nothing changed still rejoins the running judge.
-    keySource: [ledger.id, item.id, String(item.judgements ?? 0), prompt].join("\u0000"),
+    // Same key, same delegation: a retry rejoins the running judge. The verdict count, the prompt
+    // (every field it quotes) and, while judging, the close request's stamp each start a fresh
+    // one, so a re-ask, an edit or a request after an abandoned judge never joins a stale judge.
+    keySource: [
+      ledger.id,
+      item.id,
+      String(item.judgements ?? 0),
+      prompt,
+      ...(item.judging === true ? [DateTime.formatIso(item.updatedAt)] : []),
+    ].join("\u0000"),
   });
   if (run.status !== "completed") {
     const detail = run.waitTimedOut
@@ -169,4 +174,33 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
     taskId: run.taskId,
   });
   return { outcome, notes, judge: run.judge, sequence };
+});
+
+export interface BackgroundJudgementPorts extends JudgementPorts {
+  /** Dispatches the internal `ledger.item.judgement.abandon`; resolves to the event sequence. */
+  readonly abandon: (input: {
+    readonly itemId: LedgerItemId;
+    readonly reason: string;
+  }) => Effect.Effect<number, OrchestratorMcpFailure>;
+}
+
+/**
+ * The judgement a close request starts by itself; the planner turns the verdict into a close or
+ * a hand-back. A judge that yields no verdict is recorded as abandoned with the reason, never as
+ * a verdict, so the item is not left judging forever and the agent sees why.
+ */
+export const judgeInBackground = Effect.fn("LedgerJudgement.background")(function* (input: {
+  readonly ledger: Ledger | undefined;
+  readonly itemId: LedgerItemId;
+  readonly ports: BackgroundJudgementPorts;
+}) {
+  const item = input.ledger?.items.find(({ id }) => id === input.itemId);
+  // Already settled by a verdict, an explicit judgement or a drop.
+  if (item?.judging !== true) return;
+  yield* requestJudgement(input).pipe(
+    Effect.asVoid,
+    Effect.catch((failure) =>
+      input.ports.abandon({ itemId: input.itemId, reason: failure.message }).pipe(Effect.asVoid),
+    ),
+  );
 });

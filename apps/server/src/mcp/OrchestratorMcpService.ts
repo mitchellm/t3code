@@ -1,5 +1,6 @@
 import {
   CommandId,
+  type LedgerItemId,
   type LedgerMcpJudgementResult,
   type LedgerMcpRequestJudgementInput,
   type RunId,
@@ -119,7 +120,11 @@ import {
   requireThreadScope,
 } from "./McpInvocationContext.ts";
 import * as Metrics from "../observability/Metrics.ts";
-import { requestJudgement } from "./LedgerJudgement.ts";
+import {
+  type BackgroundJudgementPorts,
+  judgeInBackground,
+  requestJudgement,
+} from "./LedgerJudgement.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
@@ -173,6 +178,14 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: LedgerMcpRequestJudgementInput,
   ) => Effect.Effect<LedgerMcpJudgementResult, OrchestratorMcpFailure>;
+  /**
+   * Judges an item whose close request is pending and lets the verdict settle it. Long: callers
+   * fork it (see LedgerJudgeLauncher) rather than holding a tool call open.
+   */
+  readonly judgeInBackground: (
+    scope: McpInvocationScope,
+    itemId: LedgerItemId,
+  ) => Effect.Effect<void, OrchestratorMcpFailure>;
   readonly proposeLoadout: (
     scope: McpInvocationScope,
     input: OrchestratorMcpLoadoutProposeInput,
@@ -1872,6 +1885,113 @@ const make = Effect.gen(function* () {
     return task;
   });
 
+  /**
+   * Fork: the server side of a judgement, shared by the explicit tool and the automatic judge a
+   * close request starts. `waitMs` is how long the delegation waits for the judge.
+   */
+  const judgementSetup = Effect.fn("OrchestratorMcpService.judgementSetup")(function* (
+    callerScope: McpInvocationScope,
+    toolName: string,
+    waitMs: number | undefined,
+  ) {
+    const { scope, parent } = yield* loadThreadCaller(callerScope, toolName);
+    const { ledger } = yield* threadManagement
+      .getProjectThreadRecords(
+        { projectId: parent.thread.projectId, threadId: scope.thread.threadId },
+        ["ledger"],
+      )
+      .pipe(Effect.mapError(threadManagementFailure));
+    const dispatchFailureMessage = (error: unknown) =>
+      failure("orchestration_error", `Unable to record the verdict: ${errorMessage(error)}`);
+    const ports: BackgroundJudgementPorts = {
+      delegate: Effect.fn("OrchestratorMcpService.judgeDelegate")(function* ({
+        prompt,
+        title,
+        keySource,
+      }) {
+        const digest = yield* crypto
+          .digest("SHA-256", new TextEncoder().encode(keySource))
+          .pipe(Effect.orDie);
+        // The same ledger, item and evidence is the same delegation, so a retry after a
+        // timeout rejoins the running judge instead of starting a second one.
+        const clientRequestId = `judge-${Array.from(digest.slice(0, 16), (byte) =>
+          byte.toString(16).padStart(2, "0"),
+        ).join("")}`;
+        const expected = yield* loadoutRoleTarget(parent.thread, "judge", yield* loadProviders);
+        if (expected?.providerInstanceId === undefined || expected.model === undefined) {
+          return yield* failure("provider_unavailable", "The judge role cannot be resolved.");
+        }
+        const delegation = {
+          task: prompt,
+          title,
+          // Explicit, so the child's prompt is the server-built text with no role preamble.
+          target: expected,
+          mode: "wait",
+          clientRequestId,
+          ...(waitMs === undefined ? {} : { timeoutMs: waitMs }),
+        } as const;
+        const result = yield* service.delegateTask(scope, delegation, JUDGE_DELEGATION_OPERATION);
+        return {
+          taskId: result.taskId,
+          childThreadId: result.childThreadId,
+          status: result.status,
+          summary: result.summary,
+          waitTimedOut: result.waitTimedOut,
+          judge: { instanceId: result.providerInstanceId, model: result.model ?? "unknown" },
+          expectedJudge: { instanceId: expected.providerInstanceId, model: expected.model },
+        };
+      }),
+      userMessages: (threadId) =>
+        threadManagement.getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] }).pipe(
+          Effect.map(({ messages }) => messages.map(({ text }) => text)),
+          Effect.mapError(threadManagementFailure),
+        ),
+      recordVerdict: ({ itemId, judgedEvidence, verdict, taskId }) =>
+        threadManagement
+          .dispatch({
+            type: "ledger.item.verdict.record",
+            commandId: stableCommandId({
+              scope,
+              requestKey: `${taskId}`,
+              operation: "ledger-verdict",
+            }),
+            threadId: scope.thread.threadId,
+            // `requestJudgement` refuses before any port runs when there is no ledger.
+            ledgerId: ledger!.id,
+            itemId,
+            verdict,
+            judgedEvidence,
+          })
+          .pipe(
+            Effect.map(({ sequence }) => sequence),
+            Effect.mapError(dispatchFailureMessage),
+          ),
+      abandon: ({ itemId, reason }) => {
+        const judging = ledger?.items.find(({ id }) => id === itemId);
+        return threadManagement
+          .dispatch({
+            type: "ledger.item.judgement.abandon",
+            // Keyed by the close request (stamped when judging began), so a later request
+            // that is abandoned too is a new command rather than this one's receipt.
+            commandId: stableCommandId({
+              scope,
+              requestKey: `${itemId}:${judging === undefined ? "" : DateTime.formatIso(judging.updatedAt)}`,
+              operation: "ledger-judge-abandon",
+            }),
+            threadId: scope.thread.threadId,
+            ledgerId: ledger!.id,
+            itemId,
+            reason: Array.from(reason).slice(0, 2_000).join("") || "The judge did not finish.",
+          })
+          .pipe(
+            Effect.map(({ sequence }) => sequence),
+            Effect.mapError(dispatchFailureMessage),
+          );
+      },
+    };
+    return { scope, parent, ledger, ports };
+  });
+
   const service: OrchestratorMcpServiceShape = OrchestratorMcpService.of({
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope);
@@ -3079,92 +3199,12 @@ const make = Effect.gen(function* () {
     }),
     requestJudgement: Effect.fn("OrchestratorMcpService.requestJudgement")(
       function* (callerScope, input) {
-        const { scope, parent } = yield* loadThreadCaller(callerScope, "ledger_request_judgement");
-        const { ledger } = yield* threadManagement
-          .getProjectThreadRecords(
-            { projectId: parent.thread.projectId, threadId: scope.thread.threadId },
-            ["ledger"],
-          )
-          .pipe(Effect.mapError(threadManagementFailure));
-        const dispatchFailureMessage = (error: unknown) =>
-          failure("orchestration_error", `Unable to record the verdict: ${errorMessage(error)}`);
-        const judged = yield* requestJudgement({
-          ledger,
-          itemId: input.itemId,
-          ports: {
-            delegate: Effect.fn("OrchestratorMcpService.judgeDelegate")(function* ({
-              prompt,
-              title,
-              keySource,
-            }) {
-              const digest = yield* crypto
-                .digest("SHA-256", new TextEncoder().encode(keySource))
-                .pipe(Effect.orDie);
-              // The same ledger, item and evidence is the same delegation, so a retry after a
-              // timeout rejoins the running judge instead of starting a second one.
-              const clientRequestId = `judge-${Array.from(digest.slice(0, 16), (byte) =>
-                byte.toString(16).padStart(2, "0"),
-              ).join("")}`;
-              const expected = yield* loadoutRoleTarget(
-                parent.thread,
-                "judge",
-                yield* loadProviders,
-              );
-              if (expected?.providerInstanceId === undefined || expected.model === undefined) {
-                return yield* failure("provider_unavailable", "The judge role cannot be resolved.");
-              }
-              const delegation = {
-                task: prompt,
-                title,
-                // Explicit, so the child's prompt is the server-built text with no role preamble.
-                target: expected,
-                mode: "wait",
-                clientRequestId,
-              } as const;
-              const result = yield* service.delegateTask(
-                scope,
-                delegation,
-                JUDGE_DELEGATION_OPERATION,
-              );
-              return {
-                taskId: result.taskId,
-                childThreadId: result.childThreadId,
-                status: result.status,
-                summary: result.summary,
-                waitTimedOut: result.waitTimedOut,
-                judge: { instanceId: result.providerInstanceId, model: result.model ?? "unknown" },
-                expectedJudge: { instanceId: expected.providerInstanceId, model: expected.model },
-              };
-            }),
-            userMessages: (threadId) =>
-              threadManagement
-                .getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] })
-                .pipe(
-                  Effect.map(({ messages }) => messages.map(({ text }) => text)),
-                  Effect.mapError(threadManagementFailure),
-                ),
-            recordVerdict: ({ itemId, judgedEvidence, verdict, taskId }) =>
-              threadManagement
-                .dispatch({
-                  type: "ledger.item.verdict.record",
-                  commandId: stableCommandId({
-                    scope,
-                    requestKey: `${taskId}`,
-                    operation: "ledger-verdict",
-                  }),
-                  threadId: scope.thread.threadId,
-                  // The ledger was just read above; `requestJudgement` refused it if it was absent.
-                  ledgerId: ledger!.id,
-                  itemId,
-                  verdict,
-                  judgedEvidence,
-                })
-                .pipe(
-                  Effect.map(({ sequence }) => sequence),
-                  Effect.mapError(dispatchFailureMessage),
-                ),
-          },
-        });
+        const { scope, parent, ledger, ports } = yield* judgementSetup(
+          callerScope,
+          "ledger_request_judgement",
+          undefined,
+        );
+        const judged = yield* requestJudgement({ ledger, itemId: input.itemId, ports });
         const after = yield* threadManagement
           .getProjectThreadRecords(
             { projectId: parent.thread.projectId, threadId: scope.thread.threadId },
@@ -3175,6 +3215,17 @@ const make = Effect.gen(function* () {
           ...judged,
           ledger: after.ledger === undefined ? null : snapshotLedger(after.ledger),
         };
+      },
+    ),
+    judgeInBackground: Effect.fn("OrchestratorMcpService.judgeInBackground")(
+      function* (callerScope, itemId) {
+        // The longest wait a delegation allows: nobody is blocked on this one.
+        const { ledger, ports } = yield* judgementSetup(
+          callerScope,
+          "ledger_update_item",
+          MAX_WAIT_TIMEOUT_MS,
+        );
+        yield* judgeInBackground({ ledger, itemId, ports });
       },
     ),
   });

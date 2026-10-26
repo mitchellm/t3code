@@ -20,6 +20,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as LedgerJudgeLauncher from "./LedgerJudgeLauncher.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
 import { dispatchFailure, unavailable } from "./threadAccess.ts";
@@ -115,6 +116,7 @@ const make = Effect.gen(function* () {
       Effect.orDie,
     );
   const threads = yield* ThreadManagementService.ThreadManagementService;
+  const judges = yield* LedgerJudgeLauncher.LedgerJudgeLauncher;
 
   const loadOwnLedger = Effect.fn("LedgerMcpService.loadOwnLedger")(function* (
     scope: McpInvocationScope,
@@ -194,11 +196,9 @@ const make = Effect.gen(function* () {
       );
       return { sequence, ledger: snapshot };
     }
-    // A lost response is retried with identical arguments, so the default key is a hash of them
-    // and the retry replays the stored receipt instead of failing against the changed ledger.
-    // The same hash also matches an earlier call that is stale by now (close, reopen, close), so
-    // a receipt that was rejected, or replayed without the change showing, is sent again once
-    // under a fresh key.
+    // The default key hashes the arguments, so a retried lost response replays its receipt. The
+    // hash also matches a stale earlier call (close, reopen, close), so a rejected receipt, or one
+    // replayed without the change showing, is sent again once under a fresh key.
     const fresh = Effect.map(crypto.randomUUIDv4(), (id) => `fresh-${id}`).pipe(Effect.orDie);
     const hashed = hashKey([operation, fingerprint(ledger)]).pipe(
       Effect.flatMap(send),
@@ -292,11 +292,17 @@ const make = Effect.gen(function* () {
     if (
       input.status === undefined &&
       input.evidence === undefined &&
-      input.dropReason === undefined
+      input.dropReason === undefined &&
+      input.deferReason === undefined &&
+      input.blockedBy === undefined &&
+      input.parentItemId === undefined
     ) {
-      return yield* failure("invalid_request", "Pass status, evidence or dropReason to update.");
+      return yield* failure(
+        "invalid_request",
+        "Pass status, evidence, a reason, blockedBy or parentItemId to update.",
+      );
     }
-    return yield* onExisting(
+    const result = yield* onExisting(
       "update-item",
       scope,
       input,
@@ -307,17 +313,36 @@ const make = Effect.gen(function* () {
         ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
         ...(input.dropReason === undefined ? {} : { dropReason: input.dropReason }),
+        ...(input.deferReason === undefined ? {} : { deferReason: input.deferReason }),
+        ...(input.blockedBy === undefined ? {} : { blockedBy: input.blockedBy }),
+        ...(input.parentItemId === undefined ? {} : { parentItemId: input.parentItemId }),
       }),
       (ledger) => {
         const item = ledger.items.find(({ id }) => id === input.itemId);
         return (
           item !== undefined &&
-          (input.status === undefined || item.status === input.status) &&
+          // On a judged ledger a close request lands as judging; that is the change applied.
+          (input.status === undefined ||
+            item.status === input.status ||
+            (input.status === "closed" && item.judging === true)) &&
           (input.evidence === undefined || item.evidence === input.evidence) &&
-          (input.dropReason === undefined || item.dropReason === input.dropReason)
+          (input.dropReason === undefined || item.dropReason === input.dropReason) &&
+          (input.deferReason === undefined || item.deferReason === input.deferReason) &&
+          (input.blockedBy === undefined ||
+            JSON.stringify(item.blockedBy ?? []) === JSON.stringify(input.blockedBy)) &&
+          (input.parentItemId === undefined || (item.parentItemId ?? null) === input.parentItemId)
         );
       },
     );
+    // Started after the close request is durable, and again on a retry: the launcher joins a
+    // judge already running, and after a restart this is what resumes a stranded one.
+    if (
+      input.status === "closed" &&
+      result.ledger?.items.some((item) => item.id === input.itemId && item.judging) === true
+    ) {
+      yield* judges.start(scope, input.itemId);
+    }
+    return result;
   });
 
   const setCheckpoint = Effect.fn("LedgerMcpService.setCheckpoint")(function* (
@@ -371,5 +396,7 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   LedgerMcpService,
   never,
-  Crypto.Crypto | ThreadManagementService.ThreadManagementService
+  | Crypto.Crypto
+  | ThreadManagementService.ThreadManagementService
+  | LedgerJudgeLauncher.LedgerJudgeLauncher
 > = Layer.effect(LedgerMcpService, make);

@@ -1,5 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import {
+  CommandId,
+  EventId,
   type Ledger,
   type LedgerItem,
   type LedgerItemVerdict,
@@ -13,8 +15,21 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Result from "effect/Result";
+import { applyLedgerEvent } from "@t3tools/shared/taskLedger";
 
-import { type JudgeRun, type JudgementPorts, requestJudgement } from "./LedgerJudgement.ts";
+import {
+  ledgerEventFromPlan,
+  type LedgerCommand,
+  planLedgerCommand,
+} from "../orchestration-v2/TaskLedger.ts";
+import {
+  type BackgroundJudgementPorts,
+  type JudgeRun,
+  type JudgementPorts,
+  judgeInBackground,
+  requestJudgement,
+} from "./LedgerJudgement.ts";
 
 const at = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
 const itemId = LedgerItemId.make("L1");
@@ -271,6 +286,104 @@ it.effect(
     });
   },
 );
+
+/**
+ * The background judge against the real planner and reducer: the ports dispatch the internal
+ * commands into a ledger held here, so a test sees what the item becomes.
+ */
+const backgroundHarness = (judgeRun: JudgeRun) => {
+  let ledger = ledgerOf({}, [item({ judging: true })]);
+  const delegated: Array<string> = [];
+  const apply = (command: LedgerCommand) => {
+    const planned = planLedgerCommand({ command, ledger, now: at });
+    if (Result.isFailure(planned)) throw new Error(planned.failure);
+    for (const event of planned.success) {
+      ledger =
+        applyLedgerEvent(ledger, {
+          ...ledgerEventFromPlan(event, {
+            threadId: ledger.threadId,
+            providerInstanceId: judge.instanceId,
+            occurredAt: at,
+          }),
+          id: EventId.make("event:judge"),
+        }) ?? ledger;
+    }
+    return 1;
+  };
+  const common = { commandId: CommandId.make("command:judge"), ledgerId: ledger.id };
+  const ports: BackgroundJudgementPorts = {
+    delegate: (input) =>
+      Effect.sync(() => {
+        delegated.push(input.prompt);
+        return judgeRun;
+      }),
+    userMessages: () => Effect.sync(() => delegated),
+    recordVerdict: ({ itemId: judgedItem, judgedEvidence, verdict }) =>
+      Effect.sync(() =>
+        apply({
+          type: "ledger.item.verdict.record",
+          ...common,
+          threadId: ledger.threadId,
+          itemId: judgedItem,
+          verdict,
+          judgedEvidence,
+        }),
+      ),
+    abandon: ({ itemId: abandoned, reason }) =>
+      Effect.sync(() =>
+        apply({
+          type: "ledger.item.judgement.abandon",
+          ...common,
+          threadId: ledger.threadId,
+          itemId: abandoned,
+          reason,
+        }),
+      ),
+  };
+  return { ports, delegated, ledger: () => ledger };
+};
+
+it.effect("closes the item when the automatic judge passes it", () => {
+  const harnessed = backgroundHarness(run());
+  return Effect.gen(function* () {
+    yield* judgeInBackground({ ledger: harnessed.ledger(), itemId, ports: harnessed.ports });
+    const judged = harnessed.ledger().items[0];
+    expect(judged?.status).toBe("closed");
+    expect(judged?.judging).toBeUndefined();
+    expect(judged?.verdict?.outcome).toBe("pass");
+  });
+});
+
+it.effect("hands the item back in progress with the judge's notes when it fails", () => {
+  const harnessed = backgroundHarness(run({ summary: "No CLI entry exists.\nVERDICT: FAIL" }));
+  return Effect.gen(function* () {
+    yield* judgeInBackground({ ledger: harnessed.ledger(), itemId, ports: harnessed.ports });
+    const judged = harnessed.ledger().items[0];
+    expect(judged?.status).toBe("in_progress");
+    expect(judged?.judging).toBeUndefined();
+    expect(judged?.verdict?.notes).toContain("No CLI entry exists.");
+  });
+});
+
+it.effect("ends a judge that produced no verdict without inventing one", () => {
+  const harnessed = backgroundHarness(run({ status: "failed", summary: null }));
+  return Effect.gen(function* () {
+    yield* judgeInBackground({ ledger: harnessed.ledger(), itemId, ports: harnessed.ports });
+    const judged = harnessed.ledger().items[0];
+    expect(judged?.status).toBe("in_progress");
+    expect(judged?.judging).toBeUndefined();
+    expect(judged?.verdict).toBeNull();
+    expect(judged?.judgeError).toContain("ended failed");
+  });
+});
+
+it.effect("does not start a judge for an item nobody asked to close", () => {
+  const harnessed = backgroundHarness(run());
+  return Effect.gen(function* () {
+    yield* judgeInBackground({ ledger: ledgerOf(), itemId, ports: harnessed.ports });
+    expect(harnessed.delegated).toEqual([]);
+  });
+});
 
 it.effect("refuses before delegating when there is nothing to judge", () => {
   const cases: ReadonlyArray<readonly [string, Ledger | undefined, string]> = [

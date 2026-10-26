@@ -64,22 +64,36 @@ export type LedgerCommand = Extract<
 export type LedgerRejection = string;
 
 /**
- * The one transition table. Items start, finish and drop; an in-progress item can be
- * un-started; a closed or dropped item can only come back as open. An open item may close
+ * The one transition table. Items start, finish, drop and defer; an in-progress item can be
+ * un-started; a closed, dropped or deferred item comes back as open. An open item may close
  * directly so a small item finishes in one step, but closing still needs evidence.
  */
 const LEGAL_TRANSITIONS: Readonly<Record<LedgerItemStatus, ReadonlyArray<LedgerItemStatus>>> = {
-  open: ["in_progress", "closed", "dropped"],
-  in_progress: ["open", "closed", "dropped"],
+  open: ["in_progress", "closed", "dropped", "deferred"],
+  in_progress: ["open", "closed", "dropped", "deferred"],
   closed: ["open"],
   dropped: ["open"],
+  deferred: ["open", "dropped"],
 };
 
 const isBlank = (text: string | null | undefined) =>
   text === null || text === undefined || text.trim() === "";
 
+/** Open or in progress: what keeps a ledger, a parent or a blocked item from finishing. */
+const isUnfinished = (item: Pick<LedgerItem, "status">) =>
+  item.status === "open" || item.status === "in_progress";
+
+/** A blocker releases its dependents once it is closed or dropped; deferred still blocks. */
+const releasesDependents = (item: Pick<LedgerItem, "status">) =>
+  item.status === "closed" || item.status === "dropped";
+
 function duplicateId(ids: ReadonlyArray<string>): string | undefined {
-  return ids.find((id, index) => ids.indexOf(id) !== index);
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) return id;
+    seen.add(id);
+  }
+  return undefined;
 }
 
 function newItem(draft: LedgerItemDraft, now: DateTime.Utc): LedgerItem {
@@ -87,30 +101,129 @@ function newItem(draft: LedgerItemDraft, now: DateTime.Utc): LedgerItem {
     id: draft.id,
     title: draft.title,
     acceptance: draft.acceptance,
-    status: "open",
+    status: draft.deferReason === undefined ? "open" : "deferred",
     evidence: null,
     dropReason: null,
     verdict: null,
+    ...(draft.blockedBy === undefined || draft.blockedBy.length === 0
+      ? {}
+      : { blockedBy: draft.blockedBy }),
+    ...(draft.parentItemId === undefined ? {} : { parentItemId: draft.parentItemId }),
+    ...(draft.deferReason === undefined ? {} : { deferReason: draft.deferReason }),
     createdAt: now,
     updatedAt: now,
     closedAt: null,
   };
 }
 
+/** Drops an optional key rather than storing it empty, so stored items stay as small as before. */
+function withOptional<
+  Key extends "blockedBy" | "parentItemId" | "deferReason" | "judging" | "judgeError",
+>(item: LedgerItem, key: Key, value: LedgerItem[Key] | undefined): LedgerItem {
+  // Only optional keys are accepted, so the item stays a complete LedgerItem either way.
+  const { [key]: _removed, ...rest } = item;
+  return (value === undefined ? rest : { ...rest, [key]: value }) as LedgerItem;
+}
+
 /**
- * Decides a ledger command against the thread's current ledger without any I/O.
- *
- * A thread has at most one open ledger in v1. A closed ledger may be replaced by creating a new
- * one with a fresh id, which keeps the thread view to a single current task. History lives in
- * the event log, not in the projection.
- *
- * `requiresJudge` is the per-ledger judge gate: an item may not close without a passing
- * verdict. It defaults to the ledger's own field, so no caller can forget it. For
- * `ledger.create` it is instead the value to stamp on the new ledger, which the orchestrator
- * decides from the thread's loadout.
- *
- * Returns no events when the command changes nothing, so a retried or redundant command does
- * not bump `updatedAt`.
+ * Checks the dependency and parent graphs of a whole item list: every reference names a known
+ * item, nothing references itself, and neither graph has a cycle. Linear in items plus edges,
+ * because ledgers reach thousands of items.
+ */
+function structureProblem(items: ReadonlyArray<LedgerItem>): string | undefined {
+  const byId = new Map(items.map((item) => [item.id as string, item]));
+  for (const item of items) {
+    for (const blocker of item.blockedBy ?? []) {
+      if (blocker === item.id) return `Item ${item.id} cannot be blocked by itself.`;
+      if (!byId.has(blocker)) return `Item ${item.id} is blocked by unknown item ${blocker}.`;
+    }
+    if (item.parentItemId !== undefined) {
+      if (item.parentItemId === item.id) return `Item ${item.id} cannot be a sub-item of itself.`;
+      if (!byId.has(item.parentItemId)) {
+        return `Item ${item.id} has unknown parent item ${item.parentItemId}.`;
+      }
+    }
+  }
+  // Iterative three-colour DFS over blockedBy, so a long chain cannot overflow the stack.
+  const state = new Map<string, "visiting" | "done">();
+  for (const start of items) {
+    if (state.has(start.id)) continue;
+    const stack: Array<{ id: string; next: number }> = [{ id: start.id, next: 0 }];
+    state.set(start.id, "visiting");
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]!;
+      const blockers = byId.get(frame.id)?.blockedBy ?? [];
+      if (frame.next >= blockers.length) {
+        state.set(frame.id, "done");
+        stack.pop();
+        continue;
+      }
+      const blocker = blockers[frame.next]!;
+      frame.next += 1;
+      const seen = state.get(blocker);
+      if (seen === "visiting") {
+        return `Blockers form a cycle through ${blocker} and ${frame.id}.`;
+      }
+      if (seen === undefined) {
+        state.set(blocker, "visiting");
+        stack.push({ id: blocker, next: 0 });
+      }
+    }
+  }
+  // Each parent chain is walked once; a chain that reaches a checked item stops there.
+  const rooted = new Set<string>();
+  for (const start of items) {
+    const chain = new Set<string>();
+    let current: LedgerItem | undefined = start;
+    while (current !== undefined && !rooted.has(current.id)) {
+      if (chain.has(current.id)) return `Parent items form a cycle through ${current.id}.`;
+      chain.add(current.id);
+      current = current.parentItemId === undefined ? undefined : byId.get(current.parentItemId);
+    }
+    for (const id of chain) rooted.add(id);
+  }
+  return undefined;
+}
+
+/** A child that still has work cannot sit under a closed parent. */
+function closedParentProblem(
+  items: ReadonlyArray<LedgerItem>,
+  changed: ReadonlyArray<LedgerItem>,
+): string | undefined {
+  for (const item of changed) {
+    if (item.parentItemId === undefined || !isUnfinished(item)) continue;
+    const parent = items.find(({ id }) => id === item.parentItemId);
+    if (parent?.status === "closed") {
+      return `Parent item ${parent.id} is closed. Reopen it before giving it unfinished sub-items.`;
+    }
+  }
+  return undefined;
+}
+
+function draftProblem(drafts: ReadonlyArray<LedgerItemDraft>): string | undefined {
+  const blank = drafts.find(
+    (draft) => draft.deferReason !== undefined && isBlank(draft.deferReason),
+  );
+  return blank === undefined
+    ? undefined
+    : `Item ${blank.id} needs a non-empty deferReason to start deferred.`;
+}
+
+function blockersOf(ledger: Ledger, item: LedgerItem): ReadonlyArray<LedgerItem> {
+  if (item.blockedBy === undefined || item.blockedBy.length === 0) return [];
+  const blockers = new Set<string>(item.blockedBy);
+  return ledger.items.filter(
+    (candidate) => blockers.has(candidate.id) && !releasesDependents(candidate),
+  );
+}
+
+const describeItems = (items: ReadonlyArray<LedgerItem>) =>
+  items.map((item) => `${item.id} (${item.status})`).join(", ");
+
+/**
+ * `requiresJudge` defaults to the ledger's own field so no caller can forget the gate; a close
+ * without a passing verdict becomes a judgement in progress. For `ledger.create` it is the value
+ * to stamp. A command that changes nothing plans no events, so a retry does not bump `updatedAt`.
  */
 export function planLedgerCommand(input: {
   readonly command: LedgerCommand;
@@ -139,6 +252,9 @@ export function planLedgerCommand(input: {
     if (duplicateCheckpoint !== undefined) {
       return reject(`Duplicate checkpoint id ${duplicateCheckpoint}.`);
     }
+    const createdItems = command.items.map((draft) => newItem(draft, now));
+    const createProblem = draftProblem(command.items) ?? structureProblem(createdItems);
+    if (createProblem !== undefined) return reject(createProblem);
     // A closed ledger's flag must not leak into its replacement, so only the input counts here.
     const stampedRequiresJudge = input.requiresJudge === true;
     return Result.succeed([
@@ -156,7 +272,7 @@ export function planLedgerCommand(input: {
             reachedAt: null,
           })),
           winConditions: command.winConditions,
-          items: command.items.map((draft) => newItem(draft, now)),
+          items: createdItems,
           ...(stampedRequiresJudge ? { requiresJudge: true } : {}),
           createdAt: now,
           updatedAt: now,
@@ -189,9 +305,8 @@ export function planLedgerCommand(input: {
 
   switch (command.type) {
     case "ledger.close": {
-      const unfinished = ledger.items.filter(
-        (item) => item.status === "open" || item.status === "in_progress",
-      );
+      // Deferred items are kept for later and do not hold the task open.
+      const unfinished = ledger.items.filter(isUnfinished);
       if (unfinished.length > 0) {
         return reject(
           `Ledger ${ledger.id} cannot close: items still open or in progress: ${unfinished.map((item) => item.id).join(", ")}. Close or drop them first.`,
@@ -208,14 +323,15 @@ export function planLedgerCommand(input: {
         ...command.items.map((item) => item.id),
       ]);
       if (duplicate !== undefined) return reject(`Duplicate item id ${duplicate}.`);
+      const added = command.items.map((draft) => newItem(draft, now));
+      const all = [...ledger.items, ...added];
+      const addProblem =
+        draftProblem(command.items) ?? structureProblem(all) ?? closedParentProblem(all, added);
+      if (addProblem !== undefined) return reject(addProblem);
       return Result.succeed([
         {
           type: "ledger.item.added",
-          payload: {
-            ledgerId: ledger.id,
-            items: command.items.map((draft) => newItem(draft, now)),
-            updatedAt: now,
-          },
+          payload: { ledgerId: ledger.id, items: added, updatedAt: now },
         },
       ]);
     }
@@ -241,32 +357,73 @@ export function planLedgerCommand(input: {
     case "ledger.item.verdict.record": {
       const item = ledger.items.find(({ id }) => id === command.itemId);
       if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
-      if (item.status === "closed" || item.status === "dropped") {
+      if (item.status === "closed" || item.status === "dropped" || item.status === "deferred") {
         return reject(`Item ${item.id} is ${item.status}. Reopen it before judging it.`);
       }
       if (command.judgedEvidence !== undefined && command.judgedEvidence !== item.evidence) {
         return reject(`Item ${item.id} evidence changed while it was being judged.`);
       }
-      // A passing verdict only unlocks closing; the agent still closes the item itself.
-      return Result.succeed([
-        {
-          type: "ledger.item.updated",
-          payload: {
-            ledgerId: ledger.id,
-            item: {
-              ...item,
-              verdict: command.verdict,
-              judgements: (item.judgements ?? 0) + 1,
-              updatedAt: now,
-            },
-            updatedAt: now,
-          },
-        },
-      ]);
+      const recorded: LedgerItem = {
+        ...item,
+        verdict: command.verdict,
+        judgements: (item.judgements ?? 0) + 1,
+        updatedAt: now,
+      };
+      // Without a pending close request a verdict only unlocks closing; the agent closes it.
+      if (item.judging !== true) return itemUpdated(ledger.id, recorded, now);
+      const settled = withOptional(
+        withOptional(recorded, "judging", undefined),
+        "judgeError",
+        undefined,
+      );
+      // A blocker or sub-item reopened while the judge ran: keep the pass, leave the close to
+      // the agent, whose next close request then succeeds without another judge.
+      const closes =
+        command.verdict.outcome === "pass" &&
+        blockersOf(ledger, item).length === 0 &&
+        unfinishedChildren(ledger, item).length === 0;
+      return itemUpdated(
+        ledger.id,
+        closes
+          ? { ...settled, status: "closed", closedAt: now }
+          : { ...settled, status: "in_progress" },
+        now,
+      );
+    }
+    case "ledger.item.judgement.abandon": {
+      const item = ledger.items.find(({ id }) => id === command.itemId);
+      if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
+      // A verdict or a drop already ended the judgement; a late abandon changes nothing.
+      if (item.judging !== true) return Result.succeed([]);
+      return itemUpdated(
+        ledger.id,
+        withOptional(
+          { ...withOptional(item, "judging", undefined), updatedAt: now },
+          "judgeError",
+          command.reason,
+        ),
+        now,
+      );
     }
     case "ledger.item.update": {
       const item = ledger.items.find(({ id }) => id === command.itemId);
       if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
+      if (item.judging === true) {
+        const repeatsClose =
+          command.status === "closed" &&
+          (command.evidence === undefined || command.evidence === item.evidence) &&
+          command.dropReason === undefined &&
+          command.deferReason === undefined &&
+          command.blockedBy === undefined &&
+          command.parentItemId === undefined;
+        // A retried close request while the judge runs is already in effect.
+        if (repeatsClose) return Result.succeed([]);
+        if (command.status !== "dropped") {
+          return reject(
+            `Item ${item.id} is being judged. Wait for the verdict, which closes it or hands it back with the judge's notes, or drop it.`,
+          );
+        }
+      }
       const target = command.status ?? item.status;
       const changesStatus = target !== item.status;
 
@@ -276,21 +433,50 @@ export function planLedgerCommand(input: {
       if (!changesStatus && (item.status === "closed" || item.status === "dropped")) {
         return reject(`Item ${item.id} is ${item.status}. Reopen it to change it.`);
       }
-      // Reopening a finished item starts it over; un-starting an in-progress item only changes
-      // its status and keeps the evidence gathered so far.
+
+      let structured: LedgerItem = item;
+      if (command.blockedBy !== undefined) {
+        structured = withOptional(
+          structured,
+          "blockedBy",
+          command.blockedBy.length === 0 ? undefined : command.blockedBy,
+        );
+      }
+      if (command.parentItemId !== undefined) {
+        structured = withOptional(structured, "parentItemId", command.parentItemId ?? undefined);
+      }
+      const changesStructure =
+        JSON.stringify(structured.blockedBy ?? []) !== JSON.stringify(item.blockedBy ?? []) ||
+        structured.parentItemId !== item.parentItemId;
+      if (changesStructure) {
+        const items = ledger.items.map((candidate) =>
+          candidate.id === item.id ? structured : candidate,
+        );
+        const problem = structureProblem(items) ?? closedParentProblem(items, [structured]);
+        if (problem !== undefined) return reject(problem);
+      }
+
+      // Reopening a finished item starts it over; un-starting an in-progress item or reviving a
+      // deferred one only changes its status and keeps the evidence gathered so far.
       if (target === "open" && changesStatus && item.status !== "in_progress") {
-        if (command.evidence !== undefined || command.dropReason !== undefined) {
-          return reject(
-            "Reopening an item clears its evidence and drop reason; do not supply them.",
-          );
+        if (
+          command.evidence !== undefined ||
+          (command.dropReason !== undefined && command.dropReason !== null) ||
+          (command.deferReason !== undefined && command.deferReason !== null)
+        ) {
+          return reject("Reopening an item clears its evidence and reasons; do not supply them.");
         }
-        return Result.succeed([
-          {
-            type: "ledger.item.updated",
-            payload: {
-              ledgerId: ledger.id,
-              item: {
-                ...item,
+        const revived = withOptional(
+          withOptional(structured, "deferReason", undefined),
+          "judgeError",
+          undefined,
+        );
+        return itemUpdated(
+          ledger.id,
+          item.status === "deferred"
+            ? { ...revived, status: "open", updatedAt: now }
+            : {
+                ...revived,
                 status: "open",
                 evidence: null,
                 dropReason: null,
@@ -298,14 +484,14 @@ export function planLedgerCommand(input: {
                 closedAt: null,
                 updatedAt: now,
               },
-              updatedAt: now,
-            },
-          },
-        ]);
+          now,
+        );
       }
 
       const evidence = command.evidence === undefined ? item.evidence : command.evidence;
       const dropReason = command.dropReason === undefined ? item.dropReason : command.dropReason;
+      const deferReason =
+        command.deferReason === undefined ? item.deferReason : (command.deferReason ?? undefined);
       // Skipping in_progress is allowed only when the same update brings the evidence.
       if (target === "closed" && item.status === "open" && isBlank(command.evidence)) {
         return reject(`Item ${item.id} needs evidence in the same update to close from open.`);
@@ -319,17 +505,62 @@ export function planLedgerCommand(input: {
       if (target !== "dropped" && command.dropReason !== undefined && command.dropReason !== null) {
         return reject("A dropReason only applies when dropping an item.");
       }
+      if (target === "deferred" && isBlank(deferReason)) {
+        return reject(`Item ${item.id} needs a non-empty deferReason to be deferred.`);
+      }
+      if (
+        target !== "deferred" &&
+        command.deferReason !== undefined &&
+        command.deferReason !== null
+      ) {
+        return reject("A deferReason only applies when deferring an item.");
+      }
+      if (changesStatus && (target === "in_progress" || target === "closed")) {
+        const blockers = blockersOf(ledger, structured);
+        if (blockers.length > 0) {
+          return reject(
+            `Item ${item.id} is blocked by ${describeItems(blockers)}. Close or drop them first.`,
+          );
+        }
+      }
+      if (changesStatus && target === "closed") {
+        const children = unfinishedChildren(ledger, item);
+        if (children.length > 0) {
+          return reject(
+            `Item ${item.id} has unfinished sub-items: ${describeItems(children)}. Close, drop or defer them first.`,
+          );
+        }
+      }
       // A verdict judged the evidence as it stood, so changed evidence needs a fresh one;
       // otherwise pass, edit the evidence, close would sidestep the judge gate.
       const verdict = evidence === item.evidence ? item.verdict : null;
       if (target === "closed" && requiresJudge && verdict?.outcome !== "pass") {
-        return reject(`Item ${item.id} needs a passing judge verdict to close.`);
+        // The close becomes a request: the server's judge runs and its verdict settles it, so
+        // the agent never has to ask, and cannot close past it.
+        return itemUpdated(
+          ledger.id,
+          {
+            ...withOptional(
+              withOptional(structured, "deferReason", undefined),
+              "judgeError",
+              undefined,
+            ),
+            status: "in_progress",
+            evidence,
+            dropReason: null,
+            verdict: null,
+            judging: true,
+            closedAt: null,
+            updatedAt: now,
+          },
+          now,
+        );
       }
 
       // A closed or dropped item never reaches here without changing status, so `closedAt` is
       // only ever stamped by the transition into closed.
-      const next: LedgerItem = {
-        ...item,
+      let next: LedgerItem = {
+        ...structured,
         status: target,
         evidence,
         dropReason: target === "dropped" ? dropReason : null,
@@ -337,15 +568,35 @@ export function planLedgerCommand(input: {
         closedAt: target === "closed" ? now : null,
         updatedAt: now,
       };
-      if (!changesStatus && evidence === item.evidence && next.dropReason === item.dropReason) {
+      next = withOptional(next, "deferReason", target === "deferred" ? deferReason : undefined);
+      if (target === "dropped") next = withOptional(next, "judging", undefined);
+      if (changesStatus || evidence !== item.evidence) {
+        next = withOptional(next, "judgeError", undefined);
+      }
+      if (
+        !changesStatus &&
+        !changesStructure &&
+        evidence === item.evidence &&
+        next.dropReason === item.dropReason &&
+        next.deferReason === item.deferReason
+      ) {
         return Result.succeed([]);
       }
-      return Result.succeed([
-        {
-          type: "ledger.item.updated",
-          payload: { ledgerId: ledger.id, item: next, updatedAt: now },
-        },
-      ]);
+      return itemUpdated(ledger.id, next, now);
     }
   }
+}
+
+function unfinishedChildren(ledger: Ledger, parent: LedgerItem): ReadonlyArray<LedgerItem> {
+  return ledger.items.filter((item) => item.parentItemId === parent.id && isUnfinished(item));
+}
+
+function itemUpdated(
+  ledgerId: Ledger["id"],
+  item: LedgerItem,
+  now: DateTime.Utc,
+): Result.Result<ReadonlyArray<PlannedLedgerEvent>, LedgerRejection> {
+  return Result.succeed([
+    { type: "ledger.item.updated", payload: { ledgerId, item, updatedAt: now } },
+  ]);
 }

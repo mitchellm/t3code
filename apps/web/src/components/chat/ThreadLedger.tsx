@@ -1,14 +1,25 @@
 import type { Ledger, LedgerItem, ScopedThreadRef } from "@t3tools/contracts";
 import {
   deriveLedgerProgress,
+  deriveLedgerView,
   formatLedgerProgress,
-  LEDGER_ITEM_STATUS_LABELS,
+  ledgerItemStatusLabel,
+  type LedgerViewRow,
 } from "@t3tools/client-runtime/state/thread-ledger";
-import { CircleCheckIcon, CircleDotIcon, CircleIcon, CircleMinusIcon } from "lucide-react";
+import {
+  ChevronRightIcon,
+  CircleCheckIcon,
+  CircleDashedIcon,
+  CircleDotIcon,
+  CircleIcon,
+  CircleMinusIcon,
+  ScaleIcon,
+} from "lucide-react";
 import type { ComponentType } from "react";
 
 import { useThreadLedgerIfSupported } from "~/hooks/useThreadLedgerIfSupported";
 import { Badge } from "../ui/badge";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { ThreadTabSection } from "../thread/ThreadOverviewTab";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 
@@ -24,12 +35,32 @@ const ITEM_STATUS_PRESENTATION: Record<
   in_progress: { Icon: CircleDotIcon, iconClass: "text-info", badge: "info" },
   closed: { Icon: CircleCheckIcon, iconClass: "text-success", badge: "success" },
   dropped: { Icon: CircleMinusIcon, iconClass: "text-muted-foreground/60", badge: "secondary" },
+  deferred: { Icon: CircleDashedIcon, iconClass: "text-muted-foreground/60", badge: "secondary" },
 };
 
-function LedgerItemRow({ item }: { item: LedgerItem }) {
-  const { Icon, iconClass, badge } = ITEM_STATUS_PRESENTATION[item.status];
+const JUDGING_PRESENTATION = {
+  Icon: ScaleIcon,
+  iconClass: "text-warning",
+  badge: "warning",
+} as const;
+
+// Indentation per nesting level, capped so deep trees stay readable in a narrow panel.
+const DEPTH_INDENT = ["", "ps-4", "ps-8", "ps-12"] as const;
+const indentFor = (depth: number) => DEPTH_INDENT[Math.min(depth, DEPTH_INDENT.length - 1)];
+
+function LedgerItemRow({
+  item,
+  depth = 0,
+  blockedBy = [],
+}: {
+  item: LedgerItem;
+  depth?: number;
+  blockedBy?: LedgerViewRow["blockedBy"];
+}) {
+  const { Icon, iconClass, badge } =
+    item.judging === true ? JUDGING_PRESENTATION : ITEM_STATUS_PRESENTATION[item.status];
   return (
-    <li className="flex flex-col gap-0.5">
+    <li className={`flex flex-col gap-0.5 ${indentFor(depth)}`}>
       <div className="flex items-start gap-2">
         <Icon aria-hidden className={`mt-0.5 size-4 shrink-0 ${iconClass}`} />
         <span
@@ -41,8 +72,14 @@ function LedgerItemRow({ item }: { item: LedgerItem }) {
         >
           {item.title}
         </span>
+        {blockedBy.length === 0 ? null : (
+          <Badge variant="outline" size="sm" title={`Blocked by ${blockedBy.join(", ")}`}>
+            blocked by{" "}
+            {blockedBy.length === 1 ? blockedBy[0] : `${blockedBy[0]} +${blockedBy.length - 1}`}
+          </Badge>
+        )}
         <Badge variant={badge} size="sm">
-          {LEDGER_ITEM_STATUS_LABELS[item.status]}
+          {ledgerItemStatusLabel(item)}
         </Badge>
       </div>
       <div className="flex flex-col gap-0.5 ps-6 text-2xs text-muted-foreground">
@@ -54,6 +91,12 @@ function LedgerItemRow({ item }: { item: LedgerItem }) {
         )}
         {item.dropReason === null || item.dropReason.trim() === "" ? null : (
           <p className="line-clamp-3 break-words">Dropped: {item.dropReason}</p>
+        )}
+        {item.deferReason === undefined || item.deferReason.trim() === "" ? null : (
+          <p className="line-clamp-3 break-words">Deferred: {item.deferReason}</p>
+        )}
+        {item.judgeError === undefined ? null : (
+          <p className="line-clamp-3 break-words">Judge did not finish: {item.judgeError}</p>
         )}
         {item.verdict === null ? null : (
           <p className="flex flex-wrap items-center gap-1.5 break-words">
@@ -86,8 +129,32 @@ function LedgerList({ heading, entries }: { heading: string; entries: ReadonlyAr
   );
 }
 
+function DeferredItems({ items }: { items: ReadonlyArray<LedgerItem> }) {
+  if (items.length === 0) return null;
+  return (
+    <Collapsible>
+      <CollapsibleTrigger className="group flex items-center gap-1 text-2xs font-medium text-muted-foreground">
+        <ChevronRightIcon
+          aria-hidden
+          className="size-3 transition-transform group-data-panel-open:rotate-90"
+        />
+        Deferred ({items.length})
+      </CollapsibleTrigger>
+      {/* Collapsed by default and unmounted while closed, so a long backlog costs nothing. */}
+      <CollapsiblePanel animate={false}>
+        <ul className="m-0 mt-2 flex list-none flex-col gap-2 p-0">
+          {items.map((item) => (
+            <LedgerItemRow key={item.id} item={item} />
+          ))}
+        </ul>
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
 function ThreadLedgerView({ ledger }: { ledger: Ledger }) {
   const progress = deriveLedgerProgress(ledger);
+  const view = deriveLedgerView(ledger);
   return (
     <div data-thread-ledger-panel className="flex flex-col gap-3 px-2.5 py-1">
       <div className="flex items-start justify-between gap-2">
@@ -125,10 +192,16 @@ function ThreadLedgerView({ ledger }: { ledger: Ledger }) {
         </div>
       )}
       <ul className="m-0 flex list-none flex-col gap-2 p-0">
-        {ledger.items.map((item) => (
-          <LedgerItemRow key={item.id} item={item} />
+        {view.rows.map((row) => (
+          <LedgerItemRow
+            key={row.item.id}
+            item={row.item}
+            depth={row.depth}
+            blockedBy={row.blockedBy}
+          />
         ))}
       </ul>
+      <DeferredItems items={view.deferred} />
     </div>
   );
 }
@@ -164,7 +237,7 @@ export function ThreadLedgerHeaderProgress({ threadRef }: { threadRef: ScopedThr
   return (
     <Badge variant="info" size="sm">
       <span aria-hidden>
-        Ledger {progress.closed}/{progress.total - progress.dropped}
+        Ledger {progress.closed}/{progress.scope}
       </span>
       <span className="sr-only">Task ledger: {formatLedgerProgress(progress)}</span>
     </Badge>

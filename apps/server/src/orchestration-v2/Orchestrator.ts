@@ -545,6 +545,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "ledger.close":
     case "ledger.reopen":
     case "ledger.item.verdict.record":
+    case "ledger.item.judgement.abandon":
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.wake-policy":
@@ -12109,6 +12110,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "ledger.close":
       case "ledger.reopen":
       case "ledger.item.verdict.record":
+      case "ledger.item.judgement.abandon":
         acceptsNoEvents = (yield* dispatchLedgerCommand(command, events)).redundant;
         break;
       default:

@@ -11,7 +11,14 @@ import {
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
-export const LedgerItemStatus = Schema.Literals(["open", "in_progress", "closed", "dropped"]);
+/** `deferred` is work found out of scope for this task: kept for later, never auto-continued. */
+export const LedgerItemStatus = Schema.Literals([
+  "open",
+  "in_progress",
+  "closed",
+  "dropped",
+  "deferred",
+]);
 export type LedgerItemStatus = typeof LedgerItemStatus.Type;
 
 /** Who judged, without the provider options a full `ModelSelection` carries. */
@@ -43,6 +50,22 @@ export const LedgerItem = Schema.Struct({
    * so repeated asking is visible. Absent means none.
    */
   judgements: Schema.optionalKey(NonNegativeInt),
+  /** Items that must be closed or dropped before this one can start or close. Absent means none. */
+  blockedBy: Schema.optionalKey(Schema.Array(LedgerItemId)),
+  /** The item this one is a sub-item of; a parent cannot close while a child is unfinished. */
+  parentItemId: Schema.optionalKey(LedgerItemId),
+  /** Why the item was deferred; present only while it is deferred. */
+  deferReason: Schema.optionalKey(Schema.String),
+  /**
+   * The agent asked to close it on a judged ledger and the server's judge is running. Only the
+   * server sets or clears it; the verdict closes the item (pass) or hands it back (fail).
+   */
+  judging: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Why the last automatic judgement ended without a verdict (the judge could not start, failed,
+   * or outlived the wait). Not a failing verdict: the work was never judged.
+   */
+  judgeError: Schema.optionalKey(Schema.String),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   closedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -109,6 +132,10 @@ export const LedgerItemDraft = Schema.Struct({
   id: LedgerItemId,
   title: TrimmedNonEmptyString,
   acceptance: Schema.String,
+  blockedBy: Schema.optionalKey(Schema.Array(LedgerItemId)),
+  parentItemId: Schema.optionalKey(LedgerItemId),
+  /** Present means the item starts deferred, for out-of-scope work recorded for later. */
+  deferReason: Schema.optionalKey(Schema.String),
 });
 export type LedgerItemDraft = typeof LedgerItemDraft.Type;
 
@@ -148,14 +175,23 @@ export const LedgerCommands = [
     status: Schema.optional(LedgerItemStatus),
     evidence: Schema.optional(Schema.NullOr(Schema.String)),
     dropReason: Schema.optional(Schema.NullOr(Schema.String)),
-    // No verdict: only the server attests one, via the internal `ledger.item.verdict.record`.
+    deferReason: Schema.optional(Schema.NullOr(Schema.String)),
+    /** Replaces the whole blocker list; an empty array clears it. */
+    blockedBy: Schema.optional(Schema.Array(LedgerItemId)),
+    /** Null moves the item to the top level. */
+    parentItemId: Schema.optional(Schema.NullOr(LedgerItemId)),
+    // No verdict and no judging flag: only the server attests a verdict, via the internal
+    // `ledger.item.verdict.record`, and only the planner starts a judgement.
   }).check(
     Schema.makeFilter(
       (update) =>
         update.status !== undefined ||
         update.evidence !== undefined ||
         update.dropReason !== undefined ||
-        "A ledger item update must change status, evidence or dropReason.",
+        update.deferReason !== undefined ||
+        update.blockedBy !== undefined ||
+        update.parentItemId !== undefined ||
+        "A ledger item update must change status, evidence, a reason, blockedBy or parentItemId.",
     ),
   ),
   Schema.Struct({
@@ -190,6 +226,16 @@ export const LedgerVerdictRecordCommand = Schema.Struct({
   verdict: LedgerItemVerdict,
   /** The evidence the judge was shown; a verdict for evidence that has since changed is stale. */
   judgedEvidence: Schema.optionalKey(Schema.NullOr(Schema.String)),
+});
+
+/** Server-only: ends an automatic judgement that produced no verdict, handing the item back. */
+export const LedgerJudgementAbandonCommand = Schema.Struct({
+  type: Schema.Literal("ledger.item.judgement.abandon"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  ledgerId: LedgerId,
+  itemId: LedgerItemId,
+  reason: TrimmedNonEmptyString,
 });
 
 /** Payload of `ledger.item.added`: only the newly added items, which readers upsert. */

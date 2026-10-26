@@ -68,6 +68,7 @@ import {
   LedgerReopenedPayload,
   LedgerReopenedPayloadJson,
   LedgerVerdictRecordCommand,
+  LedgerJudgementAbandonCommand,
   LedgerJson,
 } from "./ledger.ts";
 import { ThreadLoadout } from "./loadout.ts";
@@ -3453,6 +3454,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     ),
   }),
   LedgerVerdictRecordCommand,
+  LedgerJudgementAbandonCommand,
   /**
    * Internal so no client can mark a request saved without the value being
    * stored.

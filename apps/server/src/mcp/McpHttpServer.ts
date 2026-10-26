@@ -51,6 +51,7 @@ import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import { LedgerToolkit } from "./toolkits/ledger/tools.ts";
 import * as LedgerHandlers from "./toolkits/ledger/handlers.ts";
+import * as LedgerJudgeLauncher from "./LedgerJudgeLauncher.ts";
 import * as LedgerMcpService from "./LedgerMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -1049,7 +1050,10 @@ export const layer = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,
-  layerLedgerToolkit,
+  // Fork: closing an item on a judged ledger starts the judge, which is an orchestrator delegation.
+  layerLedgerToolkit.pipe(
+    Layer.provide(LedgerJudgeLauncher.layer.pipe(Layer.provide(OrchestratorMcpService.layer))),
+  ),
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentToolkit,

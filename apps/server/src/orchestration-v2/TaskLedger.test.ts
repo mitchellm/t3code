@@ -836,16 +836,21 @@ it.effect("fixes requiresJudge when the ledger is created and gates closing on a
     yield* setLoadout(org, judged);
     yield* createLedger(org, { items: ["a"] });
     assert.isTrue((yield* ledgerOf(org))?.requiresJudge);
-    yield* assertRejected(
-      org,
-      updateItem(org, "a", { status: "closed", evidence: "tests pass" }),
-      "passing judge verdict",
-    );
-    yield* updateItem(org, "a", { status: "in_progress", evidence: "tests pass" });
+    // Asking to close starts the server's judge instead of closing.
+    yield* updateItem(org, "a", { status: "closed", evidence: "tests pass" });
+    const judging = itemOf(yield* ledgerOf(org), "a");
+    assert.equal(judging?.status, "in_progress");
+    assert.isTrue(judging?.judging);
+    // A failing verdict hands it back with the judge's notes.
     yield* recordVerdict(org, "a", "fail");
-    yield* assertRejected(org, updateItem(org, "a", { status: "closed" }), "passing judge verdict");
-    yield* recordVerdict(org, "a", "pass");
+    const failed = itemOf(yield* ledgerOf(org), "a");
+    assert.equal(failed?.status, "in_progress");
+    assert.notOk(failed?.judging);
+    assert.equal(failed?.verdict?.notes, "fail notes");
+    // Asking again judges again; a passing verdict closes it.
     yield* updateItem(org, "a", { status: "closed" });
+    assert.isTrue(itemOf(yield* ledgerOf(org), "a")?.judging);
+    yield* recordVerdict(org, "a", "pass");
     assert.equal(itemOf(yield* ledgerOf(org), "a")?.status, "closed");
 
     // Switching to solo later does not un-gate a ledger that already exists.
@@ -858,7 +863,7 @@ it.effect("fixes requiresJudge when the ledger is created and gates closing on a
 );
 
 it.effect(
-  "rejects a one-step close under the judge gate because new evidence clears the verdict",
+  "judges a one-step close under the judge gate because new evidence clears the verdict",
   () =>
     Effect.gen(function* () {
       const threadId = yield* createThread("judge-one-step");
@@ -882,7 +887,12 @@ it.effect(
         now: yield* DateTime.now,
         requiresJudge: true,
       });
-      assert.isTrue(Result.isFailure(result));
-      assert.include(Result.isFailure(result) ? result.failure : "", "passing judge verdict");
+      const next =
+        Result.isSuccess(result) && result.success[0]?.type === "ledger.item.updated"
+          ? result.success[0].payload.item
+          : undefined;
+      assert.equal(next?.status, "in_progress");
+      assert.isTrue(next?.judging);
+      assert.isNull(next?.verdict);
     }).pipe(Effect.provide(layerTest)),
 );
