@@ -8,11 +8,9 @@ export type WorkerIsolationDecision = "explicit" | "default" | "shared";
 
 /**
  * Whether a delegation gets its own worktree. An explicit `isolation` always wins ("none" and
- * "shared" opt out). Otherwise an editing role the thread's loadout assigns is isolated by
- * default, because parallel workers editing one checkout overwrite each other.
- *
- * "default" differs from "explicit" so the caller can fall back to the shared checkout when the
- * project is not a git repository, instead of failing a call that never asked for a worktree.
+ * "shared" opt out). Otherwise an editing role the loadout assigns is isolated by default.
+ * "default" differs from "explicit" so a non-git project can fall back to the shared checkout
+ * instead of failing a call that never asked for a worktree.
  */
 export function workerIsolation(input: {
   readonly isolation: OrchestratorMcpDelegateTaskInput["isolation"];

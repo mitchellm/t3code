@@ -14,7 +14,6 @@ import {
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -35,6 +34,7 @@ const projectId = ProjectId.make("project:worker-isolation");
 const runId = RunId.make("run:worker-isolation");
 const rootNodeId = NodeId.make("node:worker-isolation");
 const commitSha = "a".repeat(40);
+let requestCounter = 0;
 
 const scope: McpInvocationScope = {
   environmentId: EnvironmentId.make("environment:worker-isolation"),
@@ -150,9 +150,11 @@ const delegate = (options: {
       ),
       Layer.mock(ProjectService.ProjectService)({
         getById: () =>
-          Effect.succeed(
-            Option.some({ id: projectId, title: "Project", workspaceRoot: "/repo" } as never),
-          ),
+          Effect.succeedSome({
+            id: projectId,
+            title: "Project",
+            workspaceRoot: "/repo",
+          } as never),
       }),
       Layer.mock(SecretRequests.SecretRequests)({}),
       Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
@@ -178,7 +180,7 @@ const delegate = (options: {
         .delegateTask(scope, {
           task: "Implement the module.",
           mode: "async",
-          clientRequestId: `isolation-${Math.random()}`,
+          clientRequestId: `isolation-${requestCounter++}`,
           ...options.delegation,
         })
         .pipe(Effect.exit);
