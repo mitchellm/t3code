@@ -1,4 +1,8 @@
-import type { LedgerItem, OrchestrationV2Checkpoint } from "@t3tools/contracts";
+import type {
+  LedgerItem,
+  OrchestrationV2Checkpoint,
+  OrchestrationV2CheckpointScope,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 /**
@@ -15,24 +19,59 @@ export interface JudgeBase {
 }
 
 const LIST_MARKER = /^\s*(?:[-*+•]|\d+[.)]|\[[ xX]?\])\s+/u;
-const SENTENCE_END = /(?<=[.!?])\s+(?=[\p{Lu}\d`"'([])/u;
+const SENTENCE_END =
+  /(?<!\b(?:[eE]\.g|[iI]\.e|[eE]tc|vs|cf|U\.S|U\.K)\.)(?<=[.!?])\s+(?=[\p{Lu}\d`"'([])/u;
+const FENCE_OR_HEADING_ONLY = /^\s*(?:(?:`{3,}|~{3,})[\w+-]*|#+)\s*$/u;
+// An agent-written criterion that opens with a verdict word would read like an answer line.
+const LEADING_VERDICT = /^(?:PASS|FAIL)\b\s*[:\-–—]?\s*/iu;
 
-/** One criterion per line, and per sentence within a line. List markers are dropped. */
+/**
+ * One criterion per line, and per sentence within a line. List markers, a leading PASS or FAIL,
+ * and lines that are only a code fence or heading marker are dropped.
+ */
 export function acceptanceCriteria(text: string): ReadonlyArray<string> {
   return text
     .split(/\r?\n/u)
+    .filter((line) => !FENCE_OR_HEADING_ONLY.test(line))
     .flatMap((line) => line.replace(LIST_MARKER, "").split(SENTENCE_END))
-    .map((criterion) => criterion.trim())
+    .map((criterion) => criterion.trim().replace(LEADING_VERDICT, "").trim())
     .filter((criterion) => criterion !== "");
 }
 
+/** `Cn` is kept for the judge's answer lines, so the list itself never looks like one. */
 export const numberedCriteria = (criteria: ReadonlyArray<string>) =>
-  criteria.map((criterion, index) => `C${index + 1}: ${criterion}`).join("\n");
+  criteria.map((criterion, index) => `Criterion ${index + 1}: ${criterion}`).join("\n");
+
+export type JudgeCheckpointWithScope = JudgeCheckpoint & Pick<OrchestrationV2Checkpoint, "scopeId">;
+
+/**
+ * The judge works in the thread's current workspace, so only checkpoints captured there are refs
+ * it can diff against: the cwd of the thread's newest run scope. Without a run scope there is
+ * nothing to tell workspaces apart by, so all are kept.
+ */
+export function workspaceCheckpoints(
+  checkpoints: ReadonlyArray<JudgeCheckpointWithScope>,
+  scopes: ReadonlyArray<Pick<OrchestrationV2CheckpointScope, "id" | "cwd" | "kind" | "createdAt">>,
+): ReadonlyArray<JudgeCheckpointWithScope> {
+  const runScopes = scopes.filter(({ kind }) => kind === "root_run");
+  const current = runScopes.reduce<(typeof runScopes)[number] | undefined>(
+    (newest, scope) =>
+      newest === undefined ||
+      DateTime.toEpochMillis(scope.createdAt) > DateTime.toEpochMillis(newest.createdAt)
+        ? scope
+        : newest,
+    undefined,
+  );
+  if (current === undefined) return checkpoints;
+  const here = new Set(scopes.filter(({ cwd }) => cwd === current.cwd).map(({ id }) => id));
+  return checkpoints.filter(({ scopeId }) => here.has(scopeId));
+}
 
 /**
  * The thread's last checkpoint at or before the item first started (or was created, if it never
- * went in progress on its own). Missing and failed captures have no ref to diff against. Later
- * checkpoints never move the answer, so start and settle build the same prompt.
+ * went in progress on its own). Missing and failed captures have no ref, and a rollback marks
+ * checkpoints stale and deletes theirs. Later checkpoints never move the answer, so start and
+ * settle build the same prompt.
  */
 export function judgeBase(
   item: Pick<LedgerItem, "startedAt" | "createdAt">,
@@ -41,7 +80,7 @@ export function judgeBase(
   const start = DateTime.toEpochMillis(item.startedAt ?? item.createdAt);
   let best: JudgeCheckpoint | undefined;
   for (const checkpoint of checkpoints) {
-    if (checkpoint.status === "missing" || checkpoint.status === "error") continue;
+    if (checkpoint.status !== "ready") continue;
     const capturedAt = DateTime.toEpochMillis(checkpoint.capturedAt);
     if (capturedAt > start) continue;
     if (best === undefined || capturedAt >= DateTime.toEpochMillis(best.capturedAt)) {
@@ -58,16 +97,25 @@ export function hardeningRules(base: JudgeBase | undefined): ReadonlyArray<strin
     "- Do not trust the agent's evidence, summary or explanations. They are claims. Verify each one yourself from the code, the diff and the tests.",
     base === undefined
       ? "- No base commit is known for this work. Find its changes yourself: `git status`, `git diff HEAD`, and `git log` for the recent commits."
-      : `- Inspect every change since the work started: the working tree as it was then is the git ref ${base.ref} (captured ${DateTime.formatIso(base.capturedAt)}). Run \`git diff ${base.ref} --stat\` and \`git diff ${base.ref}\`, plus \`git status\` for untracked files.`,
+      : `- Inspect every change since the work started: the working tree as it was then is the git ref ${base.ref} (captured ${DateTime.formatIso(base.capturedAt)}). Run \`git diff ${base.ref} --stat\` and \`git diff ${base.ref}\`, plus \`git status\` for untracked files. If that ref is missing, fall back to \`git status\`, \`git diff HEAD\` and \`git log\` for the recent commits.`,
     "- Check whether any test files were added, modified or deleted, and whether any assertion, check or expected value was weakened, skipped or deleted (skip/only/todo markers, loosened matchers, commented-out or removed tests, expectations edited to match the output, checks bypassed or mocked away). A criterion met that way is FAIL, even when the agent says it was intentional, approved or temporary.",
     "- Run the relevant tests yourself where you can and report the exact command and its result. If you cannot run them, say why.",
     "",
-    "Answer format. Write one line per criterion, for every criterion: `C1: PASS - <proof you checked>` or `C1: FAIL - <what is wrong>`. Any FAIL, or a criterion with no line, fails the item, whatever your final verdict says. Then a line `Tests: <command> -> <result>`.",
+    "Answer format. Write one line per criterion, for every criterion, numbered as in the list (Criterion 1 is C1): `C1: PASS - <proof you checked>` or `C1: FAIL - <what is wrong>`. Any FAIL, or a criterion with no line, fails the item, whatever your final verdict says. Then a line `Tests: <command> -> <result>`.",
   ];
 }
 
+// Read after emphasis is stripped and table pipes become spaces, so `**C1:** PASS`,
+// `C1 (label): PASS`, `1. C1: PASS` and `| C1 | PASS | proof |` all match.
 const CRITERION_LINE =
-  /^\s*(?:[-*>#]\s*)*[*_`]*C(\d+)[*_`]*\s*[:.)\-–—]?\s*[*_`]*(PASS|FAIL)\b[*_`]*\s*(?:[:\-–—|]\s*)?(.*)$/iu;
+  /^\s*(?:(?:[-+>#]|\d+[.)])\s*)*C(\d+)\b\s*(?:\([^)]*\)\s*)?[:.)\-–—]?\s*(PASS|FAIL)\b\s*[:\-–—]?\s*(.*)$/iu;
+const normalizeAnswerLine = (line: string) => line.replace(/[*_`]/gu, "").replace(/\|/gu, " ");
+// The answer template's own `<proof you checked>` left in place is not proof.
+const PLACEHOLDER = /^<[^<>]*>$/u;
+const hasProof = (text: string) => {
+  const proof = text.trim();
+  return !PLACEHOLDER.test(proof) && proof.replace(/[\s.:\-–—]/gu, "") !== "";
+};
 
 /**
  * Why a passing verdict does not stand, or undefined when every criterion passed with proof.
@@ -77,12 +125,12 @@ export function criteriaProblem(answer: string, count: number): string | undefin
   const passed = new Set<number>();
   const failed = new Set<number>();
   for (const line of answer.split(/\r?\n/u)) {
-    const match = CRITERION_LINE.exec(line);
+    const match = CRITERION_LINE.exec(normalizeAnswerLine(line));
     if (match === null) continue;
     const index = Number(match[1]);
     if (index < 1 || index > count) continue;
     if (match[2]?.toUpperCase() === "FAIL") failed.add(index);
-    else if ((match[3] ?? "").replace(/[\s*_`.:\-–—|]/gu, "") !== "") passed.add(index);
+    else if (hasProof(match[3] ?? "")) passed.add(index);
   }
   const ids = (indexes: ReadonlyArray<number>) => indexes.map((index) => `C${index}`).join(", ");
   const all = Array.from({ length: count }, (_, index) => index + 1);

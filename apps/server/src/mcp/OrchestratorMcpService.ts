@@ -128,6 +128,7 @@ import {
   settleBackgroundJudgement,
   startBackgroundJudgement,
 } from "./LedgerJudgement.ts";
+import { workspaceCheckpoints } from "./LedgerJudgeCriteria.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
@@ -1978,10 +1979,14 @@ const make = Effect.gen(function* () {
           Effect.mapError(threadManagementFailure),
         ),
       checkpoints: () =>
-        threadManagement.getThreadRecords(scope.thread.threadId, ["checkpoints"]).pipe(
-          Effect.map(({ checkpoints }) => checkpoints),
-          Effect.mapError(threadManagementFailure),
-        ),
+        threadManagement
+          .getThreadRecords(scope.thread.threadId, ["checkpoints", "checkpointScopes"])
+          .pipe(
+            Effect.map(({ checkpoints, checkpointScopes }) =>
+              workspaceCheckpoints(checkpoints, checkpointScopes),
+            ),
+            Effect.mapError(threadManagementFailure),
+          ),
       recordVerdict: ({ itemId, judgedEvidence, verdict, taskId }) =>
         threadManagement
           .dispatch({
