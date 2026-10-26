@@ -110,6 +110,7 @@ export function stageOfStatus(status: SidebarThreadDisplayStatus): ViewStage {
   switch (status) {
     case "approval":
     case "input":
+    case "request":
     case "failed":
     case "limited":
       return "needs-you";

@@ -9,6 +9,7 @@ import {
   memo,
   useLayoutEffect,
   useRef,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
@@ -19,6 +20,7 @@ import { cn } from "../../lib/utils";
 import { shouldOpenMarkdownFileLinkInEditor } from "../../markdown-links";
 import { buildFileOpenMenuItems } from "../../fileOpenMenu";
 import { useFileMetadata } from "../../hooks/useFileMetadata";
+import { documentIconColorForFileName } from "../../pierre-icons";
 import { ContextChip } from "../ContextChip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -372,6 +374,8 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
     canOpenInBrowser,
     canOpenInPanel,
   });
+  const accent = documentIconColorForFileName(iconPath);
+  const chipStyle = accent ? ({ "--context-chip-accent": accent } as CSSProperties) : undefined;
 
   return (
     <Tooltip>
@@ -383,6 +387,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
               dir="ltr"
               render={<a href={href} />}
               className={MARKDOWN_FILE_LINK_CLASS_NAME}
+              style={chipStyle}
               data-markdown-copy={copyMarkdown}
               onClick={(event) => {
                 event.preventDefault();
@@ -418,6 +423,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
               aria-label={`File options for ${label}`}
               aria-haspopup="menu"
               className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
+              style={chipStyle}
               data-markdown-copy={copyMarkdown}
               onClick={handleContextMenu}
               onContextMenu={handleContextMenu}
@@ -449,6 +455,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
 function ScrolledToEnd(props: { className: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLSpanElement>(null);
+  // oxlint-disable-next-line t3code/react-effect-budget -- Measures the laid-out chip and re-pins its scroll when the content resizes.
   useLayoutEffect(() => {
     const element = ref.current;
     const content = contentRef.current;

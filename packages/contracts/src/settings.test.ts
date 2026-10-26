@@ -350,12 +350,12 @@ describe("saved views in server settings", () => {
   const view = { id: "v", name: "Board", layout: "board" };
 
   it("decodes saved views with their defaults", () => {
-    const settings = Schema.decodeUnknownSync(ServerSettings)({ savedViews: [view] });
+    const settings = Schema.decodeSync(ServerSettings)({ savedViews: [view] });
     expect(settings.savedViews?.[0]).toMatchObject({ id: "v", layout: "board", openMode: "peek" });
   });
 
   it("drops a list it cannot read without losing the rest of the settings", () => {
-    const settings = Schema.decodeUnknownSync(ServerSettings)({
+    const settings = Schema.decodeSync(ServerSettings)({
       worktreesDirectory: "D:\worktrees",
       savedViews: [{ ...view, name: 42 }],
     });
@@ -364,8 +364,8 @@ describe("saved views in server settings", () => {
   });
 
   it("defaults thread categories to null and fills missing parts", () => {
-    expect(Schema.decodeUnknownSync(ServerSettings)({}).threadCategories).toBeNull();
-    const settings = Schema.decodeUnknownSync(ServerSettings)({
+    expect(Schema.decodeSync(ServerSettings)({}).threadCategories).toBeNull();
+    const settings = Schema.decodeSync(ServerSettings)({
       threadCategories: { categories: [{ id: "c", name: "Update 100" }] },
     });
     expect(settings.threadCategories).toEqual({

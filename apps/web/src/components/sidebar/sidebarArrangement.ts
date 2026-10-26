@@ -1,14 +1,7 @@
 /**
- * Fork (chickenputty/t3code): sort and group the sidebar's active list.
- *
- * Only the active list is arranged. Pins keep their drag order, the snoozed
- * shelf its wake order and the settled shelf its settle order. Manual order
- * without grouping hands the list back untouched, so upstream's drag order
- * stays the source of truth whenever the view is off.
- *
- * With grouping on, "Pins stay grouped" folds the pinned block into the project
- * groups: a pin stays in its project and sorts to the top of it, instead of
- * rendering above every folder.
+ * Fork: sorts and groups only the sidebar's active list; other shelves keep their own order, and
+ * manual order without grouping returns the list untouched so upstream's drag order still rules.
+ * "Pins stay grouped" sorts each pin to the top of its project group instead of above every one.
  */
 import type {
   SidebarProjectIconStyle,
@@ -109,6 +102,7 @@ export function appliedSidebarProjectScopeKey(_persisted: string | null): string
 export type SidebarThreadDisplayStatus =
   | "approval"
   | "input"
+  | "request"
   | "failed"
   | "limited"
   | "woke"
@@ -120,6 +114,7 @@ export type SidebarThreadDisplayStatus =
 const DISPLAY_STATUS_RANK: Record<SidebarThreadDisplayStatus, number> = {
   approval: 0,
   input: 1,
+  request: 1,
   failed: 2,
   limited: 2,
   woke: 3,

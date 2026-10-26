@@ -1,10 +1,7 @@
 /**
- * Fork (chickenputty/t3code): the Threads view's row under the search row
- * (filter, sort, group, properties, view options, settings), its view options
- * menu (pins stay grouped, indent, project and thread rows, topic emoji,
- * project icons and their style), and the header row each project group opens
- * with. Grouping, sorts and pins write the active Threads view (or this
- * device's arrangement where views cannot be saved).
+ * Fork: the Threads view's control row under the search row, its view options menu, and each
+ * project group's header row. Grouping, sorts and pins write the active Threads view, or this
+ * device's arrangement where views cannot be saved.
  */
 import {
   SidebarProjectIconStyle,
@@ -28,6 +25,7 @@ import {
   ShieldQuestionIcon,
   SquarePenIcon,
   TextSearchIcon,
+  UserRoundIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -387,7 +385,7 @@ export function ThreadTopicEmoji(props: { emoji: string }) {
 
 /** The card's status icons, alone: a slim row's whole status slot. */
 export function SidebarStatusGlyph(props: {
-  icon: "working" | "waiting" | "approval" | "input" | "failed" | "woke" | "done";
+  icon: "working" | "waiting" | "approval" | "input" | "request" | "failed" | "woke" | "done";
 }) {
   const className = "size-4 shrink-0";
   switch (props.icon) {
@@ -399,6 +397,8 @@ export function SidebarStatusGlyph(props: {
       return <ShieldQuestionIcon aria-hidden className={className} />;
     case "input":
       return <MessageCircleQuestionIcon aria-hidden className={className} />;
+    case "request":
+      return <UserRoundIcon aria-hidden className={className} />;
     case "failed":
       return <CircleAlertIcon aria-hidden className={className} />;
     case "woke":

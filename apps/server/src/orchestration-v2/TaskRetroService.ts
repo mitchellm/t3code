@@ -87,7 +87,7 @@ export class TaskRetroService extends Context.Service<
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const timing = yield* TaskTimingService.TaskTimingService;
@@ -186,36 +186,29 @@ export const make = Effect.gen(function* () {
     });
 
     return yield* Effect.gen(function* () {
-      const sent = yield* threads
-        .sendToThread({
-          projectId: input.projectId,
-          commandId: CommandId.make(`${key}-send`),
-          threadId,
-          messageId: MessageId.make(`message:retro:${digestHex}`),
-          text: input.prompt,
-          attachments: [],
-          modelSelection: input.model,
-          mode: "auto",
-          createdBy: "system",
-          creationSource: "server",
-        })
-        .pipe(Effect.mapError(failed));
-      const waited = yield* threads
-        .waitForThread({
-          projectId: input.projectId,
-          threadId,
-          runId: sent.run.id,
-          timeoutMs: RETRO_TIMEOUT_MS,
-        })
-        .pipe(Effect.mapError(failed));
+      const sent = yield* threads.sendToThread({
+        projectId: input.projectId,
+        commandId: CommandId.make(`${key}-send`),
+        threadId,
+        messageId: MessageId.make(`message:retro:${digestHex}`),
+        text: input.prompt,
+        attachments: [],
+        modelSelection: input.model,
+        mode: "auto",
+        createdBy: "system",
+        creationSource: "server",
+      });
+      const waited = yield* threads.waitForThread({
+        projectId: input.projectId,
+        threadId,
+        runId: sent.run.id,
+        timeoutMs: RETRO_TIMEOUT_MS,
+      });
 
       const finished = waited.run;
       const userMessages = yield* threads
         .getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] })
-        .pipe(
-          Effect.map(({ messages }) => messages.map(({ text }) => text)),
-          Effect.mapError(failed),
-        );
+        .pipe(Effect.map(({ messages }) => messages.map(({ text }) => text)));
       const answer =
         finished === null || finished.status !== "completed"
           ? null
@@ -224,10 +217,7 @@ export const make = Effect.gen(function* () {
                 messageRoles: ["assistant"],
                 messageRunIds: [finished.id],
               })
-              .pipe(
-                Effect.map(({ messages }) => messages.at(-1)?.text ?? null),
-                Effect.mapError(failed),
-              );
+              .pipe(Effect.map(({ messages }) => messages.at(-1)?.text ?? null));
       const ran = finished?.modelSelection ?? input.model;
       return {
         status:
@@ -238,7 +228,10 @@ export const make = Effect.gen(function* () {
         expected: { instanceId: input.model.instanceId, model: input.model.model },
         userMessages,
       } satisfies RetroRun;
-    }).pipe(Effect.onExit(() => finish()));
+    }).pipe(
+      Effect.mapError(failed),
+      Effect.onExit(() => finish()),
+    );
   });
 
   const run: TaskRetroService["Service"]["run"] = Effect.fn("TaskRetroService.run")(

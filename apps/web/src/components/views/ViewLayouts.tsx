@@ -63,6 +63,7 @@ export interface ViewLayoutProps extends ViewLayoutHandlers {
 const STATUS_DOT: Record<ViewRow["status"], string> = {
   approval: "bg-warning",
   input: "bg-warning",
+  request: "bg-guest",
   failed: "bg-destructive",
   limited: "bg-destructive",
   woke: "bg-success",
@@ -184,7 +185,7 @@ export const ViewCard = memo(function ViewCard({
       onKeyDown={keyHandler(row, handlers)}
       onContextMenu={(event) => handlers.onContextMenu(row, event)}
       className={cn(
-        "group/card flex w-full min-w-0 cursor-pointer flex-col gap-1.5 rounded-lg border border-border bg-card text-left text-card-foreground shadow-xs/5 outline-none hover:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring",
+        "group/card flex w-full min-w-0 cursor-pointer flex-col gap-1.5 rounded-lg border border-border bg-card text-left text-card-foreground shadow-xs/5 outline-none hover:border-ring/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         compact ? "p-2" : "p-3",
         selected && "border-ring bg-accent/40",
         open && "border-ring",

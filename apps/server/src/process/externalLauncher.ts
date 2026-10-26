@@ -1,7 +1,7 @@
-import * as NodePath from "@effect/platform-node/NodePath";
+import * as PlatformNodePath from "@effect/platform-node/NodePath";
 // Normalizing for the target host (win32 vs posix) needs both flavors synchronously.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import * as NodeHostPath from "node:path";
+import * as NodePath from "node:path";
 import {
   defaultOpenBlockedExtension,
   DIRECTORY_LAUNCH_EXTENSIONS,
@@ -75,13 +75,7 @@ interface TargetPathAndPosition {
   readonly column: Option.Option<string>;
 }
 
-/**
- * Windows command shims (`code.cmd`) forward arguments through `%*`, which
- * cmd.exe parses a second time after the first escaping layer is gone: a
- * line break ends the command there, and a double quote closes the quoting
- * that keeps `&` or `|` literal. Neither can occur in a Windows path.
- */
-// oxlint-disable-next-line no-control-regex
+// cmd shims reparse %* after escaping is gone; newlines and quotes can expose shell operators.
 const WINDOWS_SHIM_UNSAFE_ARG_PATTERN = /[\u0000-\u001f\u007f"]/;
 const TARGET_WITH_POSITION_PATTERN = /^(.*?):(\d+)(?::(\d+))?$/;
 const POWERSHELL_ARGUMENTS_PREFIX = [
@@ -92,9 +86,7 @@ const POWERSHELL_ARGUMENTS_PREFIX = [
   "-EncodedCommand",
 ] as const;
 
-// Windows PowerShell started with DETACHED_PROCESS exits 0 without running its
-// command, so native Windows launches through it stay attached. WSL interop
-// PowerShell starts from a Linux process and keeps the detached launch.
+// Detached Windows PowerShell exits 0 without executing; only WSL interop keeps detached launches.
 const WINDOWS_POWERSHELL_DETACHED = false;
 
 const DETACHED_IGNORE_STDIO_OPTIONS = {
@@ -205,10 +197,7 @@ function resolveWslPowerShellPath(): string {
   return "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
 }
 
-// File reveals from WSL resolve PowerShell through the interop PATH rather
-// than the fixed /mnt/c mount: the automount root is configurable, and a
-// PATH-resolved command keeps the advertised capability aligned with the
-// availability check `launchEditor` performs before spawning.
+// WSL automount roots vary; resolve PowerShell via PATH to match launchEditor's availability check.
 const WSL_POWERSHELL_COMMAND = "powershell.exe";
 
 function shouldUseWindowsHostFromWsl(
@@ -268,14 +257,8 @@ function fileManagerCommandForPlatform(
   }
 }
 
-// A graphical session variable plus an executable `xdg-open` does not prove
-// that opening a directory does anything: without an `inode/directory` MIME
-// handler, `xdg-open` exits nonzero after the launcher has already detached, so
-// the client would see a silent no-op. The probe carries its own timeout well
-// inside the scan timeout `server.getConfig` applies to editor discovery: that
-// outer timeout degrades to an empty editor list, so a hung `xdg-mime` (broken
-// D-Bus or desktop session) must cost only the file manager, not every
-// discovered editor.
+// xdg-open needs an inode/directory handler or detached launches silently fail.
+// Bound xdg-mime below discovery's timeout so a hung probe drops only the file manager.
 const LINUX_DIRECTORY_HANDLER_PROBE_TIMEOUT = "2 seconds";
 
 const hasUsableLinuxDirectoryHandler = Effect.fn("externalLauncher.hasUsableLinuxDirectoryHandler")(
@@ -328,10 +311,7 @@ const isUsableFileManagerCommand = Effect.fn("externalLauncher.isUsableFileManag
   },
 );
 
-// WSL hosts prefer the Windows Explorer bridge, but interop can exist without
-// `explorer.exe` on PATH (appendWindowsPath=false) or without a distro name
-// while WSLg still provides a working Linux file manager, so they keep the
-// `xdg-open` fallback instead of losing the editor entirely.
+// WSL may lack Explorer on PATH or a distro name while WSLg still offers a Linux file manager.
 const resolveUsableFileManagerCommand = Effect.fn(
   "externalLauncher.resolveUsableFileManagerCommand",
 )(function* (
@@ -356,13 +336,8 @@ const resolveUsableFileManagerCommand = Effect.fn(
   return undefined;
 });
 
-// Reveal on Windows and WSL runs through PowerShell (see
-// resolveFileManagerRevealLaunch), not the `explorer` command that gates the
-// file-manager editor itself, so the capability must probe the executables the
-// reveal actually spawns. Callers gate on file-manager availability first;
-// the Linux "files" kind relies on that gate for the directory-handler probe,
-// while the WSL fallback re-probes because its availability may have come
-// from the Explorer bridge instead.
+// Reveal uses PowerShell on Windows/WSL, so probe it separately from Explorer availability.
+// Linux relies on the file-manager gate's handler probe; WSL re-probes because the gate may use Explorer.
 const fileManagerRevealKindForPlatform = Effect.fn(
   "externalLauncher.fileManagerRevealKindForPlatform",
 )(function* (
@@ -480,13 +455,7 @@ const resolveFileManagerRevealKind = Effect.fn("externalLauncher.resolveFileMana
   },
 );
 
-// Callers apply a timeout (`resolveAvailableEditorsForConfig`) and disconnect
-// mid-connect; neither may cancel a scan other connects are waiting on, or
-// throw away work a slow host (a busy server at startup, a long PATH) needs
-// more than one connect to finish. Expiry uses the monotonic clock
-// (Clock.monotonicTimeNanos), matching the command-resolution cache in
-// @t3tools/shared/shell, so a backward wall-clock adjustment cannot keep an
-// expired entry alive.
+// Shared scans must survive caller timeouts/disconnects; monotonic expiry prevents clock rollback extending stale entries.
 const EDITOR_DISCOVERY_CACHE_TTL_NANOS = 60_000_000_000n;
 
 interface EditorDiscoveryCacheEntry {
@@ -498,11 +467,7 @@ export class ExternalLauncher extends Context.Service<
   ExternalLauncher,
   {
     readonly resolveAvailableEditors: () => Effect.Effect<ReadonlyArray<EditorId>>;
-    /**
-     * Only meaningful when `resolveAvailableEditors` includes "file-manager":
-     * on Linux that availability check also carries the directory-handler probe
-     * this capability relies on.
-     */
+    /** Requires file-manager in resolveAvailableEditors; Linux relies on its directory-handler probe. */
     readonly resolveFileManagerRevealKind: () => Effect.Effect<FileManagerRevealKind | undefined>;
     readonly launchBrowser: (target: string) => Effect.Effect<void, ExternalLauncherError>;
     readonly launchEditor: (input: LaunchEditorInput) => Effect.Effect<void, ExternalLauncherError>;
@@ -590,12 +555,9 @@ export function namesWindowsDataStream(path: string): boolean {
 }
 
 /**
- * Opening a file with the file manager launches its default app, so a
- * script, installer or launcher would run. This reduces that risk for
- * model-authored chat links: it refuses blocked extensions (plus PATHEXT on
- * Windows) on both the link name and its symlink target, data stream paths on
- * Windows, and files with an execute bit where the opener honors it. Folders
- * are only shown, except bundles that launch (`.app`, `.pkg`).
+ * A file-manager open launches the default app, so for model-authored links this refuses blocked
+ * extensions (plus PATHEXT on Windows) on the name and its symlink target, Windows data streams,
+ * and executable files where the opener honors the bit. Folders open unless they launch (`.app`).
  */
 const resolveGuardedFileManagerOpen = Effect.fn("externalLauncher.resolveGuardedFileManagerOpen")(
   function* (input: {
@@ -611,7 +573,7 @@ const resolveGuardedFileManagerOpen = Effect.fn("externalLauncher.resolveGuarded
     const fileSystem = yield* FileSystem.FileSystem;
     const statPath = (path: string) =>
       fileSystem.stat(path).pipe(
-        Effect.map(Option.some),
+        Effect.asSome,
         Effect.orElseSucceed(() => Option.none<FileSystem.File.Info>()),
       );
     // Windows names cannot hold a colon past the drive, so only POSIX hosts
@@ -631,7 +593,7 @@ const resolveGuardedFileManagerOpen = Effect.fn("externalLauncher.resolveGuarded
       return yield* refuse("a data stream path");
     }
     const realPath = yield* fileSystem.realPath(open.path).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.orElseSucceed(() => Option.none<string>()),
     );
     const info = yield* statPath(Option.getOrElse(realPath, () => open.path));
@@ -668,14 +630,9 @@ const resolveGuardedFileManagerOpen = Effect.fn("externalLauncher.resolveGuarded
 );
 
 /**
- * The argument a plain file-manager open hands to the OS. `path` is the
- * target normalized for the host (so `run.exe/.` and `run.exe/a/..` resolve
- * to `run.exe` before any check), with an editor `:line[:column]` suffix
- * dropped (on POSIX only when the full name is not itself a file).
- * `argument` is the form the launcher parses: Explorer needs backslashes (it
- * opens Documents for `C:/a/b.png`) and a WSL path needs its
- * `\\wsl.localhost` UNC form.
- *
+ * `path` is the host-normalized target (`run.exe/.` is `run.exe`) without an editor position
+ * (on POSIX only when the full name is not a file); `argument` is what the launcher parses:
+ * backslashes for Explorer, and the `\\wsl.localhost` UNC form for a WSL path.
  * @internal Exported for tests.
  */
 export function resolveFileManagerOpenArgument(input: {
@@ -694,8 +651,8 @@ export function resolveFileManagerOpenArgument(input: {
         });
   const path =
     input.platform === "win32"
-      ? NodeHostPath.win32.normalize(stripped)
-      : NodeHostPath.posix.normalize(stripped);
+      ? NodePath.win32.normalize(stripped)
+      : NodePath.posix.normalize(stripped);
   if (input.command === "explorer.exe" && input.wslDistroName !== undefined) {
     return { path, argument: resolveWslFileManagerPath(path, input.wslDistroName) };
   }
@@ -747,7 +704,7 @@ const resolveFileManagerRevealLaunch = Effect.fn("resolveFileManagerRevealLaunch
   }
 
   if (platform === "win32") {
-    const path = yield* Path.Path.pipe(Effect.provide(NodePath.layerWin32));
+    const path = yield* Path.Path.pipe(Effect.provide(PlatformNodePath.layerWin32));
     const windowsTarget = normalizeWindowsFileManagerPath(target);
     return {
       ...powerShellFileManagerLaunch(
@@ -857,9 +814,7 @@ const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
   onError: (cause: unknown) => ExternalLauncherError,
 ): Effect.fn.Return<void, ExternalLauncherError, ChildProcessSpawner.ChildProcessSpawner> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  // The desktop app runs this server with ELECTRON_RUN_AS_NODE. A launched file
-  // manager or browser passes its environment on to everything started from it,
-  // so any Electron app opened from there would start as plain Node and exit.
+  // Inherited ELECTRON_RUN_AS_NODE would make Electron apps opened by this launcher run as Node and exit.
   const { ELECTRON_RUN_AS_NODE: _runAsNode, ...env } = yield* HostProcess.Environment;
   const command = ChildProcess.make(launch.command, launch.args, {
     ...launch.options,
@@ -933,7 +888,7 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
   );
 });
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -971,8 +926,7 @@ export const make = Effect.gen(function* () {
       Effect.interruptible,
       Effect.forkIn(scope),
     );
-  // Claiming the cache entry and starting its scan must not be split by an
-  // interrupt, or the entry would wait on a scan that never runs.
+  // Claim and start atomically; interruption between them would leave an entry waiting on no scan.
   const acquireEditorDiscovery = Effect.gen(function* () {
     const nowNanos = yield* Clock.monotonicTimeNanos;
     const [scan, isNewScan] = yield* Ref.modify(

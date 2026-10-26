@@ -276,9 +276,10 @@ export const layer: Layer.Layer<
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
       workspaceLocks.withLock(cwd, effect);
 
-    const checkpointSkipSetting: string = yield* Effect.gen(function* () {
-      return yield* Config.String("T3CODE_CHECKPOINT_SKIP").pipe(Config.withDefault(""));
-    }).pipe(Effect.orElseSucceed(() => ""));
+    const checkpointSkipSetting: string = yield* Config.String("T3CODE_CHECKPOINT_SKIP").pipe(
+      Config.withDefault(""),
+      Effect.orElseSucceed(() => ""),
+    );
     const platform = yield* HostProcess.Platform;
     const checkpointSkip = checkpointSkipSetting
       .split(";")
