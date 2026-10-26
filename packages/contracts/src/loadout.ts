@@ -127,7 +127,7 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
     id: "haiku-workers",
     name: "Haiku workers",
     description:
-      "Opus plans and judges carefully; Haiku at high effort does the bulk of the implementing.",
+      "Opus plans and judges carefully; Haiku at xhigh effort does the bulk of the implementing.",
     roles: {
       planner: claude("claude-opus-5-5", "xhigh"),
       worker: claude("claude-haiku-5-5", "xhigh"),

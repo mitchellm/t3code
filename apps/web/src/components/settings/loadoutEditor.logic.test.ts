@@ -7,6 +7,8 @@ import {
   loadoutSettingsScopeSearch,
   missingPresets,
   newRoleDefault,
+  sameLoadout,
+  sameRoles,
   roleAfterModelChange,
   unassignedRoles,
   withRole,
@@ -77,6 +79,58 @@ describe("missingPresets", () => {
     expect(copy).toEqual({ ...presets[1], id: "fresh" });
     const [kept] = missingPresets([presets[0]!], [presets[1]!], () => "fresh");
     expect(kept?.id).toBe("blitz");
+  });
+});
+
+describe("loadout equality", () => {
+  const a: Loadout = {
+    id: "x",
+    name: "X",
+    description: "d",
+    roles: {
+      planner: { instanceId: claude, model: "m", effort: "high" },
+      worker: { model: "w", instanceId: claude },
+    },
+  };
+  const reordered: Loadout = {
+    description: "d",
+    name: "X",
+    roles: {
+      worker: { instanceId: claude, model: "w" },
+      planner: { effort: "high", model: "m", instanceId: claude },
+    },
+    id: "x",
+  };
+
+  it("ignores key order but sees any real difference", () => {
+    expect(sameLoadout(a, reordered)).toBe(true);
+    expect(sameRoles(a, reordered)).toBe(true);
+    expect(sameLoadout(a, { ...a, description: "e" })).toBe(false);
+    expect(sameRoles(a, withRole(a, "worker", undefined))).toBe(false);
+    const { effort: _e, ...noEffort } = a.roles.planner!;
+    expect(sameRoles(a, withRole(a, "planner", noEffort))).toBe(false);
+  });
+
+  it("treats a reordered preset as already held", () => {
+    expect(missingPresets([reordered], [a], () => "fresh")).toEqual([]);
+  });
+});
+
+describe("missingPresets naming", () => {
+  const preset: Loadout = {
+    id: "blitz",
+    name: "Blitz",
+    description: "",
+    roles: { worker: loadout.roles.worker! },
+  };
+
+  it("names the copy '(updated)' when an older loadout holds the name, never duplicating a name", () => {
+    const older: Loadout = { id: "old", name: "Blitz", description: "", roles: {} };
+    const [copy] = missingPresets([older], [preset], () => "fresh");
+    expect(copy?.name).toBe("Blitz (updated)");
+    const taken: Loadout = { ...older, id: "old2", name: "Blitz (updated)" };
+    const [again] = missingPresets([older, taken], [preset], () => "fresh");
+    expect(again?.name).toBe("Blitz (updated 2)");
   });
 });
 

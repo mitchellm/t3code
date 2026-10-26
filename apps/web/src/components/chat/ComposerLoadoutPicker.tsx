@@ -3,9 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { LayersIcon, SparklesIcon } from "lucide-react";
 import { memo } from "react";
 
-import { useSidebarProjectGroups } from "../../hooks/useSidebarProjectGroups";
 import { loadoutSettingsScopeSearch } from "../settings/loadoutEditor.logic";
 import { searchableSetting } from "../settings/settingsSearch";
+import { useSettingsProjectGroups } from "../settings/useSettingsProjectGroups";
 import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
@@ -29,7 +29,7 @@ function loadoutTooltip(loadout: ComposerLoadout): string {
  */
 function EditLoadoutsItem(props: { scope: ComposerLoadout["settingsScope"] }) {
   const navigate = useNavigate();
-  const groups = useSidebarProjectGroups();
+  const groups = useSettingsProjectGroups();
   const projectKey =
     groups.find((group) =>
       group.memberProjectRefs.some(

@@ -38,6 +38,7 @@ import {
   missingPresets,
   newRoleDefault,
   roleAfterModelChange,
+  sameLoadout,
   unassignedRoles,
   withRole,
 } from "./loadoutEditor.logic";
@@ -66,7 +67,7 @@ const DEFAULT_EFFORT = "__default__";
 const newId = () => `custom-${randomUUID()}`;
 
 const isBuiltIn = (loadout: Loadout) =>
-  DEFAULT_LOADOUTS.some((builtIn) => JSON.stringify(builtIn) === JSON.stringify(loadout));
+  DEFAULT_LOADOUTS.some((builtIn) => sameLoadout(builtIn, loadout));
 
 function RoleRow(props: {
   name: LoadoutRoleName;

@@ -61,8 +61,19 @@ export function newRoleDefault(
     : { instanceId: entry.instanceId, model: model.slug };
 }
 
-const sameLoadoutShape = (a: Loadout, b: Loadout) =>
-  a.name === b.name && JSON.stringify(a.roles) === JSON.stringify(b.roles);
+const sameRole = (a: LoadoutRole | undefined, b: LoadoutRole | undefined) =>
+  a === undefined || b === undefined
+    ? a === b
+    : a.instanceId === b.instanceId && a.model === b.model && a.effort === b.effort;
+
+/** Role by role over the known roles, so stored key order never matters. */
+export const sameRoles = (a: Loadout, b: Loadout) =>
+  LOADOUT_ROLE_NAMES.every((name) => sameRole(a.roles[name], b.roles[name]));
+
+export const sameLoadout = (a: Loadout, b: Loadout) =>
+  a.id === b.id && a.name === b.name && a.description === b.description && sameRoles(a, b);
+
+const sameLoadoutShape = (a: Loadout, b: Loadout) => a.name === b.name && sameRoles(a, b);
 
 /**
  * Presets the saved list does not hold, for users whose stored list predates them. A preset
@@ -74,14 +85,24 @@ export function missingPresets(
   presets: ReadonlyArray<Loadout>,
   mintId: () => string,
 ): ReadonlyArray<Loadout> {
-  const taken = new Set(existing.map(({ id }) => id));
+  const takenIds = new Set(existing.map(({ id }) => id));
+  const takenNames = new Set(existing.map(({ name }) => name));
   return presets
     .filter((preset) => preset.id !== SOLO_LOADOUT_ID)
     .filter((preset) => !existing.some((candidate) => sameLoadoutShape(candidate, preset)))
     .map((preset) => {
-      const id = taken.has(preset.id) ? mintId() : preset.id;
-      taken.add(id);
-      return { ...preset, id };
+      const id = takenIds.has(preset.id) ? mintId() : preset.id;
+      takenIds.add(id);
+      // An older loadout with this name but other roles is kept; the new copy must not share it.
+      let name = preset.name;
+      if (takenNames.has(name)) {
+        name = `${preset.name} (updated)`;
+        for (let attempt = 2; takenNames.has(name); attempt += 1) {
+          name = `${preset.name} (updated ${attempt})`;
+        }
+      }
+      takenNames.add(name);
+      return { ...preset, id, name };
     });
 }
 
