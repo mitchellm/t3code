@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2ThreadShell,
+  type WorktreeKeepWhen,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -111,6 +112,8 @@ interface ReaperHooks {
   afterSnapshot?: () => ReadonlyArray<OrchestrationV2ThreadShell>;
   /** A provider session whose working directory is this path, reported live. */
   liveSessionCwd?: string;
+  /** The worktreeKeepWhen setting; mutate it in afterSnapshot to change it mid-reap. */
+  keepWhen?: WorktreeKeepWhen;
   readonly invalidated: string[];
 }
 
@@ -127,7 +130,14 @@ const reaperFor = (
       Effect.provideService(GitVcsDriver.GitVcsDriver, git),
       Effect.provideService(ServerConfig.ServerConfig, config),
       Effect.provideService(Settings.ServerSettingsService, {
-        getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+        getSettings: Effect.sync(() => ({
+          ...DEFAULT_SERVER_SETTINGS,
+          storageCleanup: {
+            ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+            worktreeKeepWhen:
+              hooks.keepWhen ?? DEFAULT_SERVER_SETTINGS.storageCleanup.worktreeKeepWhen,
+          },
+        })),
       } as unknown as Settings.ServerSettingsService["Service"]),
       Effect.provideService(ProjectStore.ProjectStoreV2, {
         listShells: () => Effect.succeed([{ id: projectId, workspaceRoot: repo }]),
@@ -257,6 +267,92 @@ describe("DelegatedWorktreeReaper", () => {
         expect(entry?.reason).toContain("uncommitted");
         expect(yield* fs.exists(worktrees[name]!)).toBe(true);
       }
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("tracked-changes cleans an untracked file and removes the worktree", () =>
+    Effect.gen(function* () {
+      const { fs, repo, worktrees } = yield* fixture(["scratch"]);
+      yield* fs.writeFileString(`${worktrees.scratch}/scratch.txt`, "scratch\n");
+      const reaper = yield* reaperFor(repo, [parent, child("scratch", worktrees)], {
+        invalidated: [],
+        keepWhen: "tracked-changes",
+      });
+
+      expect(outcomeOf(yield* reaper.reap(), worktrees.scratch!)?.outcome).toBe("removed");
+      expect(yield* fs.exists(worktrees.scratch!)).toBe(false);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("tracked-changes still keeps a worktree with a tracked edit", () =>
+    Effect.gen(function* () {
+      const { fs, repo, worktrees } = yield* fixture(["edited"]);
+      yield* fs.writeFileString(`${worktrees.edited}/tracked.txt`, "edited\n");
+      const reaper = yield* reaperFor(repo, [parent, child("edited", worktrees)], {
+        invalidated: [],
+        keepWhen: "tracked-changes",
+      });
+
+      expect(outcomeOf(yield* reaper.reap(), worktrees.edited!)?.outcome).toBe("kept");
+      expect(yield* fs.exists(worktrees.edited!)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("any-local-files keeps a worktree holding an ignored file", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run, worktrees } = yield* fixture(["env"]);
+      // An ignored file shows in no status, so only this setting protects it.
+      yield* fs.writeFileString(`${repo}/.gitignore`, ".env\n");
+      yield* run(repo, ["add", ".gitignore"]);
+      yield* run(repo, ["commit", "-m", "ignore env"]);
+      yield* run(worktrees.env!, ["merge", "main"]);
+      yield* fs.writeFileString(`${worktrees.env}/.env`, "SECRET=1\n");
+      const reaper = yield* reaperFor(repo, [parent, child("env", worktrees)], {
+        invalidated: [],
+        keepWhen: "any-local-files",
+      });
+
+      const entry = outcomeOf(yield* reaper.reap(), worktrees.env!);
+
+      expect(entry?.outcome).toBe("kept");
+      expect(entry?.reason).toContain("ignored files");
+      expect(yield* fs.exists(`${worktrees.env}/.env`)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("any-local-files also keeps a worktree with an untracked file", () =>
+    Effect.gen(function* () {
+      const { fs, repo, worktrees } = yield* fixture(["untracked"]);
+      yield* fs.writeFileString(`${worktrees.untracked}/new.txt`, "new\n");
+      const reaper = yield* reaperFor(repo, [parent, child("untracked", worktrees)], {
+        invalidated: [],
+        keepWhen: "any-local-files",
+      });
+
+      expect(outcomeOf(yield* reaper.reap(), worktrees.untracked!)?.outcome).toBe("kept");
+      expect(yield* fs.exists(`${worktrees.untracked}/new.txt`)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("keeps a worktree when the keep setting changed after the check", () =>
+    Effect.gen(function* () {
+      const { fs, repo, worktrees } = yield* fixture(["late"]);
+      yield* fs.writeFileString(`${worktrees.late}/scratch.txt`, "scratch\n");
+      const hooks: ReaperHooks = {
+        invalidated: [],
+        keepWhen: "tracked-changes",
+        // The user turns protection on after the reaper read its settings.
+        afterSnapshot: () => {
+          hooks.keepWhen = "any-local-files";
+          return [parent, child("late", worktrees)];
+        },
+      };
+      const reaper = yield* reaperFor(repo, [parent, child("late", worktrees)], hooks);
+
+      const entry = outcomeOf(yield* reaper.reap(), worktrees.late!);
+
+      expect(entry?.reason).toContain("settings changed since check");
+      expect(yield* fs.exists(`${worktrees.late}/scratch.txt`)).toBe(true);
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 

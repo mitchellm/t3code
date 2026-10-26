@@ -162,7 +162,7 @@ const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const latestPaths = (yield* projections.getThreadWorktreePaths({
       includeArchived: true,
-    })).filter((entry) => path.resolve(entry.worktreePath) === worktreePath);
+    })).filter((entry) => pathKey(entry.worktreePath) === pathKey(worktreePath));
     const latest = (yield* Effect.forEach(latestPaths, (entry) =>
       projections.getThreadShell(entry.threadId),
     )).filter((shell) => shell !== null);
@@ -175,7 +175,7 @@ const make = Effect.gen(function* () {
           !isDelegatedChild(shell) ||
           !isFinishedAndIdle(shell, now) ||
           shell.branch !== before.branch ||
-          path.resolve(shell.worktreePath!) !== worktreePath ||
+          pathKey(shell.worktreePath!) !== pathKey(worktreePath) ||
           storageCleanupActivityAt(shell) !== storageCleanupActivityAt(before) ||
           now - storageCleanupActivityAt(shell) < DELEGATED_WORKTREE_GRACE_MS
         );
@@ -270,7 +270,13 @@ const make = Effect.gen(function* () {
             // The checks above ran before the lease, so run the git ones again under it.
             const lateLoss = yield* lossReason(worktreePath, branch, keepWhen);
             if (lateLoss !== null) return lateLoss;
-            // Untracked files only block removal under "tracked-changes", which opted into losing them.
+            // A setting changed since the check may have turned protection on, so honour it.
+            const currentKeepWhen = resolveWorktreeCleanup(
+              yield* settingsService.getSettings,
+              thread.projectId,
+            ).worktreeKeepWhen;
+            if (currentKeepWhen !== keepWhen) return "settings changed since check";
+            // Only "tracked-changes" opted into losing untracked files, so only it cleans them.
             if (keepWhen === "tracked-changes")
               yield* git.execute({
                 operation: "DelegatedWorktreeReaper.clean",

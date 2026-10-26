@@ -36,6 +36,18 @@ export function workerIsolation(input: {
 const invalid = (message: string) =>
   new OrchestratorMcpFailure({ code: "invalid_request", message });
 
+const NOT_A_GIT_REPOSITORY = /not a git repository/i;
+
+/** A worktree that could not be made, and whether only because the project has no repository. */
+class WorktreeUnavailable {
+  readonly failure: OrchestratorMcpFailure;
+  readonly notGitRepository: boolean;
+  constructor(failure: OrchestratorMcpFailure, notGitRepository: boolean) {
+    this.failure = failure;
+    this.notGitRepository = notGitRepository;
+  }
+}
+
 export interface DelegationWorkspace {
   readonly strategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
   readonly isolation: "worktree" | "shared";
@@ -73,7 +85,15 @@ export const resolveDelegationWorkspace = Effect.fn("WorkerIsolation.resolveDele
       const project = yield* input.requireProject(thread.projectId);
       const base = yield* git
         .resolveCommit({ cwd: thread.worktreePath ?? project.workspaceRoot, revision: "HEAD" })
-        .pipe(Effect.mapError(() => invalid("Unable to resolve the parent checkout commit.")));
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new WorktreeUnavailable(
+                invalid("Unable to resolve the parent checkout commit."),
+                NOT_A_GIT_REPOSITORY.test(`${error.message} ${error.detail}`),
+              ),
+          ),
+        );
       // Launch preparation creates the worktree from the project root, so a parent checkout in
       // another repository (such as a Git folder inside Scratch) would hand it a commit it
       // cannot find.
@@ -81,10 +101,14 @@ export const resolveDelegationWorkspace = Effect.fn("WorkerIsolation.resolveDele
         yield* git
           .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
           .pipe(
-            Effect.mapError(() =>
-              invalid(
-                `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
-              ),
+            Effect.mapError(
+              () =>
+                new WorktreeUnavailable(
+                  invalid(
+                    `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
+                  ),
+                  false,
+                ),
             ),
           );
       }
@@ -93,16 +117,25 @@ export const resolveDelegationWorkspace = Effect.fn("WorkerIsolation.resolveDele
         isolation: "worktree",
       } satisfies DelegationWorkspace;
     });
-    if (decision === "explicit") return yield* worktree;
+    const asFailure = Effect.mapError((error: E | WorktreeUnavailable) =>
+      error instanceof WorktreeUnavailable ? error.failure : error,
+    );
+    if (decision === "explicit") return yield* worktree.pipe(asFailure);
+    // Only a missing repository falls back; any other failure is a real problem to surface.
     return yield* worktree.pipe(
       Effect.catch((error) =>
-        Effect.logInfo("delegate_task.default-worktree-fallback", { error }).pipe(
-          Effect.as({
-            ...shared,
-            note: "No worktree could be made for this project (not a git repository?), so the child shares your checkout.",
-          } satisfies DelegationWorkspace),
-        ),
+        error instanceof WorktreeUnavailable && error.notGitRepository
+          ? Effect.logInfo("delegate_task.default-worktree-fallback", {
+              error: error.failure,
+            }).pipe(
+              Effect.as({
+                ...shared,
+                note: "This project is not a git repository, so the child shares your checkout.",
+              } satisfies DelegationWorkspace),
+            )
+          : Effect.fail(error),
       ),
+      asFailure,
     );
   },
 );

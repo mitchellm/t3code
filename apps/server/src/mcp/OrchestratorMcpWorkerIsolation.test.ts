@@ -268,7 +268,11 @@ describe("delegate_task default isolation", () => {
 
   it.effect("tells the parent which checkout the child got, including a fallback", () =>
     Effect.gen(function* () {
-      const resolve = (isGitRepo: boolean, isolation?: "worktree" | "none") =>
+      const resolve = (
+        isGitRepo: boolean,
+        isolation?: "worktree" | "none",
+        failureMessage = "fatal: not a git repository",
+      ) =>
         resolveDelegationWorkspace({
           delegation: { role: "worker", ...(isolation === undefined ? {} : { isolation }) },
           thread: { projectId, worktreePath: null },
@@ -278,7 +282,7 @@ describe("delegate_task default isolation", () => {
             resolveCommit: () =>
               isGitRepo
                 ? Effect.succeed({ commitSha })
-                : Effect.fail({ _tag: "GitCommandError" } as never),
+                : Effect.fail({ _tag: "GitCommandError", message: failureMessage } as never),
           },
         });
 
@@ -287,6 +291,11 @@ describe("delegate_task default isolation", () => {
       const fellBack = isolationReport(yield* resolve(false));
       assert.equal(fellBack.isolation, "shared");
       assert.include(fellBack.isolationNote, "shares your checkout");
+      // Any other git failure is a real problem, so it fails instead of silently sharing.
+      const other = yield* resolve(false, undefined, "fatal: unable to read index").pipe(
+        Effect.flip,
+      );
+      assert.include(other.message, "Unable to resolve the parent checkout commit");
       assert.deepEqual(isolationReport(undefined), {});
     }),
   );
