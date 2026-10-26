@@ -1,5 +1,6 @@
 import {
   CommandId,
+  isOrchestrationV2WorkActive,
   type Ledger,
   MessageId,
   type OrchestrationV2ConversationMessage,
@@ -97,10 +98,10 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   const { orchestrator } = deps;
   const records = yield* orchestrator.getThreadRecords(
     input.threadId,
-    ["runs", "runtimeRequests", "ledger", "turnItems", "providerThreads"],
+    ["runs", "runtimeRequests", "ledger", "turnItems", "providerThreads", "subagents"],
     { turnItemTypes: ["run_interrupt_request"] },
   );
-  const { thread, runs, runtimeRequests, ledger, turnItems, providerThreads } = records;
+  const { thread, runs, runtimeRequests, ledger, turnItems, providerThreads, subagents } = records;
   const run = runs.find((candidate) => candidate.id === input.runId);
   // Failed runs never reach checkpoint capture and a usage limit is a failure, so only a normal
   // completion gets here; a stopped or cancelled run must not be restarted behind the user.
@@ -120,6 +121,9 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   // A native `/goal` already keeps the provider going across turns; a second loop would fight it.
   const goal = providerThreads.find(({ id }) => id === thread.activeProviderThreadId)?.goal;
   if (goal != null && goal.status !== "complete") return;
+  // A delegated task still working wakes this thread when it ends; nudging the agent before then
+  // only gets "still waiting" back and soon reads as a stall.
+  if (subagents.some((subagent) => isOrchestrationV2WorkActive(subagent.status))) return;
   // Agents and the server stop runs too; only a person's Stop says the user wants the work off.
   const userStoppedRunIds = new Set(
     turnItems.flatMap((item) =>
