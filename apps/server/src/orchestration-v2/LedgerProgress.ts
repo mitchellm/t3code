@@ -9,7 +9,10 @@ function progressFromCounts(closed: number, open: number): LedgerProgress | null
   return total === 0 ? null : { closed, open, total };
 }
 
-/** Dropped items are set aside, so they leave the total. Null when there is nothing to measure. */
+/**
+ * Dropped and deferred items are out of the task's scope, so they leave the total. Null when there
+ * is nothing to measure.
+ */
 export function summarizeLedgerProgress(ledger: Ledger | undefined): LedgerProgress | null {
   if (ledger === undefined) return null;
   let closed = 0;
