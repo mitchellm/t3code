@@ -1244,6 +1244,16 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
           judgements: Schema.optionalKey(NonNegativeInt),
         }),
       ),
+      /**
+       * Present on a replan nudge: a stalled round or an item the judge kept failing. One stall
+       * gets one replan, and an item one judge replan, until the user speaks again.
+       */
+      replan: Schema.optionalKey(
+        Schema.Struct({
+          reason: Schema.Literals(["stalled", "judge"]),
+          itemIds: Schema.Array(LedgerItemId),
+        }),
+      ),
     }),
     Schema.Struct({ kind: Schema.Literal("system") }),
   ],

@@ -39,7 +39,12 @@ const signatureOf = (items: ReadonlyArray<LedgerProgressMark>) =>
     .sort()
     .join("\n");
 
-const progressMark = ({ id, status, judging, judgements }: LedgerItem): LedgerProgressMark => ({
+export const progressMark = ({
+  id,
+  status,
+  judging,
+  judgements,
+}: LedgerItem): LedgerProgressMark => ({
   id,
   status,
   ...(judging === true ? { judging } : {}),

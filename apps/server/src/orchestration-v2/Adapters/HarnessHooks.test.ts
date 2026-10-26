@@ -5,6 +5,7 @@ import {
   type LedgerItem,
   LedgerItemId,
   type LoadoutStructure,
+  ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import type { ProviderAdapterV2HarnessLedgerState } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -135,22 +136,69 @@ describe("Stop hook", () => {
     expect(await fire("Stop", stop(false))).toEqual({});
   });
 
-  it(`allows the stop after ${HARNESS_STOP_BLOCK_LIMIT} blocks with no ledger change`, async () => {
+  it(`replans after ${HARNESS_STOP_BLOCK_LIMIT} blocks with no ledger change, then allows the stop`, async () => {
     const current = { value: state(ledgerOf([item("L1", "open")])) };
     const { fire } = make(ledgerReader(current));
-    const decisions: Array<unknown> = [];
-    decisions.push((await fire("Stop", stop(false))).decision);
-    for (let index = 0; index < HARNESS_STOP_BLOCK_LIMIT; index++) {
-      decisions.push((await fire("Stop", stop(true))).decision);
+    const outputs: Array<Record<string, unknown>> = [];
+    outputs.push(await fire("Stop", stop(false)));
+    for (let index = 0; index <= HARNESS_STOP_BLOCK_LIMIT; index++) {
+      outputs.push(await fire("Stop", stop(true)));
     }
-    expect(decisions).toEqual([
-      ...Array.from({ length: HARNESS_STOP_BLOCK_LIMIT }, () => "block"),
+    expect(outputs.map((output) => output.decision)).toEqual([
+      ...Array.from({ length: HARNESS_STOP_BLOCK_LIMIT + 1 }, () => "block"),
       undefined,
     ]);
+    const plain = String(outputs[0]!.reason);
+    const replan = String(outputs[HARNESS_STOP_BLOCK_LIMIT]!.reason);
+    expect(plain).not.toContain("replan");
+    for (const step of ["replan", "split", "acceptance", "blocked", "defer", "L1"]) {
+      expect(replan).toContain(step);
+    }
 
     // Progress on the ledger earns a fresh allowance.
     current.value = state(ledgerOf([item("L1", "in_progress"), item("L2", "open")]));
-    expect((await fire("Stop", stop(true))).decision).toBe("block");
+    expect((await fire("Stop", stop(true))).reason).toContain("Ledger has 2 open items");
+  });
+
+  it("replans once per stall: progress after the replan starts a new episode", async () => {
+    const current = { value: state(ledgerOf([item("L1", "open")])) };
+    const { fire } = make(ledgerReader(current));
+    for (let index = 0; index < HARNESS_STOP_BLOCK_LIMIT; index++) {
+      await fire("Stop", stop(index > 0));
+    }
+    expect((await fire("Stop", stop(true))).reason).toContain("replan");
+    current.value = state(ledgerOf([item("L1", "open"), item("L1.a", "open")]));
+    const reasons: Array<unknown> = [];
+    for (let index = 0; index <= HARNESS_STOP_BLOCK_LIMIT; index++) {
+      reasons.push((await fire("Stop", stop(true))).reason);
+    }
+    expect(reasons.map((reason) => String(reason).includes("replan"))).toEqual([
+      ...Array.from({ length: HARNESS_STOP_BLOCK_LIMIT }, () => false),
+      true,
+    ]);
+    expect(await fire("Stop", stop(true))).toEqual({});
+  });
+
+  it("replans an item the judge failed three times, naming it, once per prompt", async () => {
+    const failed: LedgerItem = {
+      ...item("L2", "in_progress"),
+      judgements: 3,
+      verdict: {
+        outcome: "fail",
+        judge: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" },
+        notes: "The empty-input case still throws",
+        at,
+      },
+    };
+    const current = { value: state(ledgerOf([item("L1", "open"), failed])) };
+    const { fire } = make(ledgerReader(current));
+    const first = String((await fire("Stop", stop(false))).reason);
+    expect(first).toContain("L2");
+    expect(first).toContain("failed the judge 3 times");
+    expect(first).toContain("The empty-input case still throws");
+    expect(String((await fire("Stop", stop(true))).reason)).not.toContain("failed the judge");
+    // A new prompt from the user starts a new allowance, replans included.
+    expect(String((await fire("Stop", stop(false))).reason)).toContain("failed the judge");
   });
 
   it(`allows the stop after ${HARNESS_STOP_BLOCK_CEILING} blocks in one prompt even with progress`, async () => {
@@ -175,7 +223,8 @@ describe("Stop hook", () => {
   it("gives a new prompt its own allowance", async () => {
     const current = { value: state(ledgerOf([item("L1", "open")])) };
     const { fire } = make(ledgerReader(current));
-    for (let index = 0; index < HARNESS_STOP_BLOCK_LIMIT; index++) {
+    // The limit's blocks and its replan.
+    for (let index = 0; index <= HARNESS_STOP_BLOCK_LIMIT; index++) {
       await fire("Stop", stop(index > 0));
     }
     expect(await fire("Stop", stop(true))).toEqual({});

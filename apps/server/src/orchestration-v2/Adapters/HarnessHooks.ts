@@ -12,7 +12,9 @@ import type {
 import type { Ledger, LedgerItem, LoadoutStructure } from "@t3tools/contracts";
 import type { ProviderAdapterV2HarnessLedgerState } from "@t3tools/provider-core/server/ProviderAdapter";
 
-/** Blocks in a row, with the ledger unchanged, before the agent may stop anyway. */
+import { decideStopHookNudge, ledgerReplanText } from "../LedgerReplan.ts";
+
+/** Blocks in a row, with the ledger unchanged, before a replan block and then the stop. */
 export const HARNESS_STOP_BLOCK_LIMIT = 3;
 /** Blocks in one prompt, progress or not, before the agent may stop anyway. */
 export const HARNESS_STOP_BLOCK_CEILING = 20;
@@ -219,6 +221,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     let consecutiveBlocks = 0;
     let promptBlocks = 0;
     let lastFingerprint: string | undefined;
+    const judgeReplanned = new Set<string>();
     // Giving up only allows the stop: the run then completes with items open, and
     // LedgerAutoContinue posts the stop notice and unread mark for it, as for any provider.
     hooks.Stop = [
@@ -228,6 +231,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         if (!input.stop_hook_active) {
           consecutiveBlocks = 0;
           promptBlocks = 0;
+          judgeReplanned.clear();
         }
         if (waitsOnBackgroundSubagent(input)) return {};
         const state = await readLedgerState(signal);
@@ -241,12 +245,24 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           consecutiveBlocks = 0;
           lastFingerprint = fingerprint;
         }
-        if (consecutiveBlocks >= HARNESS_STOP_BLOCK_LIMIT) return {};
+        // Fork: the limit's last block asks for a replan, so the stop is allowed one block later.
+        const nudge = decideStopHookNudge({
+          open,
+          unchangedBlocks: consecutiveBlocks,
+          limit: HARNESS_STOP_BLOCK_LIMIT,
+          judgeReplanned,
+        });
+        if (nudge.type === "allow") return {};
         // Churn that keeps changing the ledger without closing it must still end.
         if (promptBlocks >= HARNESS_STOP_BLOCK_CEILING) return {};
         consecutiveBlocks++;
         promptBlocks++;
-        return { decision: "block", reason: stopReason(open) };
+        if (nudge.type === "block") return { decision: "block", reason: stopReason(open) };
+        if (nudge.reason === "judge") for (const item of nudge.items) judgeReplanned.add(item.id);
+        return {
+          decision: "block",
+          reason: ledgerReplanText({ ledger, reason: nudge.reason, items: nudge.items }),
+        };
       }),
     ];
 
