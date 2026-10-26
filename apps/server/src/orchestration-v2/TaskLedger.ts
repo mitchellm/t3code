@@ -652,6 +652,8 @@ function planCoreLedgerCommand(input: {
         updatedAt: now,
       };
       next = withOptional(next, "deferReason", target === "deferred" ? deferReason : undefined);
+      if (target === "in_progress" && next.startedAt === undefined)
+        next = { ...next, startedAt: now };
       if (target === "dropped") next = endJudging(next);
       if (changesStatus || evidence !== item.evidence) {
         next = withOptional(next, "judgeError", undefined);

@@ -1,5 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import {
+  CheckpointRef,
   CommandId,
   EventId,
   type Ledger,
@@ -25,6 +26,7 @@ import {
 } from "../orchestration-v2/TaskLedger.ts";
 import {
   type BackgroundJudgementPorts,
+  type JudgeCheckpoint,
   type JudgeRun,
   type JudgementPorts,
   requestJudgement,
@@ -69,7 +71,8 @@ const run = (overrides: Partial<JudgeRun> = {}): JudgeRun => ({
   taskId: "task:judge" as NodeId,
   childThreadId: ThreadId.make("thread:judge"),
   status: "completed",
-  summary: "Ran the smoke test myself.\nVERDICT: PASS",
+  summary:
+    "C1: PASS - ran `vp test run smoke.test.ts` myself: 3 passed.\nTests: vp test run smoke.test.ts -> 3 passed\nVERDICT: PASS",
   waitTimedOut: false,
   judge,
   expectedJudge: judge,
@@ -81,6 +84,7 @@ const harness = (
     run?: JudgeRun;
     /** What the judge thread holds; defaults to exactly the prompt the server delegated. */
     messages?: ReadonlyArray<string>;
+    checkpoints?: ReadonlyArray<JudgeCheckpoint>;
   } = {},
 ) => {
   const delegated: Array<{ prompt: string; keySource: string }> = [];
@@ -103,6 +107,7 @@ const harness = (
         recorded.push(input);
         return 7;
       }),
+    checkpoints: () => Effect.succeed(options.checkpoints ?? []),
   };
   return { ports, delegated, recorded };
 };
@@ -160,6 +165,140 @@ it.effect("an investigation's approach is judged by a refuter against the user's
     // An ordinary item on the same ledger keeps the plain judge.
     yield* requestJudgement({ ledger: ledgerOf(), itemId, ports });
     expect(delegated[1]?.prompt).not.toContain("refuter");
+  });
+});
+
+const HARDENING = [
+  "Do not trust the agent's evidence",
+  "test files were added, modified or deleted",
+  "weakened, skipped or deleted",
+  "even when the agent says it was intentional",
+  "Run the relevant tests yourself",
+  "the exact command",
+  "Any FAIL, or a criterion with no line, fails the item",
+];
+
+it.effect("splits the acceptance into criteria and tells the judge how not to be gamed", () => {
+  const { ports, delegated } = harness();
+  return Effect.gen(function* () {
+    yield* requestJudgement({
+      ledger: ledgerOf({}, [
+        item({
+          acceptance:
+            "- CLI smoke test passes. The help text lists every command.\n- Exit code is 0",
+        }),
+      ]),
+      itemId,
+      ports,
+    });
+    const prompt = delegated[0]?.prompt ?? "";
+    expect(prompt).toContain("C1: CLI smoke test passes.");
+    expect(prompt).toContain("C2: The help text lists every command.");
+    expect(prompt).toContain("C3: Exit code is 0");
+    expect(prompt).not.toContain("C4:");
+    for (const rule of HARDENING) expect(prompt).toContain(rule);
+    // No base is known, so the judge is told to find the changes itself.
+    expect(prompt).toContain("No base commit is known");
+  });
+});
+
+it.effect("hardens the refuter the same way, with the user's criteria as the list", () => {
+  const { ports, delegated } = harness();
+  const approaches = LedgerItemId.make("approaches");
+  const ledger = ledgerOf(
+    {
+      investigation: {
+        goal: "Why does the CLI hang?",
+        solvedWhen: "The hang reproduces in a test.\nThe test passes with the fix.",
+        budget: { minutes: 30 },
+        parallelApproaches: 2,
+        status: "running",
+        approachesItemId: approaches,
+        startedAt: at,
+        endedAt: null,
+      },
+    },
+    [item({ id: approaches, title: "Approaches" }), item({ parentItemId: approaches })],
+  );
+  return Effect.gen(function* () {
+    yield* requestJudgement({ ledger, itemId, ports });
+    const prompt = delegated[0]?.prompt ?? "";
+    expect(prompt).toContain("refuter");
+    expect(prompt).toContain("C1: The hang reproduces in a test.");
+    expect(prompt).toContain("C2: The test passes with the fix.");
+    for (const rule of HARDENING) expect(prompt).toContain(rule);
+  });
+});
+
+it.effect("gives the judge the checkpoint from just before the item started as its base", () => {
+  const checkpoint = (ref: string, iso: string, status: JudgeCheckpoint["status"] = "ready") => ({
+    ref: CheckpointRef.make(ref),
+    status,
+    capturedAt: DateTime.makeUnsafe(iso),
+  });
+  const { ports, delegated } = harness({
+    checkpoints: [
+      checkpoint("refs/t3/checkpoints/s/ordinal/0", "2026-01-01T00:00:00.000Z"),
+      checkpoint("refs/t3/checkpoints/s/ordinal/1", "2026-01-01T01:00:00.000Z"),
+      checkpoint("refs/t3/checkpoints/s/ordinal/2", "2026-01-01T01:30:00.000Z", "missing"),
+      checkpoint("refs/t3/checkpoints/s/ordinal/3", "2026-01-01T03:00:00.000Z"),
+    ],
+  });
+  return Effect.gen(function* () {
+    yield* requestJudgement({
+      ledger: ledgerOf({}, [item({ startedAt: DateTime.makeUnsafe("2026-01-01T02:00:00.000Z") })]),
+      itemId,
+      ports,
+    });
+    const prompt = delegated[0]?.prompt ?? "";
+    expect(prompt).toContain("git diff refs/t3/checkpoints/s/ordinal/1");
+    expect(prompt).not.toContain("ordinal/2");
+    expect(prompt).not.toContain("ordinal/3");
+    expect(prompt).not.toContain("No base commit is known");
+  });
+});
+
+it.effect("fails a PASS verdict that fails a criterion, skips one, or gives no proof", () => {
+  const acceptance = "Smoke test passes.\nHelp lists every command.";
+  const answers = [
+    ["failed", "C1: PASS - 3 passed\nC2: FAIL - `deploy` missing\nVERDICT: PASS", "C2"],
+    ["missing", "C1: PASS - 3 passed\nVERDICT: PASS", "C2"],
+    ["no proof", "C1: PASS - 3 passed\nC2: PASS\nVERDICT: PASS", "C2"],
+  ] as const;
+  return Effect.gen(function* () {
+    for (const [name, summary, criterion] of answers) {
+      const { ports, recorded } = harness({ run: run({ summary }) });
+      const result = yield* requestJudgement({
+        ledger: ledgerOf({}, [item({ acceptance })]),
+        itemId,
+        ports,
+      });
+      expect(result.outcome, name).toBe("fail");
+      expect(recorded[0]?.verdict.outcome, name).toBe("fail");
+      expect(recorded[0]?.verdict.notes, name).toContain(criterion);
+    }
+  });
+});
+
+it.effect("passes when every criterion passes with proof", () => {
+  const { ports, recorded } = harness({
+    run: run({
+      summary: [
+        "Diffed from the base: no test file changed.",
+        "**C1: PASS** - `vp test run smoke.test.ts`: 3 passed",
+        "- C2: PASS: `t3 --help` lists deploy, status and logs",
+        "VERDICT: PASS",
+      ].join("\n"),
+    }),
+  });
+  return Effect.gen(function* () {
+    const result = yield* requestJudgement({
+      ledger: ledgerOf({}, [item({ acceptance: "Smoke test passes.\nHelp lists every command." })]),
+      itemId,
+      ports,
+    });
+    expect(result.outcome).toBe("pass");
+    expect(recorded[0]?.verdict.outcome).toBe("pass");
   });
 });
 
@@ -390,6 +529,7 @@ const backgroundHarness = (options: {
       Effect.sync(() =>
         apply({ type: "ledger.item.judgement.abandon", ...common(), itemId: abandoned, reason }),
       ),
+    checkpoints: () => Effect.succeed([]),
   };
   const start = () => startBackgroundJudgement({ ledger, itemId, requestedAt, ports });
   const settle = () => settleBackgroundJudgement({ ledger, taskId: "task:judge" as NodeId, ports });

@@ -1977,6 +1977,11 @@ const make = Effect.gen(function* () {
           Effect.map(({ messages }) => messages.map(({ text }) => text)),
           Effect.mapError(threadManagementFailure),
         ),
+      checkpoints: () =>
+        threadManagement.getThreadRecords(scope.thread.threadId, ["checkpoints"]).pipe(
+          Effect.map(({ checkpoints }) => checkpoints),
+          Effect.mapError(threadManagementFailure),
+        ),
       recordVerdict: ({ itemId, judgedEvidence, verdict, taskId }) =>
         threadManagement
           .dispatch({
