@@ -101,6 +101,7 @@ describe("rulePinsAtom", () => {
   const pin = (id: string, text: string) => ({
     id,
     text,
+    author: "user" as const,
     sourceMessageId: null,
     createdAt: "2026-10-23T00:00:00.000Z",
   });

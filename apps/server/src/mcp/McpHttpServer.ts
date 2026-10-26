@@ -52,6 +52,9 @@ import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import { LedgerToolkit } from "./toolkits/ledger/tools.ts";
 import * as LedgerHandlers from "./toolkits/ledger/handlers.ts";
 import * as LedgerMcpService from "./LedgerMcpService.ts";
+import { AgentPinsToolkit } from "./toolkits/agentPins/tools.ts";
+import * as AgentPinsHandlers from "./toolkits/agentPins/handlers.ts";
+import * as AgentPinsMcpService from "./AgentPinsMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
@@ -995,6 +998,12 @@ export const layerLedgerToolkit = toolkitRegistration(LedgerToolkit, LedgerHandl
   Layer.provide(LedgerMcpService.layer),
 );
 
+// Fork: agent-written pins (pin_add, pin_remove).
+export const layerAgentPinsToolkit = toolkitRegistration(
+  AgentPinsToolkit,
+  AgentPinsHandlers.layer,
+).pipe(Layer.provide(AgentPinsMcpService.layer));
+
 const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeToolkit,
   WorktreeHandlers.layer,
@@ -1050,6 +1059,7 @@ export const layer = Layer.mergeAll(
   layerOrchestratorToolkit,
   layerThreadToolkit,
   layerLedgerToolkit,
+  layerAgentPinsToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentToolkit,

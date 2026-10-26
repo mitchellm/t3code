@@ -40,6 +40,7 @@ export * from "./orchestrationProject.ts";
 export * from "./ledger.ts";
 export * from "./loadout.ts";
 export * from "./ledgerMcp.ts";
+export * from "./agentPinsMcp.ts";
 export * from "./orchestrationV2.ts";
 export * from "./guestShare.ts";
 export * from "./guestStream.ts";

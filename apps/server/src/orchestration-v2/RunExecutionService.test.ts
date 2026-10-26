@@ -1085,6 +1085,7 @@ describe("thread rule pins", () => {
   const pin = (id: string, text: string): ThreadRulePin => ({
     id,
     text,
+    author: "user",
     sourceMessageId: null,
     createdAt: "2026-10-23T00:00:00.000Z",
   });

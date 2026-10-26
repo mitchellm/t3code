@@ -2,6 +2,7 @@ import type { ScopedThreadRef, ThreadRulePin } from "@t3tools/contracts";
 import { PencilIcon, PinOffIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 
+import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
 import { useThreadRulePins } from "~/hooks/useThreadRulePins";
@@ -87,15 +88,27 @@ function PinRow({
 }) {
   return (
     <div className="flex items-start gap-2 rounded-lg border border-border/70 p-2">
-      <p className="line-clamp-6 min-w-0 flex-1 whitespace-pre-wrap break-words text-sm">
-        {pin.text}
-      </p>
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        {pin.author === "agent" ? (
+          <Badge variant="info" size="sm" className="self-start">
+            Agent
+          </Badge>
+        ) : null}
+        <p className="line-clamp-6 whitespace-pre-wrap break-words text-sm">{pin.text}</p>
+      </div>
       {canChange ? (
         <div className="flex shrink-0 items-center gap-0.5">
-          <Button size="icon-xs" variant="ghost-muted" aria-label="Edit pin" onClick={onEdit}>
-            <PencilIcon />
-          </Button>
-          <Button size="icon-xs" variant="ghost-muted" aria-label="Unpin" onClick={onRemove}>
+          {pin.author === "agent" ? null : (
+            <Button size="icon-xs" variant="ghost-muted" aria-label="Edit pin" onClick={onEdit}>
+              <PencilIcon />
+            </Button>
+          )}
+          <Button
+            size="icon-xs"
+            variant="ghost-muted"
+            aria-label={pin.author === "agent" ? "Remove agent pin" : "Unpin"}
+            onClick={onRemove}
+          >
             <PinOffIcon />
           </Button>
         </div>

@@ -50,7 +50,7 @@ function sameRulePins(left: ReadonlyArray<ThreadRulePin>, right: ReadonlyArray<T
     left.length === right.length &&
     left.every((pin, index) => {
       const other = right[index]!;
-      return pin.id === other.id && pin.text === other.text;
+      return pin.id === other.id && pin.text === other.text && pin.author === other.author;
     })
   );
 }
