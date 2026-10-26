@@ -9,6 +9,7 @@ import {
 import { loadoutRoleIssue, type LoadoutRoleIssueKind } from "@t3tools/shared/loadoutSummary";
 import { CopyIcon, PlusIcon, Trash2Icon } from "lucide-react";
 
+import { randomUUID } from "../../lib/utils";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
@@ -19,11 +20,11 @@ import {
 import { useEnvironmentProviders, useEnvironments } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
-import { TraitsPicker } from "../chat/TraitsPicker";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   SettingsRow,
   SettingResetButton,
@@ -33,8 +34,9 @@ import { searchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
   duplicateLoadout,
-  effortFromSelections,
-  effortOptionId,
+  effortChoices,
+  missingPresets,
+  newRoleDefault,
   roleAfterModelChange,
   unassignedRoles,
   withRole,
@@ -59,7 +61,9 @@ const ISSUE_LABELS: Record<LoadoutRoleIssueKind, string> = {
   missing_model: "Model not offered",
 };
 
-const newId = () => `custom-${Date.now().toString(36)}`;
+const DEFAULT_EFFORT = "__default__";
+
+const newId = () => `custom-${randomUUID()}`;
 
 const isBuiltIn = (loadout: Loadout) =>
   DEFAULT_LOADOUTS.some((builtIn) => JSON.stringify(builtIn) === JSON.stringify(loadout));
@@ -70,7 +74,6 @@ function RoleRow(props: {
   entries: ReadonlyArray<ProviderInstanceEntry>;
   modelOptions: ReturnType<typeof getCustomModelOptionsByInstance>;
   environmentId: Parameters<typeof ProviderModelPicker>[0]["environmentId"];
-  planModeEnabled: boolean;
   onChange: (loadout: Loadout) => void;
 }) {
   const { name, loadout, entries } = props;
@@ -90,7 +93,7 @@ function RoleRow(props: {
             models: candidate.models,
           })),
         );
-  const optionId = effortOptionId(model) ?? "effort";
+  const efforts = effortChoices(model);
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -120,24 +123,37 @@ function RoleRow(props: {
           )
         }
       />
-      {entry !== undefined && model !== undefined ? (
-        <TraitsPicker
-          provider={entry.driverKind}
-          instanceId={entry.instanceId}
-          models={entry.models}
-          model={role.model}
-          modelOptions={role.effort === undefined ? [] : [{ id: optionId, value: role.effort }]}
-          allowPromptInjectedEffort={false}
-          planModeEnabled={props.planModeEnabled}
-          triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-          onModelOptionsChange={(options) => {
-            const effort = effortFromSelections(options);
+      {/* Only effort is stored on a role, so only effort is offered (TraitsPicker would also list thinking, fast mode and context, which would snap back). */}
+      {efforts.length > 0 ? (
+        <Select
+          value={role.effort ?? DEFAULT_EFFORT}
+          onValueChange={(value) => {
             const { effort: _previous, ...rest } = role;
             props.onChange(
-              withRole(loadout, name, effort === undefined ? rest : { ...rest, effort }),
+              withRole(
+                loadout,
+                name,
+                value === null || value === DEFAULT_EFFORT ? rest : { ...rest, effort: value },
+              ),
             );
           }}
-        />
+        >
+          <SelectTrigger size="sm" className="w-fit" aria-label={`${ROLE_LABELS[name]} effort`}>
+            <SelectValue>
+              {efforts.find(({ id }) => id === role.effort)?.label ?? "Default effort"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            <SelectItem value={DEFAULT_EFFORT} hideIndicator>
+              Default effort
+            </SelectItem>
+            {efforts.map(({ id, label }) => (
+              <SelectItem key={id} value={id} hideIndicator>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
       ) : null}
       {issue === null ? null : (
         <Badge variant="warning" size="sm">
@@ -162,14 +178,13 @@ function LoadoutEditor(props: {
   entries: ReadonlyArray<ProviderInstanceEntry>;
   modelOptions: ReturnType<typeof getCustomModelOptionsByInstance>;
   environmentId: Parameters<typeof ProviderModelPicker>[0]["environmentId"];
-  planModeEnabled: boolean;
   onChange: (loadout: Loadout) => void;
   onDuplicate: () => void;
   onRemove: () => void;
 }) {
   const { loadout } = props;
   const addable = unassignedRoles(loadout);
-  const fallbackEntry = props.entries.find(({ enabled, models }) => enabled && models.length > 0);
+  const roleDefault = newRoleDefault(props.entries);
   return (
     <div className="grid gap-2 border-t border-border/60 px-1 py-3 first:border-t-0">
       <div className="flex items-center gap-2">
@@ -222,34 +237,42 @@ function LoadoutEditor(props: {
           entries={props.entries}
           modelOptions={props.modelOptions}
           environmentId={props.environmentId}
-          planModeEnabled={props.planModeEnabled}
           onChange={props.onChange}
         />
       ))}
       {addable.length === 0 || loadout.id === SOLO_LOADOUT_ID ? null : (
-        <Select
-          value={null}
-          onValueChange={(value) => {
-            const name = LOADOUT_ROLE_NAMES.find((candidate) => candidate === value);
-            const model = fallbackEntry?.models[0];
-            if (name === undefined || fallbackEntry === undefined || model === undefined) return;
-            props.onChange(
-              withRole(loadout, name, { instanceId: fallbackEntry.instanceId, model: model.slug }),
-            );
-          }}
-        >
-          <SelectTrigger size="sm" className="w-fit" aria-label={`Add role to ${loadout.name}`}>
-            <PlusIcon className="size-4" />
-            <SelectValue>Add role</SelectValue>
-          </SelectTrigger>
-          <SelectPopup>
-            {addable.map((name) => (
-              <SelectItem key={name} value={name} hideIndicator>
-                {ROLE_LABELS[name]}
-              </SelectItem>
-            ))}
-          </SelectPopup>
-        </Select>
+        // The span carries the tooltip because a disabled trigger swallows hover.
+        <Tooltip>
+          <TooltipTrigger render={<span className="w-fit" />}>
+            <Select
+              value={null}
+              disabled={roleDefault === undefined}
+              onValueChange={(value) => {
+                const name = LOADOUT_ROLE_NAMES.find((candidate) => candidate === value);
+                if (name === undefined || roleDefault === undefined) return;
+                props.onChange(withRole(loadout, name, roleDefault));
+              }}
+            >
+              <SelectTrigger size="sm" className="w-fit" aria-label={`Add role to ${loadout.name}`}>
+                <PlusIcon className="size-4" />
+                <SelectValue>Add role</SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                {addable.map((name) => (
+                  <SelectItem key={name} value={name} hideIndicator>
+                    {ROLE_LABELS[name]}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </TooltipTrigger>
+          {roleDefault === undefined ? (
+            <TooltipPopup side="top">
+              A role needs a model, and no provider models are loaded here. Connect an environment
+              with an enabled provider first.
+            </TooltipPopup>
+          ) : null}
+        </Tooltip>
       )}
     </div>
   );
@@ -279,6 +302,8 @@ export function LoadoutSettings() {
   const modelOptions = getCustomModelOptionsByInstance(settings, providers);
   const loadouts = settings.loadouts;
   const save = (next: ReadonlyArray<Loadout>) => updateSettings({ loadouts: [...next] });
+  // Ids are only minted when a preset is actually added, so render stays pure.
+  const presetsToAdd = missingPresets(loadouts, DEFAULT_LOADOUTS, () => "");
 
   return (
     <SettingsRow
@@ -305,7 +330,6 @@ export function LoadoutSettings() {
             entries={entries}
             modelOptions={modelOptions}
             environmentId={representative?.environmentId ?? null}
-            planModeEnabled={settings.planModeEnabled}
             onChange={(next) =>
               save(loadouts.map((candidate) => (candidate.id === loadout.id ? next : candidate)))
             }
@@ -317,16 +341,41 @@ export function LoadoutSettings() {
             onRemove={() => save(loadouts.filter((candidate) => candidate.id !== loadout.id))}
           />
         ))}
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() =>
-            save([...loadouts, { id: newId(), name: "New loadout", description: "", roles: {} }])
-          }
-        >
-          <PlusIcon className="size-4" />
-          Add loadout
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              save([...loadouts, { id: newId(), name: "New loadout", description: "", roles: {} }])
+            }
+          >
+            <PlusIcon className="size-4" />
+            Add loadout
+          </Button>
+          {presetsToAdd.length === 0 ? null : (
+            <Select
+              value={null}
+              onValueChange={(value) => {
+                const preset = missingPresets(loadouts, DEFAULT_LOADOUTS, newId).find(
+                  ({ name }) => name === value,
+                );
+                if (preset !== undefined) save([...loadouts, preset]);
+              }}
+            >
+              <SelectTrigger size="sm" className="w-fit" aria-label="Add preset">
+                <PlusIcon className="size-4" />
+                <SelectValue>Add preset</SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                {presetsToAdd.map((preset) => (
+                  <SelectItem key={preset.name} value={preset.name} hideIndicator>
+                    {preset.name}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          )}
+        </div>
       </div>
     </SettingsRow>
   );

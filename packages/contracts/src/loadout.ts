@@ -91,9 +91,11 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
   {
     id: "opus-blowout",
     name: "Opus blowout",
-    description: "Opus plans, works and judges. The most capable and the most expensive structure.",
+    description: "Opus in every role. The most capable and the most expensive structure.",
     roles: {
       planner: claude("claude-opus-5-5", "xhigh"),
+      subPlanner: claude("claude-opus-5-5", "high"),
+      explorer: claude("claude-opus-5-5", "high"),
       worker: claude("claude-opus-5-5", "high"),
       judge: claude("claude-opus-5-5", "high"),
     },

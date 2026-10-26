@@ -3,6 +3,8 @@ import { useNavigate } from "@tanstack/react-router";
 import { LayersIcon, SparklesIcon } from "lucide-react";
 import { memo } from "react";
 
+import { useSidebarProjectGroups } from "../../hooks/useSidebarProjectGroups";
+import { loadoutSettingsScopeSearch } from "../settings/loadoutEditor.logic";
 import { searchableSetting } from "../settings/settingsSearch";
 import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -21,6 +23,43 @@ function loadoutTooltip(loadout: ComposerLoadout): string {
   return loadout.active.description;
 }
 
+/**
+ * Mounted only while the menu is open, so the sidebar project grouping it needs to name the
+ * project scope is not subscribed to by every composer.
+ */
+function EditLoadoutsItem(props: { scope: ComposerLoadout["settingsScope"] }) {
+  const navigate = useNavigate();
+  const groups = useSidebarProjectGroups();
+  const projectKey =
+    groups.find((group) =>
+      group.memberProjectRefs.some(
+        (ref) =>
+          ref.environmentId === props.scope.environmentId &&
+          ref.projectId === props.scope.projectId,
+      ),
+    )?.projectKey ?? null;
+  return (
+    <SelectItem
+      value={EDIT_VALUE}
+      hideIndicator
+      className="min-w-64"
+      onClick={() =>
+        void navigate({
+          to: "/settings/general",
+          search: loadoutSettingsScopeSearch({
+            environmentId: props.scope.environmentId,
+            projectOverridden: props.scope.projectOverridden,
+            projectKey,
+          }),
+          hash: searchableSetting("loadouts").id,
+        })
+      }
+    >
+      <span className="font-medium text-foreground">Edit loadouts…</span>
+    </SelectItem>
+  );
+}
+
 export const ComposerLoadoutPicker = memo(function ComposerLoadoutPicker(props: {
   loadout: ComposerLoadout;
   size?: "sm" | "xs";
@@ -29,7 +68,6 @@ export const ComposerLoadoutPicker = memo(function ComposerLoadoutPicker(props: 
   const size = props.size ?? "sm";
   const composerFloatingLayerProps = useComposerMenuProps();
   const [open, setOpen] = useComposerMenuState(props.hidden);
-  const navigate = useNavigate();
   const { loadout } = props;
   const agentProposed = loadout.choice?.setBy === "agent";
 
@@ -41,9 +79,7 @@ export const ComposerLoadoutPicker = memo(function ComposerLoadoutPicker(props: 
         value={loadout.active.id}
         onValueChange={(value) => {
           if (value === CLEAR_VALUE) loadout.onClear();
-          else if (value === EDIT_VALUE) {
-            void navigate({ to: "/settings/general", hash: searchableSetting("loadouts").id });
-          } else if (value) loadout.onSelect(value);
+          else if (value && value !== EDIT_VALUE) loadout.onSelect(value);
         }}
       >
         <TooltipTrigger render={<ComposerSelectControl size={size} aria-label="Loadout" />}>
@@ -81,9 +117,7 @@ export const ComposerLoadoutPicker = memo(function ComposerLoadoutPicker(props: 
               </div>
             </SelectItem>
           ) : null}
-          <SelectItem value={EDIT_VALUE} hideIndicator className="min-w-64">
-            <span className="font-medium text-foreground">Edit loadouts…</span>
-          </SelectItem>
+          <EditLoadoutsItem scope={loadout.settingsScope} />
         </SelectPopup>
       </Select>
       <TooltipPopup side="top">{loadoutTooltip(loadout)}</TooltipPopup>

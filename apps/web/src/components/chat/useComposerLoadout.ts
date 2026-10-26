@@ -2,6 +2,7 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
   type EnvironmentId,
   type Loadout,
+  type ProjectId,
   SOLO_LOADOUT_ID,
   type ScopedThreadRef,
   type ThreadLoadout,
@@ -19,6 +20,12 @@ export interface ComposerLoadout {
   /** The loadout the thread runs under; solo when none was chosen or it was since deleted. */
   readonly active: Loadout;
   readonly choice: ThreadLoadout | null;
+  /** Which settings scope defines the list: the project's own override, else the environment's. */
+  readonly settingsScope: {
+    readonly environmentId: EnvironmentId;
+    readonly projectId: ProjectId;
+    readonly projectOverridden: boolean;
+  };
   readonly onSelect: (loadoutId: string) => void;
   readonly onClear: () => void;
 }
@@ -48,6 +55,12 @@ export function useComposerLoadout(
     loadouts,
     active: resolveLoadout(loadouts, choice?.id),
     choice,
+    settingsScope: {
+      environmentId,
+      projectId: shell.projectId,
+      projectOverridden:
+        settings.projectSettingsOverrides?.[shell.projectId]?.loadouts !== undefined,
+    },
     // Hands the slot back so the agent may propose again; a user pick otherwise stands for good.
     onClear: () => {
       if (choice === null) return;

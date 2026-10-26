@@ -5,10 +5,10 @@ import {
   type LoadoutRole,
   type LoadoutRoleName,
   type ProviderInstanceId,
-  type ProviderOptionSelection,
+  SOLO_LOADOUT_ID,
 } from "@t3tools/contracts";
 
-const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["effort", "reasoningEffort"]);
+import { EFFORT_OPTION_IDS } from "@t3tools/shared/loadouts";
 
 interface ModelWithOptions {
   readonly slug: string;
@@ -18,12 +18,85 @@ interface ModelWithOptions {
           | ReadonlyArray<{
               readonly id: string;
               readonly type: string;
-              readonly options?: ReadonlyArray<{ readonly id: string }> | undefined;
+              readonly options?:
+                | ReadonlyArray<{ readonly id: string; readonly label?: string | undefined }>
+                | undefined;
             }>
           | undefined;
       }
     | null
     | undefined;
+}
+
+/** The effort options a model advertises, and only those: thinking, fast mode and context are not saved by a role. */
+const effortDescriptor = (model: ModelWithOptions | undefined) =>
+  model?.capabilities?.optionDescriptors?.find(
+    (descriptor) => EFFORT_OPTION_IDS.has(descriptor.id) && descriptor.type === "select",
+  );
+
+export function effortChoices(
+  model: ModelWithOptions | undefined,
+): ReadonlyArray<{ readonly id: string; readonly label: string }> {
+  return (effortDescriptor(model)?.options ?? []).map(({ id, label }) => ({
+    id,
+    label: label ?? id,
+  }));
+}
+
+/** Where a freshly added role starts. Undefined without a catalog, since a role needs a model. */
+export function newRoleDefault(
+  entries: ReadonlyArray<{
+    readonly instanceId: ProviderInstanceId;
+    readonly enabled: boolean;
+    readonly isAvailable: boolean;
+    readonly models: ReadonlyArray<{ readonly slug: string }>;
+  }>,
+): LoadoutRole | undefined {
+  const entry = entries.find(
+    ({ enabled, isAvailable, models }) => enabled && isAvailable && models.length > 0,
+  );
+  const model = entry?.models[0];
+  return entry === undefined || model === undefined
+    ? undefined
+    : { instanceId: entry.instanceId, model: model.slug };
+}
+
+const sameLoadoutShape = (a: Loadout, b: Loadout) =>
+  a.name === b.name && JSON.stringify(a.roles) === JSON.stringify(b.roles);
+
+/**
+ * Presets the saved list does not hold, for users whose stored list predates them. A preset
+ * counts as held when a loadout has its name and roles, so an edited copy is offered again; the
+ * copy keeps the preset id when unused and takes a fresh one otherwise.
+ */
+export function missingPresets(
+  existing: ReadonlyArray<Loadout>,
+  presets: ReadonlyArray<Loadout>,
+  mintId: () => string,
+): ReadonlyArray<Loadout> {
+  const taken = new Set(existing.map(({ id }) => id));
+  return presets
+    .filter((preset) => preset.id !== SOLO_LOADOUT_ID)
+    .filter((preset) => !existing.some((candidate) => sameLoadoutShape(candidate, preset)))
+    .map((preset) => {
+      const id = taken.has(preset.id) ? mintId() : preset.id;
+      taken.add(id);
+      return { ...preset, id };
+    });
+}
+
+/**
+ * The settings scope that holds the list a project's threads use: its own when it overrides
+ * loadouts, otherwise the environment's.
+ */
+export function loadoutSettingsScopeSearch(input: {
+  readonly environmentId: string;
+  readonly projectOverridden: boolean;
+  readonly projectKey: string | null;
+}): { project?: string; machine: string } {
+  return input.projectOverridden && input.projectKey !== null
+    ? { project: input.projectKey, machine: input.environmentId }
+    : { machine: input.environmentId };
 }
 
 export function withRole(
@@ -48,22 +121,6 @@ export function duplicateLoadout(
   let name = `${loadout.name} copy`;
   for (let attempt = 2; taken.has(name); attempt += 1) name = `${loadout.name} copy ${attempt}`;
   return { ...loadout, id, name };
-}
-
-const effortDescriptor = (model: ModelWithOptions | undefined) =>
-  model?.capabilities?.optionDescriptors?.find(
-    (descriptor) => EFFORT_OPTION_IDS.has(descriptor.id) && descriptor.type === "select",
-  );
-
-/** The id of the effort option this model advertises, which differs per driver. */
-export const effortOptionId = (model: ModelWithOptions | undefined): string | undefined =>
-  effortDescriptor(model)?.id;
-
-export function effortFromSelections(
-  selections: ReadonlyArray<ProviderOptionSelection> | undefined,
-): string | undefined {
-  const found = selections?.find(({ id }) => EFFORT_OPTION_IDS.has(id));
-  return typeof found?.value === "string" ? found.value : undefined;
 }
 
 /**

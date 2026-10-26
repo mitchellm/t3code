@@ -46,6 +46,18 @@ describe("loadout settings", () => {
     expect(DEFAULT_LOADOUTS[1]?.roles.judge?.model).toBe("claude-opus-5-5");
   });
 
+  it("puts Opus on every role of Opus blowout", () => {
+    const roles = DEFAULT_LOADOUTS.find(({ id }) => id === "opus-blowout")?.roles ?? {};
+    expect(Object.keys(roles).toSorted()).toEqual([
+      "explorer",
+      "judge",
+      "planner",
+      "subPlanner",
+      "worker",
+    ]);
+    for (const role of Object.values(roles)) expect(role.model).toBe("claude-opus-5-5");
+  });
+
   it("decodes a settings file that stored the presets, and a project override of them", () => {
     const stored = JSON.parse(JSON.stringify(DEFAULT_LOADOUTS)) as unknown;
     expect(decodeServerSettings({ loadouts: stored }).loadouts).toEqual(DEFAULT_LOADOUTS);

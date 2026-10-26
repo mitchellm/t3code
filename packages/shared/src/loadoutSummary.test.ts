@@ -23,7 +23,9 @@ describe("summarizeLoadoutRoles", () => {
     expect(summary("planner-workers-judge")).toBe(
       "Opus xhigh plans · Sonnet works · Opus high judges",
     );
-    expect(summary("opus-blowout")).toBe("Opus xhigh plans · Opus high works · Opus high judges");
+    expect(summary("opus-blowout")).toBe(
+      "Opus xhigh plans · Opus high sub-plans · Opus high explores · Opus high works · Opus high judges",
+    );
     expect(summary("blitz")).toBe(
       "Opus high plans · Haiku explores · Sonnet works · Sonnet judges",
     );
