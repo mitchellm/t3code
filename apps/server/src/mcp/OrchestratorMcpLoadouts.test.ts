@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
+  DEFAULT_LOADOUTS,
   EnvironmentId,
   OrchestratorMcpFailure,
   ProjectId,
@@ -128,11 +129,9 @@ it.effect("an agent proposal is recorded with its reason and reported by capabil
     const { service } = yield* setup;
     const before = yield* service.capabilities(scope);
     expect(before.loadout?.active).toMatchObject({ id: "solo", setBy: null, reason: null });
-    expect(before.loadout?.available.map(({ id }) => id)).toEqual([
-      "solo",
-      "planner-workers-judge",
-      "read-only-sweep",
-    ]);
+    expect(before.loadout?.available.map(({ id }) => id)).toEqual(
+      DEFAULT_LOADOUTS.map(({ id }) => id),
+    );
 
     const proposed = yield* service.proposeLoadout(scope, {
       loadoutId: "read-only-sweep",
