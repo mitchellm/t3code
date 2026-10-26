@@ -96,6 +96,7 @@ import {
   referencedThreadContexts,
 } from "./composerSend.logic";
 import { usePlanFollowUpSend } from "./useProposedPlanSend";
+import { useComposerInvestigateSend } from "./ComposerInvestigate";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import {
@@ -374,6 +375,7 @@ export function useComposerSend(input: ComposerSendInput) {
     anchorNewTurn,
     persistThreadSettingsForNextTurn,
   });
+  const startComposerInvestigation = useComposerInvestigateSend();
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
@@ -556,6 +558,24 @@ export function useComposerSend(input: ComposerSendInput) {
           description: `This machine's agent can't read "${strandedThread.title}". Remove it, or switch back to ${owner} to send.`,
         }),
       );
+      return;
+    }
+    // Fork: in Investigate mode the message is the goal of an investigation, not a turn.
+    if (
+      !queuedRunEdit.isEditing &&
+      isServerThread &&
+      (await startComposerInvestigation({
+        environmentId,
+        threadId: activeThread.id,
+        prompt: promptForSend,
+        modelSelection: ctxSelectedModelSelection,
+        clearPrompt: () => {
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+        },
+      }))
+    ) {
       return;
     }
     if (queuedRunEdit.isEditing) {

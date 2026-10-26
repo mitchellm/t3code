@@ -255,6 +255,10 @@
       "types": "./src/taskLedger.ts",
       "import": "./src/taskLedger.ts"
     },
+    "./investigation": {
+      "types": "./src/investigation.ts",
+      "import": "./src/investigation.ts"
+    },
     "./composerTrigger": {
       "types": "./src/composerTrigger.ts",
       "import": "./src/composerTrigger.ts"

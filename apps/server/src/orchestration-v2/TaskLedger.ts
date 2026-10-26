@@ -13,6 +13,13 @@ import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
 import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
+import {
+  followInvestigation,
+  type InvestigationCommand,
+  investigationAddProblem,
+  isInvestigationCommand,
+  planInvestigationCommand,
+} from "./Investigation.ts";
 
 export type LedgerEventBody = Extract<
   OrchestrationV2DomainEvent,
@@ -53,6 +60,8 @@ export function ledgerEventFromPlan(
     case "ledger.closed":
       return { ...envelope, type: planned.type, payload: planned.payload };
     case "ledger.reopened":
+      return { ...envelope, type: planned.type, payload: planned.payload };
+    case "ledger.investigation.updated":
       return { ...envelope, type: planned.type, payload: planned.payload };
   }
 }
@@ -251,6 +260,29 @@ const describeItems = (items: ReadonlyArray<LedgerItem>) =>
  */
 export function planLedgerCommand(input: {
   readonly command: LedgerCommand;
+  readonly ledger: Ledger | undefined;
+  readonly now: DateTime.Utc;
+  readonly requiresJudge?: boolean;
+}): Result.Result<ReadonlyArray<PlannedLedgerEvent>, LedgerRejection> {
+  // Fork: Investigate mode rides the ledger; its own commands and the solve it decides.
+  const { command } = input;
+  if (isInvestigationCommand(command)) {
+    return planInvestigationCommand({
+      command,
+      ledger: input.ledger,
+      now: input.now,
+      requiresJudge: input.requiresJudge === true,
+    });
+  }
+  const tooMany = investigationAddProblem(command, input.ledger);
+  if (tooMany !== undefined) return Result.fail(tooMany);
+  return Result.map(planCoreLedgerCommand({ ...input, command }), (planned) =>
+    followInvestigation(input.ledger, planned, input.now),
+  );
+}
+
+function planCoreLedgerCommand(input: {
+  readonly command: Exclude<LedgerCommand, InvestigationCommand>;
   readonly ledger: Ledger | undefined;
   readonly now: DateTime.Utc;
   readonly requiresJudge?: boolean;

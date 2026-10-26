@@ -55,6 +55,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [ORCHESTRATION_V2_WS_METHODS.runTaskRetro]: AuthOrchestrationOperateScope,
   // Dismissing only needs this; applying also writes settings, see clientRpcRequiredScopes.
   [ORCHESTRATION_V2_WS_METHODS.resolveTaskRetro]: AuthOrchestrationOperateScope,
+  // An investigation runs several agents on this environment's providers.
+  [ORCHESTRATION_V2_WS_METHODS.startInvestigation]: AuthOrchestrationOperateScope,
+  [ORCHESTRATION_V2_WS_METHODS.stopInvestigation]: AuthOrchestrationOperateScope,
   // A guest link hands thread access to someone outside, like a pairing link.
   [WS_METHODS.guestShareCreate]: AuthAccessWriteScope,
 } as const;

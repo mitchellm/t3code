@@ -103,6 +103,7 @@ import {
   ledgerJudgeEffects,
   planLedgerCommand,
 } from "./TaskLedger.ts";
+import { investigationEffects } from "./Investigation.ts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -548,6 +549,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "ledger.item.verdict.record":
     case "ledger.item.judgement.abandon":
     case "ledger.item.judgement.started":
+    case "ledger.investigation.start":
+    case "ledger.investigation.end":
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.wake-policy":
@@ -11705,7 +11708,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // judge gate. Stamped only when the judge can run (a V2 adapter, enabled for the project):
     // a gate nothing can satisfy would leave items closable only by dropping them.
     const requiresJudge =
-      command.type === "ledger.create"
+      command.type === "ledger.create" || command.type === "ledger.investigation.start"
         ? yield* Effect.gen(function* () {
             const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
             const loadout = resolveLoadout(
@@ -11749,6 +11752,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* Ref.update(effects, (current) => [
       ...current,
       ...ledgerJudgeEffects(command, ledger, planned.success),
+      ...investigationEffects(command, planned.success),
     ]);
     // The planner returns no events for a redundant command; that is accepted, not an error.
     return { redundant: planned.success.length === 0 };
@@ -12119,6 +12123,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "ledger.item.verdict.record":
       case "ledger.item.judgement.abandon":
       case "ledger.item.judgement.started":
+      case "ledger.investigation.start":
+      case "ledger.investigation.end":
         acceptsNoEvents = (yield* dispatchLedgerCommand(command, events, effects)).redundant;
         break;
       default:

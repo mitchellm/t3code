@@ -284,6 +284,14 @@ If a turn ends while items are still open, T3 Code continues for you. It sends a
 
 To stop it earlier, stop the running turn, remove the queued follow-up before it starts, or ask the agent to close or drop the remaining items. Sending your own message starts the count again.
 
+### Investigate
+
+For a question with several possible answers, such as why a bug happens, Investigate runs approaches in parallel until one survives a check against your criteria. It needs a loadout with a judge role, and a thread that already has a first message. Turn on **Investigate** next to Build/Plan in the composer, fill in **Solved when** (what would count as the answer), a budget in minutes, dollars or both, and how many approaches to run at once (1 to 8, 4 by default). Your message is the goal; sending it starts the investigation.
+
+Your criteria are pinned to the thread word for word, so they survive compaction. The agent proposes approaches as ledger items and hands each to a worker. When an approach claims an answer, the judge tries to refute it against your criteria: a refuted approach goes back to the agent, which can strengthen it or try a variant. The first one that passes solves the investigation: the other workers are stopped and the agent writes a report. If the budget runs out first, every worker is stopped and the agent writes a best-so-far report. The time budget is checked as it passes; dollars are checked each time a turn or worker finishes, so a run can go a little over.
+
+The **Investigation** panel above the task ledger shows time used against the budget, one lane per approach (exploring, judging, refuted, passed or stopped), and **Stop all**, which stops every worker and ends the investigation without a report. An ended investigation cannot be resumed; start a new one with a larger budget instead.
+
 ## Context in your message
 
 Context you attach lands where your cursor is, as a chip inside your text: a terminal excerpt,

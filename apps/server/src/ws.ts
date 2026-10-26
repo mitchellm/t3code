@@ -176,6 +176,7 @@ import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as TaskTimingService from "./orchestration-v2/TaskTimingService.ts";
 import type * as TaskRetro from "./orchestration-v2/TaskRetro.ts";
 import * as TaskRetroService from "./orchestration-v2/TaskRetroService.ts";
+import * as InvestigationService from "./orchestration-v2/InvestigationService.ts";
 import * as ThreadPreviews from "./orchestration-v2/ThreadPreviews.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
@@ -3322,6 +3323,7 @@ const layerForkWsRpc = ServerForkWsRpcGroup.toLayer(
     const threadPreviews = yield* ThreadPreviews.ThreadPreviews;
     const taskTiming = yield* TaskTimingService.TaskTimingService;
     const taskRetro = yield* TaskRetroService.TaskRetroService;
+    const investigations = yield* InvestigationService.InvestigationService;
     // The service's messages are fixed text, so they are safe to show.
     const taskRetroError = (error: TaskRetro.TaskRetroError) =>
       new OrchestrationTaskRetroError({ message: error.message, cause: error });
@@ -3364,6 +3366,9 @@ const layerForkWsRpc = ServerForkWsRpcGroup.toLayer(
         taskRetro.run(input.threadId, "user").pipe(Effect.mapError(taskRetroError)),
       [ORCHESTRATION_V2_WS_METHODS.resolveTaskRetro]: (input) =>
         taskRetro.resolve(input).pipe(Effect.mapError(taskRetroError)),
+      [ORCHESTRATION_V2_WS_METHODS.startInvestigation]: (input) => investigations.start(input),
+      [ORCHESTRATION_V2_WS_METHODS.stopInvestigation]: (input) =>
+        investigations.stop(input.threadId),
       [WS_METHODS.projectsResolveFileReference]: (input) =>
         workspaceFileReferences.resolve(input).pipe(
           Effect.mapError(

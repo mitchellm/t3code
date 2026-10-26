@@ -142,6 +142,7 @@ function shouldPublishAgentAwarenessEvent(
     case "ledger.item.updated":
     case "ledger.checkpoint.updated":
     case "ledger.closed":
+    case "ledger.investigation.updated":
     case "ledger.reopened":
       return false;
   }

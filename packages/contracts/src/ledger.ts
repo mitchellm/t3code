@@ -10,6 +10,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { LedgerInvestigation, LedgerInvestigationJson } from "./investigation.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 /** `deferred` is work found out of scope for this task: kept for later, never auto-continued. */
@@ -97,6 +98,8 @@ export const Ledger = Schema.Struct({
    * loadout with a judge role; absent on older records, which means false.
    */
   requiresJudge: Schema.optionalKey(Schema.Boolean),
+  /** Fork: present when the ledger runs an investigation (Investigate mode). */
+  investigation: Schema.optionalKey(LedgerInvestigation),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   closedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -136,6 +139,7 @@ export const LedgerJson = Ledger.mapFields((fields) => ({
   ...fields,
   checkpoints: Schema.Array(LedgerCheckpointJson),
   items: Schema.Array(LedgerItemJson),
+  investigation: Schema.optionalKey(LedgerInvestigationJson),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   closedAt: Schema.NullOr(Schema.DateTimeUtcFromString),

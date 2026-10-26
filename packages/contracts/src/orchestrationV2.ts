@@ -73,6 +73,12 @@ import {
   LedgerJudgementStartedCommand,
   LedgerJson,
 } from "./ledger.ts";
+import {
+  LedgerInvestigationEndCommand,
+  LedgerInvestigationStartCommand,
+  LedgerInvestigationUpdatedPayload,
+  LedgerInvestigationUpdatedPayloadJson,
+} from "./investigation.ts";
 import { ThreadLoadout } from "./loadout.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
@@ -1933,6 +1939,12 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     type: Schema.Literal("ledger.reopened"),
     payload: LedgerReopenedPayload,
   }),
+  // Fork: Investigate mode's record on the ledger changed.
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("ledger.investigation.updated"),
+    payload: LedgerInvestigationUpdatedPayload,
+  }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("checkpoint-scope.created"),
@@ -2852,6 +2864,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("ledger.investigation.updated"),
+    payload: LedgerInvestigationUpdatedPayloadJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("checkpoint-scope.created"),
     payload: OrchestrationV2CheckpointScopeJson,
   }),
@@ -3488,6 +3505,9 @@ const OrchestrationV2InternalCommand = Schema.Union([
   LedgerVerdictRecordCommand,
   LedgerJudgementAbandonCommand,
   LedgerJudgementStartedCommand,
+  // Fork: Investigate mode; clients reach these only through the investigation RPCs.
+  LedgerInvestigationStartCommand,
+  LedgerInvestigationEndCommand,
   /**
    * Internal so no client can mark a request saved without the value being
    * stored.
@@ -3520,6 +3540,8 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getTaskRetro: "orchestration.getTaskRetro",
   runTaskRetro: "orchestration.runTaskRetro",
   resolveTaskRetro: "orchestration.resolveTaskRetro",
+  startInvestigation: "orchestration.startInvestigation",
+  stopInvestigation: "orchestration.stopInvestigation",
   searchThread: "orchestration.searchThread",
   searchThreadStream: "orchestration.searchThreadStream",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",

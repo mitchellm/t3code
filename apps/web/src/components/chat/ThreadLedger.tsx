@@ -21,6 +21,7 @@ import { useThreadLedgerIfSupported } from "~/hooks/useThreadLedgerIfSupported";
 import { Badge } from "../ui/badge";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { ThreadTabSection } from "../thread/ThreadOverviewTab";
+import { InvestigationPanel } from "./InvestigationPanel";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 
 const ITEM_STATUS_PRESENTATION: Record<
@@ -212,6 +213,7 @@ export function ThreadLedgerDetailsSection({ threadRef }: { threadRef: ScopedThr
   if (ledger === null) return null;
   return (
     <ThreadDetailsSection headingId="thread-details-ledger-heading" title="Task ledger">
+      <InvestigationPanel threadRef={threadRef} ledger={ledger} />
       <ThreadLedgerView ledger={ledger} />
     </ThreadDetailsSection>
   );
@@ -223,6 +225,7 @@ export function ThreadLedgerOverviewSection({ threadRef }: { threadRef: ScopedTh
   if (ledger === null) return null;
   return (
     <ThreadTabSection title="Task ledger">
+      <InvestigationPanel threadRef={threadRef} ledger={ledger} />
       <ThreadLedgerView ledger={ledger} />
     </ThreadTabSection>
   );

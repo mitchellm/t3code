@@ -296,6 +296,7 @@ import {
   usePreparingComposerImages,
 } from "./preparingComposerImages";
 import { ComposerControlsBar } from "./ComposerControlsBar";
+import { ComposerInvestigateFields } from "./ComposerInvestigate";
 import { composerCommandKeyHandler } from "./composerCommandKey";
 
 function consumePasteAsTextShortcut(deadline: { current: number }): boolean {
@@ -3748,6 +3749,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onRemove={onRemoveEditingQueuedAttachment}
                   />
                 )}
+
+              {routeKind === "server" ? (
+                <ComposerInvestigateFields
+                  environmentId={environmentId}
+                  threadId={routeThreadRef.threadId}
+                />
+              ) : null}
 
               {composerAttachmentMediaRow}
 

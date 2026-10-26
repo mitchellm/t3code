@@ -217,5 +217,11 @@ export function applyLedgerEvent(
       return { ...ledger, closedAt: event.payload.closedAt, updatedAt: event.payload.updatedAt };
     case "ledger.reopened":
       return { ...ledger, closedAt: null, updatedAt: event.payload.updatedAt };
+    case "ledger.investigation.updated":
+      return {
+        ...ledger,
+        investigation: event.payload.investigation,
+        updatedAt: event.payload.updatedAt,
+      };
   }
 }
