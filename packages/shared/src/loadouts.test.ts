@@ -15,8 +15,11 @@ import {
   decideThreadLoadout,
   loadoutDelegationTarget,
   loadoutHasJudge,
+  loadoutRequiresJudge,
+  loadoutRoleCandidates,
   loadoutRoleTarget,
   loadoutStructure,
+  matchRoleCandidate,
   parseJudgeVerdict,
   resolveLoadout,
   withSolo,
@@ -239,6 +242,60 @@ describe("loadoutDelegationTarget", () => {
 
   it("inherits when the role's instance is not available", () => {
     expect(loadoutDelegationTarget(org, "worker", [])).toBeUndefined();
+  });
+});
+
+describe("loadoutRequiresJudge", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const crossCheck = resolveLoadout(DEFAULT_LOADOUTS, "cross-check");
+  const registered =
+    (...ids: ReadonlyArray<string>) =>
+    (instanceId: string) =>
+      ids.includes(instanceId);
+
+  it("is true for a configured judge whatever the provider probes say (boot window)", () => {
+    // Only registration and project enablement are asked; install state and model lists never are,
+    // so a snapshot that has not been probed yet cannot switch judging off for a whole ledger.
+    expect(loadoutRequiresJudge(crossCheck, registered("codex", "claudeAgent"))).toBe(true);
+    expect(loadoutRequiresJudge(crossCheck, registered("claudeAgent"))).toBe(true);
+    expect(loadoutRequiresJudge(crossCheck, registered("codex"))).toBe(true);
+  });
+
+  it("is false with no judge role, or when neither the judge nor its fallback can ever run", () => {
+    expect(loadoutRequiresJudge(resolveLoadout(DEFAULT_LOADOUTS, "solo"), () => true)).toBe(false);
+    expect(loadoutRequiresJudge(crossCheck, registered("other"))).toBe(false);
+    expect(loadoutRequiresJudge(crossCheck, () => false)).toBe(false);
+  });
+
+  it("keeps the codex id as the primary judge", () => {
+    expect(crossCheck.roles.judge?.instanceId).toBe(codex);
+  });
+});
+
+describe("judgeCandidateTargets", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const role: LoadoutRole = {
+    instanceId: codex,
+    model: "gpt-6.1-sol",
+    fallback: { instanceId: claude, model: "claude-opus-5-5" },
+  };
+
+  it("lists the primary then the fallback, ignoring live provider state", () => {
+    expect(loadoutRoleCandidates(role)).toEqual([
+      { providerInstanceId: codex, model: "gpt-6.1-sol" },
+      { providerInstanceId: claude, model: "claude-opus-5-5" },
+    ]);
+    expect(loadoutRoleCandidates(sonnet)).toHaveLength(1);
+  });
+
+  it("accepts the judge that really ran, even if the primary has since become available", () => {
+    // The judge started on the Opus fallback while Codex was unprobed; Codex then came up.
+    expect(
+      matchRoleCandidate(role, { instanceId: claude, model: "claude-opus-5-5" }),
+    ).toMatchObject({ providerInstanceId: claude });
+    expect(matchRoleCandidate(role, { instanceId: claude, model: "claude-haiku-5-5" })).toBe(
+      undefined,
+    );
   });
 });
 

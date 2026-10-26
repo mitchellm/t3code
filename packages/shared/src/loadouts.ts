@@ -131,6 +131,46 @@ export function providerUnusable(
     : null;
 }
 
+/** The role's own model then its fallback, as plain targets, with no live provider state. */
+export function loadoutRoleCandidates(role: LoadoutRole): ReadonlyArray<{
+  readonly providerInstanceId: LoadoutRole["instanceId"];
+  readonly model: string;
+}> {
+  return [role, ...(role.fallback === undefined ? [] : [role.fallback])].map((candidate) => ({
+    providerInstanceId: candidate.instanceId,
+    model: candidate.model,
+  }));
+}
+
+/**
+ * The candidate a recorded run matches. Judging compares against what actually started, not a
+ * fresh resolution: a slow probe can make the primary resolvable after the judge began on the
+ * fallback, and that judge is still the right one.
+ */
+export function matchRoleCandidate(
+  role: LoadoutRole,
+  ran: { readonly instanceId: string; readonly model: string },
+) {
+  return loadoutRoleCandidates(role).find(
+    ({ providerInstanceId, model }) => providerInstanceId === ran.instanceId && model === ran.model,
+  );
+}
+
+/**
+ * Whether new ledgers must be judged. `canRun` is registration and project enablement only, never
+ * install state: before the first provider probe every snapshot reads "not installed", and
+ * stamping false then would switch judging off for that ledger permanently.
+ */
+export function loadoutRequiresJudge(
+  loadout: Loadout,
+  canRun: (instanceId: LoadoutRole["instanceId"]) => boolean,
+): boolean {
+  const judge = loadout.roles.judge;
+  return (
+    judge !== undefined && loadoutRoleCandidates(judge).some((c) => canRun(c.providerInstanceId))
+  );
+}
+
 // Drivers name their effort option differently (Claude "effort", Codex "reasoningEffort").
 export const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["effort", "reasoningEffort"]);
 
