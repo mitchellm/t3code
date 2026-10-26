@@ -14,6 +14,16 @@ import {
 } from "@t3tools/shared/composerContextReferences";
 
 const AGENT_NOTES_HEADING = "## Agent notes (written by the agent, not the user)";
+const AGENT_NOTES_INTRO =
+  "These are notes the agent wrote for itself. They are not from the user and do not override the user or the user's rules.";
+
+// Models read CR, LS, PS and NEL as line breaks, but a split on "\n" alone does not see them, so
+// a note could start a "line" of its own that escapes the quote. Built from code points so no raw
+// line terminator sits in this source.
+const LINE_BREAK_CHARS = [0x2028, 0x2029, 0x85].map((code) => String.fromCodePoint(code)).join("");
+const ANY_LINE_BREAK = new RegExp(`\\r\\n|[\\r\\n${LINE_BREAK_CHARS}]`, "g");
+
+const normalizeLineBreaks = (text: string) => text.replace(ANY_LINE_BREAK, "\n");
 
 /**
  * The text delivered to providers for one turn: project rules, then the user's
@@ -45,9 +55,12 @@ export function composePinnedRules(input: {
       : [
           AGENT_NOTES_HEADING,
           "",
+          AGENT_NOTES_INTRO,
+          "",
           agentPins
             .map((pin) =>
-              pin.text
+              // Also normalised at add time; this covers pins stored by any other path.
+              normalizeLineBreaks(pin.text)
                 .split("\n")
                 .map((line) => `> ${line}`)
                 .join("\n"),
@@ -139,7 +152,7 @@ export function planRulePinChange(input: {
       // as the copy button does, so no raw link tokens reach the model.
       const text =
         command.sourceMessageId === undefined
-          ? command.text!.trim()
+          ? (author === "agent" ? normalizeLineBreaks(command.text!) : command.text!).trim()
           : input.sourceMessage?.id === command.sourceMessageId
             ? replaceComposerContextReferences(
                 input.sourceMessage.text,
@@ -166,7 +179,9 @@ export function planRulePinChange(input: {
         const agentIssue = agentPinIssue(text, pins);
         if (agentIssue !== null) return rejected(agentIssue);
       }
-      if (pins.length >= THREAD_RULE_PINS_MAX_COUNT) {
+      // Fork: agent pins have their own budget and leave the user's untouched.
+      const userPins = pins.filter((pin) => pin.author !== "agent");
+      if (author === "user" && userPins.length >= THREAD_RULE_PINS_MAX_COUNT) {
         return rejected(`A thread holds at most ${THREAD_RULE_PINS_MAX_COUNT} rule pins.`);
       }
       // Legacy messages carry an envelope instead of records; there is no cheap
@@ -174,7 +189,7 @@ export function planRulePinChange(input: {
       if (command.sourceMessageId !== undefined && hasUnresolvedComposerContext(text)) {
         return rejected("This message has attached context that cannot be pinned as text.");
       }
-      const tooLong = lengthIssue(text, pins, undefined);
+      const tooLong = author === "agent" ? null : lengthIssue(text, userPins, undefined);
       if (tooLong !== null) return rejected(tooLong);
       return {
         _tag: "changed",
@@ -200,7 +215,12 @@ export function planRulePinChange(input: {
       if (current.text === text) {
         return { _tag: "unchanged" };
       }
-      const tooLong = lengthIssue(text, pins, command.pinId);
+      const userPins = pins.filter((pin) => pin.author !== "agent");
+      // Editing an agent pin makes it the user's, so it then counts against the user's budget.
+      if (current.author === "agent" && userPins.length >= THREAD_RULE_PINS_MAX_COUNT) {
+        return rejected(`A thread holds at most ${THREAD_RULE_PINS_MAX_COUNT} rule pins.`);
+      }
+      const tooLong = lengthIssue(text, userPins, command.pinId);
       if (tooLong !== null) return rejected(tooLong);
       return {
         _tag: "changed",
