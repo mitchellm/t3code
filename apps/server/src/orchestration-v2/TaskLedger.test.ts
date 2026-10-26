@@ -758,6 +758,27 @@ it.effect("keeps the shell's ledger progress current, leaving dropped items out 
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("reads the shell's ledger progress inside the read step, not while decoding", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* createThread("shell-progress-read-step");
+    yield* createLedger(threadId, { items: ["a", "b"] });
+
+    // `readShellSnapshot` returns the decode step separately because the caller runs the read
+    // in a read-only transaction and decodes after it. A ledger change landing between the two
+    // must not show up, which proves the ledger rows were read in the first step.
+    const decode = yield* projections.readShellSnapshot();
+    yield* updateItem(threadId, "a", { status: "closed", evidence: "done" });
+    const snapshot = yield* decode;
+
+    assert.deepEqual(snapshot.threads.find((thread) => thread.id === threadId)?.ledgerProgress, {
+      closed: 0,
+      open: 2,
+      total: 2,
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
 const setLoadout = (threadId: ThreadId, loadout: ThreadLoadout | null) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

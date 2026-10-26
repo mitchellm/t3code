@@ -97,8 +97,8 @@ function OverviewTableRow({ row, nowMs }: { row: ThreadOverviewRow; nowMs: numbe
 
 export function OverviewPage() {
   const shells = useThreadShells();
-  // Read once per visit: the Date only decides which rows may open a ledger stream and the
-  // relative labels, and a clock that ticked would re-render every row.
+  // Read once per visit: the clock only feeds the relative labels, and one that ticked would
+  // re-render every row.
   const [nowMs] = useState(() => Date.now());
   const rows = deriveThreadOverviewRows(shells);
 
