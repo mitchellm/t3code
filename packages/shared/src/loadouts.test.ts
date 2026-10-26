@@ -15,8 +15,11 @@ import {
   decideThreadLoadout,
   loadoutDelegationTarget,
   loadoutHasJudge,
+  loadoutRequiresJudge,
+  loadoutRoleCandidates,
   loadoutRoleTarget,
   loadoutStructure,
+  matchRoleCandidate,
   parseJudgeVerdict,
   resolveLoadout,
   withSolo,
@@ -242,6 +245,60 @@ describe("loadoutDelegationTarget", () => {
   });
 });
 
+describe("loadoutRequiresJudge", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const crossCheck = resolveLoadout(DEFAULT_LOADOUTS, "cross-check");
+  const registered =
+    (...ids: ReadonlyArray<string>) =>
+    (instanceId: string) =>
+      ids.includes(instanceId);
+
+  it("is true for a configured judge whatever the provider probes say (boot window)", () => {
+    // Only registration and project enablement are asked; install state and model lists never are,
+    // so a snapshot that has not been probed yet cannot switch judging off for a whole ledger.
+    expect(loadoutRequiresJudge(crossCheck, registered("codex", "claudeAgent"))).toBe(true);
+    expect(loadoutRequiresJudge(crossCheck, registered("claudeAgent"))).toBe(true);
+    expect(loadoutRequiresJudge(crossCheck, registered("codex"))).toBe(true);
+  });
+
+  it("is false with no judge role, or when neither the judge nor its fallback can ever run", () => {
+    expect(loadoutRequiresJudge(resolveLoadout(DEFAULT_LOADOUTS, "solo"), () => true)).toBe(false);
+    expect(loadoutRequiresJudge(crossCheck, registered("other"))).toBe(false);
+    expect(loadoutRequiresJudge(crossCheck, () => false)).toBe(false);
+  });
+
+  it("keeps the codex id as the primary judge", () => {
+    expect(crossCheck.roles.judge?.instanceId).toBe(codex);
+  });
+});
+
+describe("judgeCandidateTargets", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const role: LoadoutRole = {
+    instanceId: codex,
+    model: "gpt-6.1-sol",
+    fallback: { instanceId: claude, model: "claude-opus-5-5" },
+  };
+
+  it("lists the primary then the fallback, ignoring live provider state", () => {
+    expect(loadoutRoleCandidates(role)).toEqual([
+      { providerInstanceId: codex, model: "gpt-6.1-sol" },
+      { providerInstanceId: claude, model: "claude-opus-5-5" },
+    ]);
+    expect(loadoutRoleCandidates(sonnet)).toHaveLength(1);
+  });
+
+  it("accepts the judge that really ran, even if the primary has since become available", () => {
+    // The judge started on the Opus fallback while Codex was unprobed; Codex then came up.
+    expect(
+      matchRoleCandidate(role, { instanceId: claude, model: "claude-opus-5-5" }),
+    ).toMatchObject({ providerInstanceId: claude });
+    expect(matchRoleCandidate(role, { instanceId: claude, model: "claude-haiku-5-5" })).toBe(
+      undefined,
+    );
+  });
+});
+
 describe("loadoutRoleTarget", () => {
   it("targets the role's instance and model and maps effort onto the advertised option", () => {
     expect(loadoutRoleTarget(sonnet, [provider(claude, ["claude-sonnet-5-5"])])).toEqual({
@@ -255,6 +312,76 @@ describe("loadoutRoleTarget", () => {
     expect(
       loadoutRoleTarget({ ...sonnet, effort: "xhigh" }, [provider(claude, ["claude-sonnet-5-5"])]),
     ).toEqual({ providerInstanceId: claude, model: "claude-sonnet-5-5" });
+  });
+
+  describe("fallback", () => {
+    const codex = ProviderInstanceId.make("codex");
+    const judge: LoadoutRole = {
+      instanceId: codex,
+      model: "gpt-6.1-sol",
+      fallback: { instanceId: claude, model: "claude-sonnet-5-5", effort: "high" },
+    };
+
+    it("prefers the role itself when it resolves", () => {
+      expect(
+        loadoutRoleTarget(judge, [
+          provider(codex, ["gpt-6.1-sol"]),
+          provider(claude, ["claude-sonnet-5-5"]),
+        ]),
+      ).toEqual({ providerInstanceId: codex, model: "gpt-6.1-sol" });
+    });
+
+    it("uses the fallback when the instance or the model is missing", () => {
+      const expected = {
+        providerInstanceId: claude,
+        model: "claude-sonnet-5-5",
+        options: [{ id: "effort", value: "high" }],
+      };
+      expect(loadoutRoleTarget(judge, [provider(claude, ["claude-sonnet-5-5"])])).toEqual(expected);
+      expect(
+        loadoutRoleTarget(judge, [
+          provider(codex, ["gpt-6-astra"]),
+          provider(claude, ["claude-sonnet-5-5"]),
+        ]),
+      ).toEqual(expected);
+    });
+
+    it("treats a disabled instance as missing", () => {
+      const disabled = { ...provider(codex, ["gpt-6.1-sol"]), enabled: false };
+      expect(
+        loadoutRoleTarget(judge, [disabled, provider(claude, ["claude-sonnet-5-5"])]),
+      ).toMatchObject({ providerInstanceId: claude });
+      expect(loadoutRoleTarget({ instanceId: codex, model: "gpt-6.1-sol" }, [disabled])).toBe(
+        undefined,
+      );
+    });
+
+    it("treats an enabled but not installed instance with no models as missing", () => {
+      // What Codex reports with no CLI on the machine: registered, enabled, nothing to list.
+      const notInstalled = { instanceId: codex, enabled: true, installed: false, models: [] };
+      expect(
+        loadoutRoleTarget(judge, [notInstalled, provider(claude, ["claude-sonnet-5-5"])]),
+      ).toMatchObject({ providerInstanceId: claude });
+      expect(loadoutRoleTarget({ instanceId: codex, model: "gpt-6.1-sol" }, [notInstalled])).toBe(
+        undefined,
+      );
+    });
+
+    it("still trusts an installed provider that lists no models", () => {
+      const quiet = { instanceId: codex, enabled: true, installed: true, models: [] };
+      expect(loadoutRoleTarget(judge, [quiet])).toMatchObject({ providerInstanceId: codex });
+    });
+
+    it("is undefined when neither resolves, and never silently the thread's model", () => {
+      expect(loadoutRoleTarget(judge, [])).toBeUndefined();
+    });
+
+    it("resolves through loadoutDelegationTarget for the judge role", () => {
+      const loadout: Loadout = { id: "x", name: "X", description: "", roles: { judge } };
+      expect(
+        loadoutDelegationTarget(loadout, "judge", [provider(claude, ["claude-sonnet-5-5"])]),
+      ).toMatchObject({ providerInstanceId: claude });
+    });
   });
 
   it("degrades to undefined when the instance or model is missing", () => {

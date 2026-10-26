@@ -71,7 +71,7 @@ import {
 } from "@t3tools/contracts";
 import {
   decideThreadLoadout,
-  loadoutHasJudge,
+  loadoutRequiresJudge,
   resolveLoadout,
   withSolo,
 } from "@t3tools/shared/loadouts";
@@ -11773,12 +11773,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               resolveProjectSettings(settings, thread.projectId).settings.loadouts,
               thread.loadout?.id,
             );
-            const judge = loadout.roles.judge;
-            if (!loadoutHasJudge(loadout) || judge === undefined) return false;
             const adapterIds = yield* providerAdapters.list();
-            return (
-              adapterIds.includes(judge.instanceId) &&
-              resolveProjectProviderInstanceEnabled(settings, thread.projectId, judge.instanceId)
+            // Fork: configuration only, never live install state (see loadoutRequiresJudge).
+            return loadoutRequiresJudge(
+              loadout,
+              (instanceId) =>
+                adapterIds.some((id) => id === instanceId) &&
+                resolveProjectProviderInstanceEnabled(settings, thread.projectId, instanceId),
             );
           })
         : undefined;

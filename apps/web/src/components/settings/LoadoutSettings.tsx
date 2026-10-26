@@ -61,6 +61,7 @@ const ROLE_LABELS: Record<LoadoutRoleName, string> = {
 const ISSUE_LABELS: Record<LoadoutRoleIssueKind, string> = {
   missing_instance: "Provider not found",
   disabled_instance: "Provider disabled",
+  not_installed: "Provider CLI not installed",
   missing_model: "Model not offered",
 };
 
@@ -107,6 +108,7 @@ function RoleRow(props: {
           entries.map((candidate) => ({
             instanceId: candidate.instanceId,
             enabled: candidate.enabled && candidate.isAvailable,
+            installed: candidate.installed,
             models: candidate.models,
           })),
         );

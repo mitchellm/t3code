@@ -61,10 +61,15 @@ export function newRoleDefault(
     : { instanceId: entry.instanceId, model: model.slug };
 }
 
-const sameRole = (a: LoadoutRole | undefined, b: LoadoutRole | undefined) =>
-  a === undefined || b === undefined
-    ? a === b
-    : a.instanceId === b.instanceId && a.model === b.model && a.effort === b.effort;
+function sameRole(a: LoadoutRole | undefined, b: LoadoutRole | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return (
+    a.instanceId === b.instanceId &&
+    a.model === b.model &&
+    a.effort === b.effort &&
+    sameRole(a.fallback, b.fallback)
+  );
+}
 
 /** Role by role over the known roles, so stored key order never matters. */
 export const sameRoles = (a: Loadout, b: Loadout) =>
@@ -165,5 +170,6 @@ export function roleAfterModelChange(
     instanceId,
     model: modelSlug,
     ...(keep && previous?.effort !== undefined ? { effort: previous.effort } : {}),
+    ...(previous?.fallback === undefined ? {} : { fallback: previous.fallback }),
   };
 }
