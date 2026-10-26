@@ -72,7 +72,7 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. Under a loadout, pass `role` (worker, explorer, subPlanner, judge) without a target to run the child on that role's model; an explicit target wins, and an unassigned role inherits your model.",
+    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`; a worker or subPlanner role gets one by default in a git repo, `isolation:'none'` opts out. Keep `taskId` for `task_status` and `task_cancel`. Under a loadout, pass `role` (worker, explorer, subPlanner, judge) without a target to run the child on that role's model; an explicit target wins, and an unassigned role inherits your model.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,

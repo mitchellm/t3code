@@ -13,7 +13,6 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
-  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type OrchestrationV2TurnItem,
   OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesInput,
@@ -72,6 +71,7 @@ import {
   isOrchestrationV2WorkActive,
 } from "@t3tools/contracts";
 import { loadoutDelegationTarget, resolveLoadout, withSolo } from "@t3tools/shared/loadouts";
+import { isolationReport, resolveDelegationWorkspace } from "./WorkerIsolation.ts";
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -2259,36 +2259,17 @@ const make = Effect.gen(function* () {
         parent.thread.interactionMode,
         input.interactionMode,
       );
-      let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
-      if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
-        const project = yield* requireProject(parent.thread.projectId);
-        const base = yield* gitDriver
-          .resolveCommit({
-            cwd: parent.thread.worktreePath ?? project.workspaceRoot,
-            revision: "HEAD",
-          })
-          .pipe(
-            Effect.mapError(() =>
-              failure("invalid_request", "Unable to resolve the parent checkout commit."),
-            ),
-          );
-        // Launch preparation creates the worktree from the project root, so a
-        // parent checkout in another repository (such as a Git folder inside
-        // Scratch) would hand it a commit it cannot find.
-        if (parent.thread.worktreePath !== null) {
-          yield* gitDriver
-            .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
-            .pipe(
-              Effect.mapError(() =>
-                failure(
-                  "invalid_request",
-                  `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
-                ),
-              ),
-            );
-        }
-        workspaceStrategy = { type: "worktree", baseRef: base.commitSha, startFromOrigin: false };
-      }
+      // Fork: editing roles get a worktree by default (see WorkerIsolation).
+      const workspace = isRetryOfAcceptedDelegation
+        ? undefined
+        : yield* resolveDelegationWorkspace({
+            delegation: input,
+            thread: parent.thread,
+            activeLoadout: loadLoadouts(parent.thread).pipe(Effect.map(({ active }) => active)),
+            requireProject,
+            git: gitDriver,
+          });
+      const workspaceStrategy = workspace?.strategy;
       // ThreadManagementService.dispatch is the chokepoint for this command
       // type's own enablement check, using the same command id and its
       // receipt-replay exemption, so no separate assert runs here.
@@ -2355,8 +2336,9 @@ const make = Effect.gen(function* () {
         });
       }
 
+      const report = isolationReport(workspace);
       if (input.mode !== "wait") {
-        return yield* readTask(scope, taskId, false, true);
+        return { ...(yield* readTask(scope, taskId, false, true)), ...report };
       }
       const timeoutMs = Math.min(
         MAX_WAIT_TIMEOUT_MS,
@@ -2364,7 +2346,7 @@ const make = Effect.gen(function* () {
       );
       const waited = yield* waitForTask(scope, taskId, timeoutMs);
       if (Option.isSome(waited) && isTerminalTaskStatus(waited.value.status)) {
-        return waited.value;
+        return { ...waited.value, ...report };
       }
       // An incomplete wait gives up delivery: upgrade so a later terminal
       // wakes the parent even mid-turn.
@@ -2399,7 +2381,7 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
-      return yield* readTask(scope, taskId, Option.isNone(waited), true);
+      return { ...(yield* readTask(scope, taskId, Option.isNone(waited), true)), ...report };
     }),
     proposeLoadout: Effect.fn("OrchestratorMcpService.proposeLoadout")(
       function* (callerScope, input) {

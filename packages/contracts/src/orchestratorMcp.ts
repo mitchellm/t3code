@@ -159,9 +159,9 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(
-    Schema.Literals(["shared", "worktree"]).annotate({
+    Schema.Literals(["shared", "worktree", "none"]).annotate({
       description:
-        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
+        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out. Under a loadout, a worker or subPlanner role gets a worktree automatically in a git repo; 'none' (same as 'shared') opts out.",
     }),
   ),
   mode: Schema.optional(
@@ -220,6 +220,12 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
     description: "True only on the timed-out wait call. The child keeps running.",
   }),
   next: Schema.optional(OrchestratorMcpRunningTaskNext),
+  isolation: Schema.optional(Schema.Literals(["worktree", "shared"])).annotate({
+    description: "Which checkout the child got. Absent when replaying an accepted request.",
+  }),
+  isolationNote: Schema.optional(Schema.String).annotate({
+    description: "Why a defaulted worktree fell back to your checkout.",
+  }),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 
