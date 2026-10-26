@@ -38,8 +38,18 @@ describe("loadout settings", () => {
       "solo",
       "planner-workers-judge",
       "read-only-sweep",
+      "opus-blowout",
+      "blitz",
+      "napalm",
+      "haiku-workers",
     ]);
     expect(DEFAULT_LOADOUTS[1]?.roles.judge?.model).toBe("claude-opus-5-5");
+  });
+
+  it("decodes a settings file that stored the presets, and a project override of them", () => {
+    const stored = JSON.parse(JSON.stringify(DEFAULT_LOADOUTS)) as unknown;
+    expect(decodeServerSettings({ loadouts: stored }).loadouts).toEqual(DEFAULT_LOADOUTS);
+    expect(decodeProjectOverrides({ loadouts: stored }).loadouts).toEqual(DEFAULT_LOADOUTS);
   });
 
   it("accepts loadouts in a settings patch and a project override", () => {

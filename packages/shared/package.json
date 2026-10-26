@@ -247,6 +247,10 @@
       "types": "./src/loadouts.ts",
       "import": "./src/loadouts.ts"
     },
+    "./loadoutSummary": {
+      "types": "./src/loadoutSummary.ts",
+      "import": "./src/loadoutSummary.ts"
+    },
     "./taskLedger": {
       "types": "./src/taskLedger.ts",
       "import": "./src/taskLedger.ts"
