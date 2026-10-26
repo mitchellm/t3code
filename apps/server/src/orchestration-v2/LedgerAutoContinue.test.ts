@@ -274,6 +274,36 @@ it.effect("enqueues one follow-up naming the open items after a completed run", 
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("lists actionable items before blocked ones and leaves deferred items out", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("actionable", []);
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "ledger.create",
+      commandId: CommandId.make(nextId("ledger")),
+      threadId,
+      ledgerId,
+      title: "Ship it",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: [
+        // Listed first in the ledger, but it waits on b.
+        { id: itemId("a"), title: "Item a", acceptance: "a works", blockedBy: [itemId("b")] },
+        { id: itemId("b"), title: "Item b", acceptance: "b works" },
+        { id: itemId("d"), title: "Item d", acceptance: "d works", deferReason: "next task" },
+      ],
+    });
+    yield* sendUserMessage(threadId);
+    yield* completeLatest(threadId);
+
+    const message = (yield* autoContinues(threadId))[0]!;
+    assert.isBelow(message.text.indexOf("item:b"), message.text.indexOf("item:a"));
+    assert.include(message.text, "blocked by item:b");
+    assert.notInclude(message.text, "item:d");
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("does nothing for a replayed finalization of the same run", () =>
   Effect.gen(function* () {
     const threadId = yield* setup("replay");

@@ -237,7 +237,7 @@ it.effect("maps orchestrator rejections to clear tool errors and applies valid t
       });
       expect(failureOf(yield* call("ledger_update_item", { itemId: "L1" }))).toMatchObject({
         code: "invalid_request",
-        message: "Pass status, evidence or dropReason to update.",
+        message: "Pass status, evidence, a reason, blockedBy or parentItemId to update.",
       });
       expect(failureOf(yield* call("ledger_close", {}))).toMatchObject({
         message: expect.stringContaining("items still open or in progress: L1, L2"),
@@ -270,6 +270,95 @@ it.effect("maps orchestrator rejections to clear tool errors and applies valid t
     }),
   );
 });
+
+it.effect("takes blockers, sub-items and deferral, and reads them back in tree order", () => {
+  const fake = makeFakeThreads();
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      const created = yield* call("ledger_create", {
+        title: "Ship",
+        items: [
+          { id: "L1", title: "Parser", acceptance: "tests" },
+          { id: "L2", title: "CLI", acceptance: "smoke", blockedBy: ["L1"] },
+          { id: "L1.a", title: "Lexer", acceptance: "tests", parentItemId: "L1" },
+        ],
+      });
+      expect(failureOf(created)).toBeUndefined();
+      const added = yield* call("ledger_add_items", {
+        items: [{ id: "L3", title: "Plugin API", acceptance: "", deferReason: "Out of scope" }],
+      });
+      expect(failureOf(added)).toBeUndefined();
+      expect(
+        failureOf(yield* call("ledger_update_item", { itemId: "L2", status: "in_progress" })),
+      ).toMatchObject({ message: expect.stringContaining("blocked by L1") });
+
+      const read = yield* call("ledger_read", {});
+      expect(read.structuredContent).toMatchObject({
+        ledger: {
+          counts: { open: 3, deferred: 1 },
+          unfinished: 3,
+          items: [
+            { id: "L1", depth: 0, parentItemId: null, waitingOn: [] },
+            { id: "L1.a", depth: 1, parentItemId: "L1" },
+            { id: "L2", depth: 0, blockedBy: ["L1"], waitingOn: ["L1"] },
+            { id: "L3", status: "deferred", deferReason: "Out of scope" },
+          ],
+        },
+      });
+
+      const moved = yield* call("ledger_update_item", { itemId: "L1.a", parentItemId: null });
+      expect(failureOf(moved)).toBeUndefined();
+      const deferred = yield* call("ledger_update_item", {
+        itemId: "L2",
+        status: "deferred",
+        deferReason: "Next task",
+      });
+      expect(deferred.structuredContent).toMatchObject({ ledger: { counts: { deferred: 2 } } });
+    }),
+  );
+});
+
+it.effect(
+  "turns a close on a judged ledger into a judge request the agent cannot set aside",
+  () => {
+    const fake = makeFakeThreads();
+    return withServer(fake, (call) =>
+      Effect.gen(function* () {
+        yield* call("ledger_create", { title: "Ship", items: twoItems });
+        // The orchestrator stamps the gate from the loadout; the fake planner reads it from here.
+        fake.ledgers.set(ownThread, { ...fake.ledgers.get(ownThread)!, requiresJudge: true });
+
+        const closing = yield* call("ledger_update_item", {
+          itemId: "L1",
+          status: "closed",
+          evidence: "parser.test.ts: 12 passed",
+        });
+        expect(failureOf(closing)).toBeUndefined();
+        expect(closing.structuredContent).toMatchObject({
+          ledger: {
+            items: expect.arrayContaining([
+              expect.objectContaining({ id: "L1", status: "in_progress", judging: true }),
+            ]),
+          },
+        });
+        // Asking again while it is judged changes nothing and does not fail.
+        const again = yield* call("ledger_update_item", { itemId: "L1", status: "closed" });
+        expect(failureOf(again)).toBeUndefined();
+        // Work the agent started on a judged ledger is the user's to set aside.
+        yield* call("ledger_update_item", { itemId: "L2", status: "in_progress" });
+        expect(
+          failureOf(
+            yield* call("ledger_update_item", {
+              itemId: "L2",
+              status: "dropped",
+              dropReason: "too hard",
+            }),
+          ),
+        ).toMatchObject({ message: expect.stringContaining("ask the user") });
+      }),
+    );
+  },
+);
 
 it.effect("rejects a caller outside a thread and a credential without orchestration", () =>
   withServer(makeFakeThreads(), (call) =>

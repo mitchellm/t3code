@@ -14,6 +14,7 @@ import {
   decideLedgerAutoContinue,
   LEDGER_AUTO_CONTINUE_CAP,
   type LedgerAutoContinueDecision,
+  partitionLedgerFollowUp,
 } from "@t3tools/shared/taskLedger";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -56,12 +57,20 @@ function continuationText(
   open: ReadonlyArray<Ledger["items"][number]>,
   round: number,
 ): string {
-  const lines = open.map(
-    (item) => `- ${item.id} [${item.status}] ${item.title}\n  Acceptance: ${item.acceptance}`,
+  // Actionable work leads, so a long ledger does not bury it under items nobody can start yet.
+  const { actionable, waiting } = partitionLedgerFollowUp(ledger, open);
+  const actionableLines = actionable.map(
+    ({ item }) => `- ${item.id} [${item.status}] ${item.title}\n  Acceptance: ${item.acceptance}`,
+  );
+  const waitingLines = waiting.map(({ item, waitingOn }) =>
+    item.judging === true
+      ? `- ${item.id} ${item.title}: being judged`
+      : `- ${item.id} ${item.title}: blocked by ${waitingOn.join(", ")}`,
   );
   return [
-    `The task ledger "${ledger.title}" still has ${open.length} open ${open.length === 1 ? "item" : "items"} (automatic follow-up ${round}). Continue working through them. Close an item with evidence once its acceptance holds, or drop it with a reason if it no longer applies.`,
-    ...lines,
+    `The task ledger "${ledger.title}" still has ${open.length} open ${open.length === 1 ? "item" : "items"} (automatic follow-up ${round}). Continue working through them. Close an item with evidence once its acceptance holds, or drop it with a reason if it no longer applies. Add work you discover as items; defer out-of-scope work instead of doing it.`,
+    ...actionableLines,
+    ...(waitingLines.length === 0 ? [] : ["Waiting, not actionable yet:", waitingLines.join("\n")]),
   ].join("\n\n");
 }
 

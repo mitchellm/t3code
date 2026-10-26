@@ -46,6 +46,7 @@ import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as LedgerAutoContinue from "./LedgerAutoContinue.ts";
+import * as LedgerJudgeRunner from "./LedgerJudgeRunner.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
@@ -325,6 +326,8 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
       layerRuntimeRequestServiceProvided,
       layerThreadTitleRegenerationProvided,
       layerThreadManagementProvided,
+      // Fork: memoized, so the server binds the same instance it exports below.
+      LedgerJudgeRunner.layerLateBound,
     ),
   ),
 );
@@ -365,6 +368,7 @@ export const layer = Layer.mergeAll(
   layerProviderRuntimeRecoveryProvided,
   layerProjectionMaintenanceProvided,
   layerLegacyV1ThreadImporterProvided,
+  LedgerJudgeRunner.layerLateBound,
 );
 
 export const layerProduction = Layer.mergeAll(

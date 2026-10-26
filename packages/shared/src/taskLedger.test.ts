@@ -251,6 +251,33 @@ describe("decideLedgerAutoContinue", () => {
     ).toBe("continue");
   });
 
+  it("counts a judge's hand-back as progress though the status did not change", () => {
+    const sentWhileJudging = {
+      ...followUp(1, []),
+      notification: {
+        ...followUp(1, []).notification,
+        source: {
+          kind: "ledger_continue" as const,
+          round: 1,
+          items: [
+            { id: LedgerItemId.make("item:a"), status: "in_progress" as const, judging: true },
+          ],
+        },
+      },
+    };
+    // The judge failed it: still in progress, no longer judging, one more verdict.
+    const handedBack = decideLedgerAutoContinue({
+      ledger: withItems(item("a", { status: "in_progress", judgements: 1 })),
+      messages: [userMessage, sentWhileJudging],
+    });
+    expect(handedBack.type).toBe("continue");
+    const unchanged = decideLedgerAutoContinue({
+      ledger: withItems(item("a", { status: "in_progress", judging: true })),
+      messages: [userMessage, sentWhileJudging],
+    });
+    expect(unchanged.type).toBe("stuck");
+  });
+
   it("stays quiet after the user cancels a follow-up, until they speak again", () => {
     const cancelled = { ...followUp(1, [["a", "open"]]), runId: RunId.make("run:cancelled") };
     const cancelledRunIds = new Set(["run:cancelled"]);

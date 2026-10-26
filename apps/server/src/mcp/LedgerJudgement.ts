@@ -89,18 +89,19 @@ function judgementPrompt(ledger: Ledger, item: LedgerItem): string {
   ].join("\n");
 }
 
-/**
- * Runs one judgement and records the verdict itself. The judged agent supplies only an item id:
- * the outcome comes from the judge task's own answer, read here, and is written through the
- * internal verdict command that no client or agent can send. Anything short of a clean judge
- * answer records a failure or nothing, never a pass.
- */
-export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (input: {
-  readonly ledger: Ledger | undefined;
-  readonly itemId: LedgerItemId;
-  readonly ports: JudgementPorts;
-}) {
-  const { ledger, ports } = input;
+interface PreparedJudgement {
+  readonly item: LedgerItem;
+  readonly evidence: string;
+  readonly prompt: string;
+  readonly title: string;
+  readonly keySource: string;
+}
+
+/** Checks there is something to judge and builds the server-owned prompt and delegation key. */
+const prepareJudgement = Effect.fn("LedgerJudgement.prepare")(function* (
+  ledger: Ledger | undefined,
+  itemId: LedgerItemId,
+) {
   if (ledger === undefined) {
     return yield* invalid("This thread has no ledger. Create one with ledger_create first.");
   }
@@ -109,9 +110,9 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
       "This ledger does not require a judge. Judging applies when the ledger is created under a loadout with a judge role.",
     );
   }
-  const item = ledger.items.find(({ id }) => id === input.itemId);
-  if (item === undefined) return yield* invalid(`Unknown item ${input.itemId}.`);
-  if (item.status === "closed" || item.status === "dropped") {
+  const item = ledger.items.find(({ id }) => id === itemId);
+  if (item === undefined) return yield* invalid(`Unknown item ${itemId}.`);
+  if (item.status === "closed" || item.status === "dropped" || item.status === "deferred") {
     return yield* invalid(`Item ${item.id} is ${item.status}. Reopen it before judging it.`);
   }
   const evidence = item.evidence;
@@ -120,16 +121,70 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
       `Item ${item.id} needs evidence before it can be judged. Set it with ledger_update_item.`,
     );
   }
-
   const prompt = judgementPrompt(ledger, item);
-  const run = yield* ports.delegate({
+  return {
+    item,
+    evidence,
     prompt,
     title: `Judge ${item.id}: ${item.title}`,
-    // The attempt count makes a re-ask after a recorded verdict a new delegation, and the prompt
-    // stands in for every field it quotes (titles, acceptance, evidence), so editing any of them
-    // starts a fresh judge instead of rejoining one that holds a stale prompt. A retry after a
-    // timeout with nothing changed still rejoins the running judge.
-    keySource: [ledger.id, item.id, String(item.judgements ?? 0), prompt].join("\u0000"),
+    // Same key, same delegation: a retry rejoins the running judge. The verdict count, the prompt
+    // (every field it quotes) and, while judging, the close request's stamp each start a fresh
+    // one, so a re-ask, an edit or a request after an abandoned judge never joins a stale judge.
+    keySource: [
+      ledger.id,
+      item.id,
+      String(item.judgements ?? 0),
+      prompt,
+      ...(item.judging === true ? [DateTime.formatIso(item.updatedAt)] : []),
+    ].join("\u0000"),
+  } satisfies PreparedJudgement;
+});
+
+/**
+ * Reads the verdict from a finished judge run. A clean judge thread holds exactly the server-built
+ * prompt, run on the model the loadout resolved; anything else (a delegation the agent seeded, a
+ * message sent into the thread, another model) cannot be attributed to the judge, so it fails.
+ */
+const verdictOf = Effect.fn("LedgerJudgement.verdictOf")(function* (
+  prepared: PreparedJudgement,
+  run: JudgeRun,
+  ports: Pick<JudgementPorts, "userMessages">,
+) {
+  const messages = yield* ports.userMessages(run.childThreadId);
+  const tainted =
+    messages.length !== 1 ||
+    messages[0] !== prepared.prompt ||
+    run.judge.instanceId !== run.expectedJudge.instanceId ||
+    run.judge.model !== run.expectedJudge.model;
+  const parsed = tainted ? null : parseJudgeVerdict(run.summary);
+  const verdict: LedgerItemVerdict = {
+    outcome: parsed?.outcome ?? "fail",
+    judge: run.judge,
+    notes: tainted
+      ? "The judge thread was not the one the server started (a different prompt or model, or extra messages), so its answer was not trusted. Recorded as a failure."
+      : (parsed?.notes ??
+        "The judge's answer did not end with a verdict line (VERDICT: PASS or VERDICT: FAIL). Recorded as a failure."),
+    at: yield* DateTime.now,
+  };
+  return verdict;
+});
+
+/**
+ * Runs one judgement and records the verdict itself. The judged agent supplies only an item id:
+ * the outcome comes from the judge task's own answer, read here, and is written through the
+ * internal verdict command that no client or agent can send.
+ */
+export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (input: {
+  readonly ledger: Ledger | undefined;
+  readonly itemId: LedgerItemId;
+  readonly ports: JudgementPorts;
+}) {
+  const { ports } = input;
+  const prepared = yield* prepareJudgement(input.ledger, input.itemId);
+  const run = yield* ports.delegate({
+    prompt: prepared.prompt,
+    title: prepared.title,
+    keySource: prepared.keySource,
   });
   if (run.status !== "completed") {
     const detail = run.waitTimedOut
@@ -137,36 +192,138 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
       : `ended ${run.status}. Change the item's evidence and call ledger_request_judgement again for a fresh judge`;
     return yield* new OrchestratorMcpFailure({
       code: "orchestration_error",
-      message: `The judge for ${item.id} (task ${run.taskId}) ${detail}.`,
+      message: `The judge for ${prepared.item.id} (task ${run.taskId}) ${detail}.`,
     });
   }
-
-  // A clean judge thread holds exactly the server-built prompt, run on the model the loadout
-  // resolved. Anything else (a replayed delegation the agent seeded, a message sent into the
-  // thread, a different model) means the answer cannot be attributed to the judge.
-  const messages = yield* ports.userMessages(run.childThreadId);
-  const tainted =
-    messages.length !== 1 ||
-    messages[0] !== prompt ||
-    run.judge.instanceId !== run.expectedJudge.instanceId ||
-    run.judge.model !== run.expectedJudge.model;
-  const parsed = tainted ? null : parseJudgeVerdict(run.summary);
-  const outcome = parsed?.outcome ?? "fail";
-  const notes = tainted
-    ? "The judge thread was not the one the server started (a different prompt or model, or extra messages), so its answer was not trusted. Recorded as a failure."
-    : (parsed?.notes ??
-      "The judge's answer did not end with a verdict line (VERDICT: PASS or VERDICT: FAIL). Recorded as a failure.");
-  const verdict: LedgerItemVerdict = {
-    outcome,
-    judge: run.judge,
-    notes,
-    at: yield* DateTime.now,
-  };
+  const verdict = yield* verdictOf(prepared, run, ports);
   const sequence = yield* ports.recordVerdict({
-    itemId: item.id,
-    judgedEvidence: evidence,
+    itemId: prepared.item.id,
+    judgedEvidence: prepared.evidence,
     verdict,
     taskId: run.taskId,
   });
-  return { outcome, notes, judge: run.judge, sequence };
+  return { outcome: verdict.outcome, notes: verdict.notes, judge: run.judge, sequence };
 });
+
+export interface BackgroundJudgementPorts extends JudgementPorts {
+  /** Dispatches the internal `ledger.item.judgement.abandon`. */
+  readonly abandon: (input: {
+    readonly itemId: LedgerItemId;
+    readonly reason: string;
+  }) => Effect.Effect<number, OrchestratorMcpFailure>;
+  /** Dispatches the internal `ledger.item.judgement.started`. */
+  readonly started: (input: {
+    readonly itemId: LedgerItemId;
+    readonly taskId: NodeId;
+  }) => Effect.Effect<number, OrchestratorMcpFailure>;
+  /** The judge task as it stands now, without waiting for it. */
+  readonly readTask: (taskId: NodeId) => Effect.Effect<JudgeRun, OrchestratorMcpFailure>;
+}
+
+const TERMINAL_STATUSES: ReadonlySet<OrchestratorMcpDelegatedTaskStatus> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+const startFailureReason = (failure: OrchestratorMcpFailure) =>
+  failure.code === "parent_not_active"
+    ? "No agent turn was running on this thread to start the judge from. Close the item again from a running turn, or ask for a judgement with ledger_request_judgement."
+    : failure.message;
+
+/** Records the outcome of a finished judge run: its verdict, or why there is none. */
+const settleRun = Effect.fn("LedgerJudgement.settleRun")(function* (
+  ledger: Ledger,
+  item: LedgerItem,
+  run: JudgeRun,
+  ports: BackgroundJudgementPorts,
+) {
+  const prepared = yield* Effect.result(prepareJudgement(ledger, item.id));
+  if (prepared._tag === "Failure") {
+    yield* ports.abandon({ itemId: item.id, reason: prepared.failure.message });
+    return;
+  }
+  if (run.status !== "completed") {
+    yield* ports.abandon({
+      itemId: item.id,
+      reason: `The judge (task ${run.taskId}) ended ${run.status} without a verdict. Close the item again for a fresh judge.`,
+    });
+    return;
+  }
+  const verdict = yield* verdictOf(prepared.success, run, ports);
+  yield* ports.recordVerdict({
+    itemId: item.id,
+    judgedEvidence: prepared.success.evidence,
+    verdict,
+    taskId: run.taskId,
+  });
+});
+
+/**
+ * The effect worker's half of an automatic judgement: start (or rejoin) the judge for one close
+ * request and record its task, without waiting for it. A stale request does nothing; a request
+ * the judge cannot be started for is handed back with the reason, so nothing stays judging.
+ */
+export const startBackgroundJudgement = Effect.fn("LedgerJudgement.startBackground")(
+  function* (input: {
+    readonly ledger: Ledger | undefined;
+    readonly itemId: LedgerItemId;
+    readonly requestedAt: string;
+    readonly ports: BackgroundJudgementPorts;
+  }) {
+    const { ledger, ports } = input;
+    const item = ledger?.items.find(({ id }) => id === input.itemId);
+    if (
+      ledger === undefined ||
+      item?.judging !== true ||
+      DateTime.formatIso(item.updatedAt) !== input.requestedAt
+    ) {
+      return;
+    }
+    if (item.judgeTaskId !== undefined) {
+      return yield* settleBackgroundJudgement({ ledger, taskId: item.judgeTaskId, ports });
+    }
+    const prepared = yield* Effect.result(prepareJudgement(ledger, item.id));
+    if (prepared._tag === "Failure") {
+      yield* ports.abandon({ itemId: item.id, reason: prepared.failure.message });
+      return;
+    }
+    const run = yield* Effect.result(
+      ports.delegate({
+        prompt: prepared.success.prompt,
+        title: prepared.success.title,
+        keySource: prepared.success.keySource,
+      }),
+    );
+    if (run._tag === "Failure") {
+      yield* ports.abandon({ itemId: item.id, reason: startFailureReason(run.failure) });
+      return;
+    }
+    yield* ports.started({ itemId: item.id, taskId: run.success.taskId });
+    if (TERMINAL_STATUSES.has(run.success.status)) {
+      yield* settleRun(ledger, item, run.success, ports);
+    }
+  },
+);
+
+/**
+ * The other half: once a judge task ends, record its verdict on the item it judges. Called when
+ * the task's terminal state is seen and by the startup scan, so it is safe to call repeatedly.
+ */
+export const settleBackgroundJudgement = Effect.fn("LedgerJudgement.settleBackground")(
+  function* (input: {
+    readonly ledger: Ledger | undefined;
+    readonly taskId: NodeId;
+    readonly ports: BackgroundJudgementPorts;
+  }) {
+    const { ledger, ports } = input;
+    const item = ledger?.items.find(
+      (candidate) => candidate.judging === true && candidate.judgeTaskId === input.taskId,
+    );
+    if (ledger === undefined || item === undefined) return;
+    const run = yield* ports.readTask(input.taskId);
+    if (!TERMINAL_STATUSES.has(run.status)) return;
+    yield* settleRun(ledger, item, run, ports);
+  },
+);
