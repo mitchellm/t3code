@@ -1,13 +1,8 @@
 // Fork: the Overview screen, one row per active thread.
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
-  deriveLedgerProgress,
-  formatLedgerProgress,
-} from "@t3tools/client-runtime/state/thread-ledger";
-import {
   deriveThreadOverviewRows,
   ledgerBarFraction,
-  shouldLoadOverviewLedger,
   type OverviewNow,
   type ThreadOverviewRow,
 } from "@t3tools/client-runtime/state/thread-overview";
@@ -18,14 +13,12 @@ import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { useEnvironmentSettings } from "../../hooks/useSettings";
-import { useThreadLedgerIfSupported } from "../../hooks/useThreadLedgerIfSupported";
 import { useProject, useThreadShells } from "../../state/entities";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Badge } from "../ui/badge";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../ui/empty";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 const NOW_LABELS: Record<OverviewNow, string> = {
   waiting: "Waiting on you",
@@ -41,34 +34,21 @@ const NOW_VARIANTS: Record<OverviewNow, "warning" | "info" | "success" | "outlin
   idle: "outline",
 };
 
-function LedgerCell({ row, nowMs }: { row: ThreadOverviewRow; nowMs: number }) {
-  const threadRef = scopeThreadRef(row.environmentId, row.threadId);
-  // The ledger rides the thread's detail stream, so quiet old rows never open one.
-  const ledger = useThreadLedgerIfSupported(
-    shouldLoadOverviewLedger(row, nowMs) ? threadRef : null,
-  );
+/** The dash means exactly one thing: no ledger, or one with nothing to measure. */
+function LedgerCell({ ledger }: { ledger: ThreadOverviewRow["ledger"] }) {
   if (ledger === null) return <span className="text-muted-foreground">-</span>;
-  const progress = deriveLedgerProgress(ledger);
-  const scope = progress.total - progress.dropped;
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <div className="flex items-center gap-2">
-            <span className="tabular-nums">
-              {progress.closed}/{scope}
-            </span>
-            <div className="h-1 w-20 overflow-hidden rounded-full bg-muted" aria-hidden>
-              <div
-                className="h-full bg-primary"
-                style={{ width: `${Math.round(ledgerBarFraction(progress) * 100)}%` }}
-              />
-            </div>
-          </div>
-        }
-      />
-      <TooltipPopup side="top">{formatLedgerProgress(progress)}</TooltipPopup>
-    </Tooltip>
+    <div className="flex items-center gap-2">
+      <span className="tabular-nums">
+        {ledger.closed}/{ledger.total}
+      </span>
+      <div className="h-1 w-20 overflow-hidden rounded-full bg-muted" aria-hidden>
+        <div
+          className="h-full bg-primary"
+          style={{ width: `${Math.round(ledgerBarFraction(ledger) * 100)}%` }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -96,7 +76,7 @@ function OverviewTableRow({ row, nowMs }: { row: ThreadOverviewRow; nowMs: numbe
         </Link>
       </TableCell>
       <TableCell>
-        <LedgerCell row={row} nowMs={nowMs} />
+        <LedgerCell ledger={row.ledger} />
       </TableCell>
       <TableCell>
         <span className="text-muted-foreground">{loadoutName}</span>

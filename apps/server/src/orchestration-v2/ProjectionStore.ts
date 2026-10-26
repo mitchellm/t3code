@@ -17,8 +17,10 @@ import {
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import { applyLedgerEvent } from "@t3tools/shared/taskLedger";
+import { readLedgerProgressByThread, summarizeLedgerProgress } from "./LedgerProgress.ts";
 import type {
   Ledger,
+  LedgerProgress,
   OrchestrationV2AppThread,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
@@ -1761,6 +1763,7 @@ export function threadShellFromProjection(
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
     loadout: projection.thread.loadout ?? null,
+    ledgerProgress: summarizeLedgerProgress(projection.ledger),
     pinOrderKey: projection.thread.pinOrderKey ?? null,
     lastVisitedAt: projection.thread.lastVisitedAt,
     opens: projection.thread.opens ?? null,
@@ -1956,6 +1959,7 @@ function visibleItemCountForShell(input: {
 function shellFromState(input: {
   readonly state: ShellThreadState;
   readonly visibleItemCount: number;
+  readonly ledgerProgress: LedgerProgress | null;
 }): OrchestrationV2ThreadShell {
   return {
     createdBy: input.state.thread.createdBy,
@@ -2025,6 +2029,7 @@ function shellFromState(input: {
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
     loadout: input.state.thread.loadout ?? null,
+    ledgerProgress: input.ledgerProgress,
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
     lastVisitedAt: input.state.thread.lastVisitedAt,
     opens: input.state.thread.opens ?? null,
@@ -6734,12 +6739,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         }),
       );
       const statesByThreadId = new Map(states.map((state) => [state.thread.id, state]));
+      const ledgerProgressByThreadId = yield* readLedgerProgressByThread(sql, [...targetThreadIds]);
 
       const shells = states
         .filter((state) => targetThreadIds.has(state.thread.id))
         .map((state) =>
           shellFromState({
             state,
+            ledgerProgress: ledgerProgressByThreadId.get(state.thread.id) ?? null,
             visibleItemCount: visibleItemCountForShell({
               threadId: state.thread.id,
               statesByThreadId,
@@ -6915,8 +6922,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             if (state === undefined) {
               return null;
             }
+            const ledgerProgressByThreadId = yield* readLedgerProgressByThread(sql, [threadId]);
             return shellFromState({
               state,
+              ledgerProgress: ledgerProgressByThreadId.get(threadId) ?? null,
               visibleItemCount: visibleItemCountForShell({ threadId, statesByThreadId }),
             });
           }),

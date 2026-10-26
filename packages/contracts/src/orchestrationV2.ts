@@ -65,6 +65,7 @@ import {
   LedgerItemStatus,
   LedgerItemUpdatedPayload,
   LedgerItemUpdatedPayloadJson,
+  LedgerProgress,
   LedgerReopenedPayload,
   LedgerReopenedPayloadJson,
   LedgerVerdictRecordCommand,
@@ -2066,6 +2067,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   loadout: Schema.optional(Schema.NullOr(ThreadLoadout)),
+  /** Fork: absent from older servers, which clients read as no ledger. */
+  ledgerProgress: Schema.optional(Schema.NullOr(LedgerProgress)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),

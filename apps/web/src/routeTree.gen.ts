@@ -20,8 +20,8 @@ import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$proje
 import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
 import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
-import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as ChatOverviewRouteImport } from './routes/_chat.overview'
+import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as ChatViewsViewIdRouteImport } from './routes/_chat.views.$viewId'
 import { Route as ChatSettingsStorageRouteImport } from './routes/_chat.settings.storage'
 import { Route as ChatSettingsSourceControlRouteImport } from './routes/_chat.settings.source-control'
@@ -90,14 +90,14 @@ const ChatSettingsRoute = ChatSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => ChatRoute,
 } as any)
-const ChatOverviewRoute = ChatOverviewRouteImport.update({
-  id: '/overview',
-  path: '/overview',
-  getParentRoute: () => ChatRoute,
-} as any)
 const ChatPullRequestsRoute = ChatPullRequestsRouteImport.update({
   id: '/pull-requests',
   path: '/pull-requests',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatOverviewRoute = ChatOverviewRouteImport.update({
+  id: '/overview',
+  path: '/overview',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatNewRoute = ChatNewRouteImport.update({
@@ -481,18 +481,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSettingsRouteImport
       parentRoute: typeof ChatRoute
     }
-    '/_chat/overview': {
-      id: '/_chat/overview'
-      path: '/overview'
-      fullPath: '/overview'
-      preLoaderRoute: typeof ChatOverviewRouteImport
-      parentRoute: typeof ChatRoute
-    }
     '/_chat/pull-requests': {
       id: '/_chat/pull-requests'
       path: '/pull-requests'
       fullPath: '/pull-requests'
       preLoaderRoute: typeof ChatPullRequestsRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/overview': {
+      id: '/_chat/overview'
+      path: '/overview'
+      fullPath: '/overview'
+      preLoaderRoute: typeof ChatOverviewRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/new': {

@@ -182,6 +182,8 @@ export interface EnvironmentThreadShell {
   readonly autoSettleDisabledAt?: string | null;
   /** Null while the thread runs solo. */
   readonly loadout?: import("@t3tools/contracts").ThreadLoadout | null;
+  /** Fork: closed/total of the thread's ledger; null or absent when it has none. */
+  readonly ledgerProgress?: import("@t3tools/contracts").LedgerProgress | null;
   readonly pinOrderKey: string | null;
   readonly activeOrderKey: string | null;
   readonly pullRequests: ReadonlyArray<import("@t3tools/contracts").ThreadPullRequestLink>;
@@ -341,6 +343,7 @@ export function presentThreadShell(
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
     loadout: thread.loadout ?? null,
+    ledgerProgress: thread.ledgerProgress ?? null,
     pinOrderKey: thread.pinOrderKey ?? null,
     activeOrderKey: thread.activeOrderKey ?? null,
     ...(thread.lastVisitedAt === undefined

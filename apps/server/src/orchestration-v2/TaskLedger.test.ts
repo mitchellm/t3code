@@ -726,6 +726,38 @@ it.effect("keeps a cheap open item count in step with the ledger, through a rebu
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("keeps the shell's ledger progress current, leaving dropped items out of the total", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const threadId = yield* createThread("shell-progress");
+    // The single-thread read and the full snapshot build shells on separate paths.
+    const progressViews = () =>
+      Effect.gen(function* () {
+        const single = (yield* projections.getThreadShell(threadId))?.ledgerProgress;
+        const snapshot = yield* projections.getShellSnapshot();
+        const listed = snapshot.threads.find((thread) => thread.id === threadId)?.ledgerProgress;
+        return [single, listed];
+      });
+
+    assert.deepEqual(yield* progressViews(), [null, null]);
+
+    yield* createLedger(threadId, { items: ["a", "b"] });
+    assert.deepEqual(yield* progressViews(), [
+      { closed: 0, open: 2, total: 2 },
+      { closed: 0, open: 2, total: 2 },
+    ]);
+    yield* addItems(threadId, ["c"]);
+    yield* updateItem(threadId, "a", { status: "closed", evidence: "done" });
+    yield* updateItem(threadId, "b", { status: "dropped", dropReason: "no" });
+    const expected = { closed: 1, open: 1, total: 2 };
+    assert.deepEqual(yield* progressViews(), [expected, expected]);
+
+    assert.isTrue((yield* maintenance.rebuild).valid);
+    assert.deepEqual(yield* progressViews(), [expected, expected]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 const setLoadout = (threadId: ThreadId, loadout: ThreadLoadout | null) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

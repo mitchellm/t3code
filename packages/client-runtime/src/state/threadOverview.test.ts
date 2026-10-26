@@ -4,9 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   deriveThreadOverviewRows,
   ledgerBarFraction,
-  shouldLoadOverviewLedger,
   type OverviewShellInput,
-  type ThreadOverviewRow,
 } from "./threadOverview.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
@@ -87,6 +85,31 @@ describe("deriveThreadOverviewRows", () => {
     expect(nowOf(rows, "helped")).toBe("running");
   });
 
+  it("matches judges by the server's `Judge ` title prefix and only on subagent children", () => {
+    const rows = deriveThreadOverviewRows([
+      shell("judged"),
+      child("not-a-judge", "judged", { title: "Judging notes", runtime: runtime("running") }),
+      shell("lookalike", { title: "Judge this later", runtime: runtime("idle") }),
+    ]);
+    expect(nowOf(rows, "judged")).toBe("idle");
+    expect(nowOf(rows, "lookalike")).toBe("idle");
+  });
+
+  it("reads a settled plan-mode thread with a plan to review as waiting on you", () => {
+    const planReady = {
+      interactionMode: "plan" as const,
+      hasActionableProposedPlan: true,
+    };
+    const rows = deriveThreadOverviewRows([
+      shell("plan-ready", planReady),
+      shell("plan-still-running", { ...planReady, runtime: runtime("running") }),
+      shell("plan-mode-no-plan", { interactionMode: "plan" }),
+    ]);
+    expect(nowOf(rows, "plan-ready")).toBe("waiting");
+    expect(nowOf(rows, "plan-still-running")).toBe("running");
+    expect(nowOf(rows, "plan-mode-no-plan")).toBe("idle");
+  });
+
   it("does not read a finished judge as judging", () => {
     const rows = deriveThreadOverviewRows([
       shell("judged"),
@@ -114,25 +137,30 @@ describe("deriveThreadOverviewRows", () => {
   });
 });
 
-describe("shouldLoadOverviewLedger", () => {
-  const nowMs = Date.parse("2026-06-10T00:00:00.000Z");
-  const row = (now: ThreadOverviewRow["now"], updatedAt: string) => ({ now, updatedAt });
-
-  it("loads for anything not idle and for idle threads touched within a day", () => {
-    expect(shouldLoadOverviewLedger(row("running", "2026-01-01T00:00:00.000Z"), nowMs)).toBe(true);
-    expect(shouldLoadOverviewLedger(row("idle", "2026-06-09T12:00:00.000Z"), nowMs)).toBe(true);
+describe("ledger on the row", () => {
+  it("comes from the shell summary, whatever the thread's age", () => {
+    const rows = deriveThreadOverviewRows([
+      shell("old", {
+        updatedAt: "2020-01-01T00:00:00.000Z",
+        ledgerProgress: { closed: 3, open: 4, total: 7 },
+      }),
+    ]);
+    expect(rows[0]?.ledger).toEqual({ closed: 3, total: 7 });
   });
 
-  it("skips old idle threads so the page does not open a detail stream for each", () => {
-    expect(shouldLoadOverviewLedger(row("idle", "2026-06-08T00:00:00.000Z"), nowMs)).toBe(false);
-    expect(shouldLoadOverviewLedger(row("idle", "not a date"), nowMs)).toBe(false);
+  it("is null for a thread with no ledger, a null summary or an older server's absent field", () => {
+    const rows = deriveThreadOverviewRows([
+      shell("none"),
+      shell("null", { ledgerProgress: null }),
+      shell("empty", { ledgerProgress: { closed: 0, open: 0, total: 0 } }),
+    ]);
+    expect(rows.map((row) => row.ledger)).toEqual([null, null, null]);
   });
 });
 
 describe("ledgerBarFraction", () => {
   it("counts dropped items out of the denominator and is zero without scope", () => {
-    expect(ledgerBarFraction({ total: 8, closed: 5, dropped: 1 })).toBeCloseTo(5 / 7);
-    expect(ledgerBarFraction({ total: 2, closed: 0, dropped: 2 })).toBe(0);
-    expect(ledgerBarFraction({ total: 0, closed: 0, dropped: 0 })).toBe(0);
+    expect(ledgerBarFraction({ total: 7, closed: 5 })).toBeCloseTo(5 / 7);
+    expect(ledgerBarFraction({ total: 0, closed: 0 })).toBe(0);
   });
 });

@@ -18,6 +18,7 @@ export type OverviewShellInput = Pick<
   | "pendingSubagentRequest"
   | "runtime"
   | "loadout"
+  | "ledgerProgress"
   | "itemCount"
   | "updatedAt"
 > &
@@ -38,6 +39,8 @@ export interface ThreadOverviewRow {
   readonly now: OverviewNow;
   /** Null while the thread runs solo; the caller resolves it against its settings. */
   readonly loadoutId: string | null;
+  /** Null when the thread has no ledger or an empty one; dropped items are out of `total`. */
+  readonly ledger: { readonly closed: number; readonly total: number } | null;
   readonly itemCount: number;
   readonly updatedAt: string;
 }
@@ -86,10 +89,16 @@ export function deriveThreadOverviewRows(
     if (shell.archivedAt !== null || shell.deletedAt !== null) continue;
     if (shell.lineage.relationshipToParent === "subagent") continue;
     if (shell.id.startsWith(RETRO_THREAD_ID_PREFIX)) continue;
+    // A plan the agent finished proposing is waiting on the user, as the inbox treats it.
+    const planReady =
+      shell.interactionMode === "plan" &&
+      shell.hasActionableProposedPlan === true &&
+      !isLiveRuntime(shell);
     const now: OverviewNow =
       shell.hasPendingApprovals ||
       shell.hasPendingUserInput ||
-      (shell.pendingSubagentRequest ?? null) !== null
+      (shell.pendingSubagentRequest ?? null) !== null ||
+      planReady
         ? "waiting"
         : judgingParents.has(`${shell.environmentId}|${shell.id}`)
           ? "judging"
@@ -103,6 +112,10 @@ export function deriveThreadOverviewRows(
       title: shell.title,
       now,
       loadoutId: shell.loadout?.id ?? null,
+      ledger:
+        shell.ledgerProgress == null || shell.ledgerProgress.total === 0
+          ? null
+          : { closed: shell.ledgerProgress.closed, total: shell.ledgerProgress.total },
       itemCount: shell.itemCount,
       updatedAt: shell.updatedAt,
     });
@@ -115,27 +128,10 @@ export function deriveThreadOverviewRows(
   );
 }
 
-const RECENT_IDLE_MS = 24 * 60 * 60 * 1000;
-
-/**
- * The ledger lives in the thread's detail stream, not the shell, so reading it opens one
- * subscription per row. Only threads someone is likely watching pay that cost.
- */
-export function shouldLoadOverviewLedger(
-  row: Pick<ThreadOverviewRow, "now" | "updatedAt">,
-  nowMs: number,
-): boolean {
-  if (row.now !== "idle") return true;
-  const updated = Date.parse(row.updatedAt);
-  return Number.isFinite(updated) && nowMs - updated < RECENT_IDLE_MS;
-}
-
-/** Dropped items leave the denominator, matching `formatLedgerProgress`. */
+/** `total` already leaves dropped items out. */
 export function ledgerBarFraction(progress: {
   readonly total: number;
   readonly closed: number;
-  readonly dropped: number;
 }): number {
-  const scope = progress.total - progress.dropped;
-  return scope <= 0 ? 0 : progress.closed / scope;
+  return progress.total <= 0 ? 0 : progress.closed / progress.total;
 }
