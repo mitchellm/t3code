@@ -467,25 +467,128 @@ it.effect("stops at the cap and marks the thread stuck", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("stops when a round made no ledger progress and marks the thread stuck", () =>
+const replanOf = (message: OrchestrationV2ConversationMessage | undefined) =>
+  message?.notification?.source.kind === "ledger_continue"
+    ? message.notification.source.replan
+    : undefined;
+
+it.effect("replans once when a round made no progress, then stops if nothing changed", () =>
   Effect.gen(function* () {
     const threadId = yield* setup("stall");
     yield* sendUserMessage(threadId);
     yield* completeLatest(threadId);
     assert.equal((yield* autoContinues(threadId)).length, 1);
-    assert.isFalse(yield* isMarkedStuck(threadId));
 
+    // No progress: the next nudge asks for a new plan instead of more of the same.
+    yield* completeLatest(threadId);
+    const followUps = yield* autoContinues(threadId);
+    assert.equal(followUps.length, 2);
+    const replan = followUps[1]!;
+    assert.deepEqual(replanOf(replan), {
+      reason: "stalled",
+      itemIds: [itemId("a"), itemId("b")],
+    });
+    assert.include(replan.notification?.summary ?? "", "Replanning the task ledger");
+    for (const step of ["split", "acceptance", "blocked", "defer"]) {
+      assert.include(replan.text, step);
+    }
+    assert.include(replan.text, "item:a");
+    assert.isFalse(yield* isMarkedStuck(threadId));
     assert.deepEqual(yield* stopNotices(threadId), []);
 
     const event = yield* completeLatest(threadId);
     yield* afterRun(event);
-    assert.equal((yield* autoContinues(threadId)).length, 1);
+    assert.equal((yield* autoContinues(threadId)).length, 2);
     assert.isTrue(yield* isMarkedStuck(threadId));
     const notices = yield* stopNotices(threadId);
     assert.equal(notices.length, 1);
     assert.include(notices[0], "Stopped continuing the task ledger: 2 items still open");
-    assert.include(notices[0], "no progress last round");
+    assert.include(notices[0], "no progress after a replan");
     assert.include(notices[0], "Item a, Item b.");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("goes back to plain follow-ups once the replan moved the ledger", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("stall-progress");
+    yield* sendUserMessage(threadId);
+    yield* completeLatest(threadId);
+    yield* completeLatest(threadId);
+    assert.equal(replanOf((yield* autoContinues(threadId)).at(-1))?.reason, "stalled");
+
+    yield* addItem(threadId, "a.1");
+    yield* completeLatest(threadId);
+    const followUps = yield* autoContinues(threadId);
+    assert.deepEqual(followUps.map(roundOf), [1, 2, 3]);
+    assert.isUndefined(replanOf(followUps[2]));
+    assert.include(followUps[2]!.notification?.summary ?? "", "Continuing the task ledger");
+
+    // A fresh stall is a new episode with its own replan before any stop.
+    yield* completeLatest(threadId);
+    assert.equal(replanOf((yield* autoContinues(threadId)).at(-1))?.reason, "stalled");
+    assert.deepEqual(yield* stopNotices(threadId), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+const recordFailure = (threadId: ThreadId, name: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "ledger.item.verdict.record",
+      commandId: CommandId.make(nextId("verdict")),
+      threadId,
+      ledgerId,
+      itemId: itemId(name),
+      verdict: {
+        outcome: "fail",
+        judge: modelSelection,
+        notes: "The empty-input case still throws",
+        at: yield* DateTime.now,
+      },
+    });
+  });
+
+it.effect("replans an item the judge failed three times, naming it", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("judge-fails");
+    yield* sendUserMessage(threadId);
+    yield* recordFailure(threadId, "a");
+    yield* recordFailure(threadId, "a");
+    yield* completeLatest(threadId);
+    assert.isUndefined(replanOf((yield* autoContinues(threadId)).at(-1)));
+
+    yield* recordFailure(threadId, "a");
+    yield* completeLatest(threadId);
+    const replan = (yield* autoContinues(threadId)).at(-1)!;
+    assert.deepEqual(replanOf(replan), { reason: "judge", itemIds: [itemId("a")] });
+    assert.include(replan.text, "item:a");
+    assert.include(replan.text, "failed the judge 3 times");
+    assert.include(replan.text, "The empty-input case still throws");
+    assert.notInclude(replan.text, "Continue working through them");
+    assert.include(replan.notification?.summary ?? "", "item:a");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("counts judge failures only since the item was reopened", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = yield* setup("judge-fails-reopened");
+    for (let failure = 0; failure < 3; failure += 1) yield* recordFailure(threadId, "a");
+    yield* updateItem(threadId, "a", "closed");
+    yield* orchestrator.dispatch({
+      type: "ledger.item.update",
+      commandId: CommandId.make(nextId("reopen")),
+      threadId,
+      ledgerId,
+      itemId: itemId("a"),
+      status: "open",
+    });
+    yield* recordFailure(threadId, "a");
+    yield* sendUserMessage(threadId);
+    yield* completeLatest(threadId);
+    const followUp = (yield* autoContinues(threadId)).at(-1);
+    assert.equal(roundOf(followUp), 1);
+    assert.isUndefined(replanOf(followUp));
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -895,6 +998,8 @@ it.effect("truncates a long item title in the stop notice", () =>
     const longTitle = "Rework the whole onboarding flow so every step explains itself clearly";
     yield* addItem(threadId, "long", longTitle);
     yield* sendUserMessage(threadId);
+    yield* completeLatest(threadId);
+    // The stall's replan round comes before the stop.
     yield* completeLatest(threadId);
     yield* completeLatest(threadId);
     const [notice] = yield* stopNotices(threadId);

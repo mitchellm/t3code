@@ -11,7 +11,6 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import {
-  decideLedgerAutoContinue,
   LEDGER_AUTO_CONTINUE_CAP,
   type LedgerAutoContinueDecision,
   partitionLedgerFollowUp,
@@ -25,6 +24,7 @@ import * as Layer from "effect/Layer";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 import * as EventSink from "./EventSink.ts";
+import { decideLedgerFollowUp, ledgerReplanText } from "./LedgerReplan.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 
@@ -96,7 +96,7 @@ const NOTICE_TITLE_MAX_CHARS = 48;
 const stuckReason = (stuck: Extract<LedgerAutoContinueDecision, { type: "stuck" }>) =>
   stuck.reason === "cap"
     ? `reached the limit of ${LEDGER_AUTO_CONTINUE_CAP} automatic follow-ups`
-    : "no progress last round";
+    : "no progress after a replan";
 
 function stopNoticeText(openIds: ReadonlyArray<string>, why: string, ledger: Ledger): string {
   const count = openIds.length;
@@ -197,7 +197,7 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
     if (batch.some(isClientUserMessage)) break;
   }
 
-  const decision = decideLedgerAutoContinue({
+  const decision = decideLedgerFollowUp({
     ledger,
     // Run ordinals order messages exactly; timestamps tie within a millisecond.
     messages: messages.toSorted(
@@ -231,12 +231,30 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
     commandId: CommandId.make(`server:ledger-continue:${run.id}`),
     messageId: MessageId.make(`message:ledger-continue:${run.id}`),
     threadId: input.threadId,
-    text: continuationText(ledger, decision.open, decision.round),
+    text:
+      decision.type === "replan"
+        ? ledgerReplanText({
+            ledger,
+            reason: decision.reason,
+            items: decision.replanItems,
+            round: decision.round,
+          })
+        : continuationText(ledger, decision.open, decision.round),
     notification: {
-      source: { kind: "ledger_continue", round: decision.round, items: [...decision.items] },
+      source: {
+        kind: "ledger_continue",
+        round: decision.round,
+        items: [...decision.items],
+        ...(decision.type === "replan"
+          ? { replan: { reason: decision.reason, itemIds: [...decision.replanItemIds] } }
+          : {}),
+      },
       outcome: "updated",
       // The timeline row shows only this, so it must say the server sent the follow-up.
-      summary: `Continuing the task ledger automatically (round ${decision.round}): ${decision.open.length} open ${decision.open.length === 1 ? "item" : "items"}`,
+      summary:
+        decision.type === "replan"
+          ? `Replanning the task ledger automatically (round ${decision.round}): ${decision.reason === "stalled" ? "no progress last round" : `${decision.replanItemIds.join(", ")} kept failing the judge`}`
+          : `Continuing the task ledger automatically (round ${decision.round}): ${decision.open.length} open ${decision.open.length === 1 ? "item" : "items"}`,
     },
     attachments: [],
     dispatchMode: { type: "queue_after_active" },

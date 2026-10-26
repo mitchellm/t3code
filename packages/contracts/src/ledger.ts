@@ -51,6 +51,11 @@ export const LedgerItem = Schema.Struct({
    * so repeated asking is visible. Absent means none.
    */
   judgements: Schema.optionalKey(NonNegativeInt),
+  /**
+   * `judgements` when the item was last reopened or last passed, so failures since then are the
+   * difference. Absent means zero. Only the planner sets it.
+   */
+  judgementsAtReopen: Schema.optionalKey(NonNegativeInt),
   /** Items that must be closed or dropped before this one can start or close. Absent means none. */
   blockedBy: Schema.optionalKey(Schema.Array(LedgerItemId)),
   /** The item this one is a sub-item of; a parent cannot close while a child is unfinished. */
