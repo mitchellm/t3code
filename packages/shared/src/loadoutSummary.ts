@@ -7,7 +7,7 @@ import {
   type LoadoutRoleName,
 } from "@t3tools/contracts";
 
-import type { LoadoutProviderView } from "./loadouts.ts";
+import { providerUnusable, type LoadoutProviderView } from "./loadouts.ts";
 
 const ROLE_VERBS: Record<LoadoutRoleName, string> = {
   planner: "plans",
@@ -47,7 +47,11 @@ export function summarizeLoadoutRoles(loadout: Loadout): string {
   return segments.length === 0 ? "No delegated roles" : segments.join(" · ");
 }
 
-export type LoadoutRoleIssueKind = "missing_instance" | "disabled_instance" | "missing_model";
+export type LoadoutRoleIssueKind =
+  | "missing_instance"
+  | "disabled_instance"
+  | "not_installed"
+  | "missing_model";
 
 export interface LoadoutRoleIssue {
   readonly role: LoadoutRoleName;
@@ -77,7 +81,8 @@ function modelIssue(
 ): LoadoutRoleIssueKind | null {
   const provider = providers.find(({ instanceId }) => instanceId === role.instanceId);
   if (provider === undefined) return "missing_instance";
-  if (provider.enabled === false) return "disabled_instance";
+  const unusable = providerUnusable(provider);
+  if (unusable !== null) return unusable;
   if (provider.models.length > 0 && !provider.models.some(({ slug }) => slug === role.model)) {
     return "missing_model";
   }

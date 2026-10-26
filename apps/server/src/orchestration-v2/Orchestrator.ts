@@ -72,6 +72,7 @@ import {
 import {
   decideThreadLoadout,
   loadoutHasJudge,
+  loadoutRoleTarget,
   resolveLoadout,
   withSolo,
 } from "@t3tools/shared/loadouts";
@@ -90,6 +91,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -11715,9 +11717,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const judge = loadout.roles.judge;
             if (!loadoutHasJudge(loadout) || judge === undefined) return false;
             const adapterIds = yield* providerAdapters.list();
-            // Fork: a judge that can fall back is still satisfiable when its first choice is not.
-            return [judge, ...(judge.fallback === undefined ? [] : [judge.fallback])].some(
-              ({ instanceId }) =>
+            // Fork: the gate asks the same resolver delegation uses, so a judge that falls back
+            // (CLI not installed, disabled here) is judged by the instance that will really run.
+            // The registry is optional so layers that never had one keep the adapter-only check.
+            const registry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+            const snapshots = Option.isSome(registry) ? yield* registry.value.getProviders : null;
+            const candidates =
+              snapshots === null
+                ? [judge.instanceId, judge.fallback?.instanceId]
+                : [
+                    loadoutRoleTarget(
+                      judge,
+                      snapshots.map((snapshot) => ({
+                        ...snapshot,
+                        enabled:
+                          snapshot.enabled &&
+                          resolveProjectProviderInstanceEnabled(
+                            settings,
+                            thread.projectId,
+                            snapshot.instanceId,
+                          ),
+                      })),
+                    )?.providerInstanceId,
+                  ];
+            return candidates.some(
+              (instanceId) =>
+                instanceId !== undefined &&
                 adapterIds.includes(instanceId) &&
                 resolveProjectProviderInstanceEnabled(settings, thread.projectId, instanceId),
             );

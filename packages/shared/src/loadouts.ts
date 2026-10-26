@@ -81,6 +81,12 @@ export function decideThreadLoadout(
 export interface LoadoutProviderView {
   readonly instanceId: string;
   readonly enabled?: boolean | undefined;
+  /**
+   * False when the CLI is absent. Such a provider is still registered and enabled but lists no
+   * models, which `loadoutRoleTarget` would otherwise read as "cannot enumerate, trust the role".
+   */
+  readonly installed?: boolean | undefined;
+  readonly availability?: "available" | "unavailable" | undefined;
   readonly models: ReadonlyArray<{
     readonly slug: string;
     readonly capabilities?:
@@ -116,6 +122,15 @@ export function loadoutDelegationTarget(
   return assigned === undefined ? undefined : loadoutRoleTarget(assigned, providers);
 }
 
+export function providerUnusable(
+  provider: LoadoutProviderView,
+): "disabled_instance" | "not_installed" | null {
+  if (provider.enabled === false) return "disabled_instance";
+  return provider.installed === false || provider.availability === "unavailable"
+    ? "not_installed"
+    : null;
+}
+
 // Drivers name their effort option differently (Claude "effort", Codex "reasoningEffort").
 export const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["effort", "reasoningEffort"]);
 
@@ -140,8 +155,8 @@ function modelTarget(
   providers: ReadonlyArray<LoadoutProviderView>,
 ): OrchestratorMcpTarget | undefined {
   const provider = providers.find(({ instanceId }) => instanceId === role.instanceId);
-  // Fork: a disabled instance cannot run, so it counts as gone and the fallback applies.
-  if (provider === undefined || provider.enabled === false) return undefined;
+  // Fork: a disabled or uninstalled instance cannot run, so it counts as gone and the fallback applies.
+  if (provider === undefined || providerUnusable(provider) !== null) return undefined;
   const model = provider.models.find(({ slug }) => slug === role.model);
   // An empty list means the provider cannot enumerate models, so the role's model is trusted.
   if (model === undefined && provider.models.length > 0) return undefined;

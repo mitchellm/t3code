@@ -2,7 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { DEFAULT_LOADOUTS, type Loadout, ProviderInstanceId } from "@t3tools/contracts";
 
 import { loadoutDelegationTarget, resolveLoadout } from "./loadouts.ts";
-import { loadoutRoleIssues, summarizeLoadoutRoles } from "./loadoutSummary.ts";
+import { loadoutRoleIssue, loadoutRoleIssues, summarizeLoadoutRoles } from "./loadoutSummary.ts";
 
 const claude = ProviderInstanceId.make("claudeAgent");
 
@@ -79,6 +79,16 @@ describe("loadoutRoleIssues", () => {
       { role: "planner", issue: "missing_model" },
       { role: "judge", issue: "missing_instance" },
     ]);
+  });
+
+  it("reports an enabled instance whose CLI is not installed, unless the fallback covers it", () => {
+    const codex = ProviderInstanceId.make("codex");
+    const missingCli = { instanceId: codex, enabled: true, installed: false, models: [] };
+    const crossCheck = resolveLoadout(DEFAULT_LOADOUTS, "cross-check");
+    const judge = crossCheck.roles.judge!;
+    const { fallback: _fallback, ...bare } = judge;
+    expect(loadoutRoleIssue(bare, [missingCli])).toBe("not_installed");
+    expect(loadoutRoleIssue(judge, [missingCli, provider(claude, ["claude-opus-5-5"])])).toBeNull();
   });
 
   it("flags every preset role when the catalog lacks the instance, and delegation degrades", () => {

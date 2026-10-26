@@ -72,6 +72,7 @@ import {
   type ServerProviderModel,
   ThreadId,
   isOrchestrationV2WorkActive,
+  resolveProjectProviderInstanceEnabled,
 } from "@t3tools/contracts";
 import { loadoutDelegationTarget, resolveLoadout, withSolo } from "@t3tools/shared/loadouts";
 import { isolationReport, resolveDelegationWorkspace } from "./WorkerIsolation.ts";
@@ -1262,7 +1263,21 @@ const make = Effect.gen(function* () {
   ) {
     if (role === undefined) return undefined;
     const { active } = yield* loadLoadouts(thread);
-    const target = loadoutDelegationTarget(active, role, providers);
+    // Fork: a project that disabled an instance must not resolve to it, so the machine-wide
+    // snapshot is narrowed by the project's own enable state (the ledger gate does the same).
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+    );
+    const target = loadoutDelegationTarget(
+      active,
+      role,
+      providers.map((provider) => ({
+        ...provider,
+        enabled:
+          provider.enabled &&
+          resolveProjectProviderInstanceEnabled(settings, thread.projectId, provider.instanceId),
+      })),
+    );
     // A judge that quietly ran on the thread's own model would be marking its own work.
     if (role === "judge" && target === undefined) {
       return yield* failure(

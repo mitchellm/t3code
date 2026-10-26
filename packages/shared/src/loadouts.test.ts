@@ -299,6 +299,22 @@ describe("loadoutRoleTarget", () => {
       );
     });
 
+    it("treats an enabled but not installed instance with no models as missing", () => {
+      // What Codex reports with no CLI on the machine: registered, enabled, nothing to list.
+      const notInstalled = { instanceId: codex, enabled: true, installed: false, models: [] };
+      expect(
+        loadoutRoleTarget(judge, [notInstalled, provider(claude, ["claude-sonnet-5-5"])]),
+      ).toMatchObject({ providerInstanceId: claude });
+      expect(loadoutRoleTarget({ instanceId: codex, model: "gpt-6.1-sol" }, [notInstalled])).toBe(
+        undefined,
+      );
+    });
+
+    it("still trusts an installed provider that lists no models", () => {
+      const quiet = { instanceId: codex, enabled: true, installed: true, models: [] };
+      expect(loadoutRoleTarget(judge, [quiet])).toMatchObject({ providerInstanceId: codex });
+    });
+
     it("is undefined when neither resolves, and never silently the thread's model", () => {
       expect(loadoutRoleTarget(judge, [])).toBeUndefined();
     });
