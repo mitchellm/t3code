@@ -16,6 +16,7 @@ import {
   formatLedgerBlock,
   type HarnessHookPort,
   HARNESS_REMINDER_EVERY,
+  HARNESS_STOP_BLOCK_CEILING,
   HARNESS_STOP_BLOCK_LIMIT,
 } from "./HarnessHooks.ts";
 
@@ -150,6 +151,25 @@ describe("Stop hook", () => {
     // Progress on the ledger earns a fresh allowance.
     current.value = state(ledgerOf([item("L1", "in_progress"), item("L2", "open")]));
     expect((await fire("Stop", stop(true))).decision).toBe("block");
+  });
+
+  it(`allows the stop after ${HARNESS_STOP_BLOCK_CEILING} blocks in one prompt even with progress`, async () => {
+    const current: Current = { value: undefined };
+    const { fire } = make(ledgerReader(current));
+    const decisions: Array<unknown> = [];
+    for (let index = 0; index <= HARNESS_STOP_BLOCK_CEILING; index++) {
+      // Each stop sees a different ledger, so the no-progress limit never trips.
+      current.value = state(
+        ledgerOf([item("L1", "open", { evidence: `attempt ${index}` }), item("L2", "open")]),
+      );
+      decisions.push((await fire("Stop", stop(index > 0))).decision);
+    }
+    expect(decisions).toEqual([
+      ...Array.from({ length: HARNESS_STOP_BLOCK_CEILING }, () => "block"),
+      undefined,
+    ]);
+    // The next prompt starts a new allowance.
+    expect((await fire("Stop", stop(false))).decision).toBe("block");
   });
 
   it("gives a new prompt its own allowance", async () => {
@@ -329,7 +349,16 @@ describe("managers structure", () => {
 
   it("denies the top-level thread's edits and shell, telling it to delegate", async () => {
     const { fire } = structured("managers");
-    for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]) {
+    for (const tool of [
+      "Edit",
+      "Write",
+      "MultiEdit",
+      "NotebookEdit",
+      "Bash",
+      "PowerShell",
+      "REPL",
+      "Monitor",
+    ]) {
       const decision = decisionOf(await fire("PreToolUse", preToolUse(tool)));
       expect(decision?.permissionDecision).toBe("deny");
       expect(decision?.permissionDecisionReason).toContain("delegate_task");
@@ -340,6 +369,19 @@ describe("managers structure", () => {
     ).toContain("Bash");
     expect(await fire("PreToolUse", preToolUse("Read"))).toEqual({});
     expect(await fire("PreToolUse", preToolUse("mcp__t3-code__delegate_task"))).toEqual({});
+  });
+
+  it("denies native workers so the top level cannot route edits around delegate_task", async () => {
+    const { fire } = structured("managers");
+    for (const tool of ["Agent", "Task", "Workflow"]) {
+      const reason = decisionOf(
+        await fire("PreToolUse", preToolUse(tool)),
+      )?.permissionDecisionReason;
+      expect(reason).toContain(tool);
+      expect(reason).toContain("delegate_task");
+      expect(reason).toContain("role");
+    }
+    expect(await structured("workers").fire("PreToolUse", preToolUse("Agent"))).toEqual({});
   });
 
   it("leaves other structures, delegated children and unreadable state alone", async () => {

@@ -829,18 +829,34 @@ const runOnSessionThatBlocksStops = (threadId: ThreadId, blocksStops: boolean) =
   });
 
 it.effect.each([
-  { blocksStops: true, followUps: 0 },
-  { blocksStops: false, followUps: 1 },
+  { blocksStops: true, followUps: 0, notices: 1 },
+  { blocksStops: false, followUps: 1, notices: 0 },
 ])(
   "leaves the ledger to a provider that blocks its own stop (blocks: $blocksStops)",
-  ({ blocksStops, followUps }) =>
+  ({ blocksStops, followUps, notices }) =>
     Effect.gen(function* () {
       const threadId = yield* setup(`provider-blocks-stop-${blocksStops}`);
       yield* sendUserMessage(threadId);
       yield* runOnSessionThatBlocksStops(threadId, blocksStops);
       assert.equal((yield* autoContinues(threadId)).length, followUps);
-      assert.equal((yield* stopNotices(threadId)).length, 0);
+      // The run ending with items open means the provider's own stop gate gave up.
+      const stopped = yield* stopNotices(threadId);
+      assert.equal(stopped.length, notices);
+      assert.equal(yield* isMarkedStuck(threadId), notices === 1);
+      if (notices === 1) assert.include(stopped[0], "2 items still open");
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("posts no stop notice for a self-blocking provider waiting on a delegate", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("provider-blocks-stop-delegate");
+    yield* sendUserMessage(threadId);
+    yield* setDelegate(threadId, "running");
+    yield* runOnSessionThatBlocksStops(threadId, true);
+    assert.equal((yield* autoContinues(threadId)).length, 0);
+    assert.equal((yield* stopNotices(threadId)).length, 0);
+    assert.isFalse(yield* isMarkedStuck(threadId));
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("truncates a long item title in the stop notice", () =>

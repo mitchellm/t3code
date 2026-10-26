@@ -14,6 +14,8 @@ import type { ProviderAdapterV2HarnessLedgerState } from "@t3tools/provider-core
 
 /** Blocks in a row, with the ledger unchanged, before the agent may stop anyway. */
 export const HARNESS_STOP_BLOCK_LIMIT = 3;
+/** Blocks in one prompt, progress or not, before the agent may stop anyway. */
+export const HARNESS_STOP_BLOCK_CEILING = 20;
 /** Tool calls between ledger reminders. */
 export const HARNESS_REMINDER_EVERY = 15;
 
@@ -26,8 +28,24 @@ const WIN_CONDITION_MAX_CHARS = 200;
 const OPEN_ITEMS_SHOWN = 20;
 const STOP_ITEMS_SHOWN = 5;
 
-// Bash is denied with the edits: a read-only command cannot be told apart reliably.
-const MANAGER_DENIED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"] as const;
+// Every tool that edits or runs a command. Shells are denied whole: a read-only command cannot be
+// told apart reliably. REPL and Monitor run commands too.
+const MANAGER_DENIED_WORK_TOOLS = [
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit",
+  "Bash",
+  "PowerShell",
+  "REPL",
+  "Monitor",
+] as const;
+// Native workers would let the top level route edits around the loadout's roles.
+const MANAGER_DENIED_WORKER_TOOLS = ["Agent", "Task", "Workflow"] as const;
+const MANAGER_DENIED_TOOLS: ReadonlyArray<string> = [
+  ...MANAGER_DENIED_WORK_TOOLS,
+  ...MANAGER_DENIED_WORKER_TOOLS,
+];
 
 export interface HarnessHookPort {
   /** Undefined means the read failed, which is not the same as cleared (""). */
@@ -199,12 +217,18 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
 
   if (readLedgerState !== undefined) {
     let consecutiveBlocks = 0;
+    let promptBlocks = 0;
     let lastFingerprint: string | undefined;
+    // Giving up only allows the stop: the run then completes with items open, and
+    // LedgerAutoContinue posts the stop notice and unread mark for it, as for any provider.
     hooks.Stop = [
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "Stop") return {};
         // A stop the hook did not cause is a fresh prompt ending, which earns a fresh allowance.
-        if (!input.stop_hook_active) consecutiveBlocks = 0;
+        if (!input.stop_hook_active) {
+          consecutiveBlocks = 0;
+          promptBlocks = 0;
+        }
         if (waitsOnBackgroundSubagent(input)) return {};
         const state = await readLedgerState(signal);
         if (state === undefined || state.userInterrupted || state.delegatedWorkActive) return {};
@@ -218,13 +242,17 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           lastFingerprint = fingerprint;
         }
         if (consecutiveBlocks >= HARNESS_STOP_BLOCK_LIMIT) return {};
+        // Churn that keeps changing the ledger without closing it must still end.
+        if (promptBlocks >= HARNESS_STOP_BLOCK_CEILING) return {};
         consecutiveBlocks++;
+        promptBlocks++;
         return { decision: "block", reason: stopReason(open) };
       }),
     ];
 
-    // Claude Code has no output field for PreCompact; it folds a hook's output into the
-    // compaction instructions, so the text rides along as the hook's message.
+    // Best effort: the SDK has no PreCompact output field, and whether Claude Code folds this
+    // message into the compaction instructions is unverified. SessionStart(compact) above is the
+    // guaranteed path, since it re-sends the ledger after the summary either way.
     hooks.PreCompact = [
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "PreCompact") return {};
@@ -281,13 +309,18 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     hooks.PreToolUse = [
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "PreToolUse" || input.agent_id !== undefined) return {};
-        if (!(MANAGER_DENIED_TOOLS as ReadonlyArray<string>).includes(input.tool_name)) return {};
+        if (!MANAGER_DENIED_TOOLS.includes(input.tool_name)) return {};
         if ((await readStructure(signal)) !== "managers") return {};
+        const worker = (MANAGER_DENIED_WORKER_TOOLS as ReadonlyArray<string>).includes(
+          input.tool_name,
+        );
         return {
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
-            permissionDecisionReason: `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${input.tool_name} is denied (Bash too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
+            permissionDecisionReason: worker
+              ? `This thread runs a managers loadout, so the native ${input.tool_name} tool is denied: work goes to the loadout's roles. Use delegate_task with role "worker", "subPlanner" or "explorer".`
+              : `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${input.tool_name} is denied (shells too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
           },
         };
       }, MANAGER_DENIED_TOOLS.join("|")),

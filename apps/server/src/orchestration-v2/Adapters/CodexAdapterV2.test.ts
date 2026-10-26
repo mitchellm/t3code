@@ -2013,7 +2013,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   );
 
   it.effect(
-    "sends the thread's ledger as trusted ledger_state and restores it after compaction",
+    "sends the thread's ledger as trusted ledger_state and restores it fresh after compaction",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -2046,6 +2046,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             closedAt: null,
           };
           const ledgerState = formatLedgerBlock(ledger)!;
+          // The agent closes the item mid-turn; the compaction restore must carry that, not the
+          // turn-start snapshot.
+          const closedLedger: Ledger = {
+            ...ledger,
+            items: ledger.items.map((item) => ({ ...item, status: "closed", evidence: "done" })),
+          };
+          const restoredState = formatLedgerBlock(closedLedger)!;
+          assert.notEqual(restoredState, ledgerState);
+          let ledgerReads = 0;
           const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
             nativeThreadId,
             codexInput: [{ type: "text", text: "work" }],
@@ -2095,7 +2104,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                         content: [
                           {
                             type: "input_text",
-                            text: `<ledger_state>${ledgerState}</ledger_state>`,
+                            text: `<ledger_state>${restoredState}</ledger_state>`,
                           },
                         ],
                       },
@@ -2127,11 +2136,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               text: "work",
             }),
             harness: {
-              readLedgerState: Effect.succeed({
-                ledger,
+              readLedgerState: Effect.sync(() => ({
+                ledger: ledgerReads++ === 0 ? ledger : closedLedger,
                 userInterrupted: false,
                 delegatedWorkActive: false,
-              }),
+              })),
               readStructure: Effect.succeed("solo"),
             },
           });
