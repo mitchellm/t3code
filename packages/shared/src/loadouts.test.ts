@@ -3,22 +3,27 @@ import {
   DEFAULT_LOADOUTS,
   DEFAULT_SERVER_SETTINGS,
   type Loadout,
+  Loadout as LoadoutSchema,
   type LoadoutRole,
   ProjectId,
   ProviderInstanceId,
   type ThreadLoadout,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 
 import {
   decideThreadLoadout,
   loadoutDelegationTarget,
   loadoutHasJudge,
   loadoutRoleTarget,
+  loadoutStructure,
   parseJudgeVerdict,
   resolveLoadout,
   withSolo,
 } from "./loadouts.ts";
 import { resolveProjectSettings } from "./projectSettings.ts";
+
+const decodeLoadout = Schema.decodeSync(LoadoutSchema);
 
 const claude = ProviderInstanceId.make("claudeAgent");
 const sonnet: LoadoutRole = { instanceId: claude, model: "claude-sonnet-5-5", effort: "high" };
@@ -102,6 +107,34 @@ describe("loadoutHasJudge", () => {
     expect(loadoutHasJudge(resolveLoadout(DEFAULT_LOADOUTS, "planner-workers-judge"))).toBe(true);
     expect(loadoutHasJudge(resolveLoadout(DEFAULT_LOADOUTS, "solo"))).toBe(false);
     expect(loadoutHasJudge(resolveLoadout(DEFAULT_LOADOUTS, "read-only-sweep"))).toBe(false);
+  });
+});
+
+describe("loadoutStructure", () => {
+  it("follows the roles when unset, and keeps an explicit managers choice", () => {
+    expect(loadoutStructure(resolveLoadout(DEFAULT_LOADOUTS, "solo"))).toBe("solo");
+    expect(loadoutStructure(resolveLoadout(DEFAULT_LOADOUTS, "planner-workers-judge"))).toBe(
+      "workers",
+    );
+    const managers: Loadout = {
+      id: "managers",
+      name: "Managers",
+      description: "",
+      roles: { worker: sonnet },
+      structure: "managers",
+    };
+    expect(loadoutStructure(managers)).toBe("managers");
+  });
+
+  it("decodes settings saved before the field existed", () => {
+    const decoded = decodeLoadout({
+      id: "old",
+      name: "Old",
+      description: "",
+      roles: {},
+    });
+    expect(decoded.structure).toBeUndefined();
+    expect(loadoutStructure(decoded)).toBe("solo");
   });
 });
 

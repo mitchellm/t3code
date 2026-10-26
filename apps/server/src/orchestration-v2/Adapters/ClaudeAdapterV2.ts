@@ -1,6 +1,7 @@
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
+import { buildClaudeHarnessHooks, type HarnessHookPort } from "./HarnessHooks.ts";
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -44,7 +45,6 @@ import {
   type SDKMessage,
   type SDKRateLimitInfo,
   type SDKResultMessage,
-  type HookCallbackMatcher,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
@@ -428,6 +428,8 @@ export const ClaudeProviderCapabilitiesV2 = {
     supportsFullThreadHandoff: true,
     maxRecommendedHandoffChars: null,
     deliversPinnedRules: true,
+    blocksStopWithOpenLedger: true,
+    enforcesManagersStructure: true,
   },
   checkpointing: {
     appCanCheckpointFilesystem: true,
@@ -1295,54 +1297,6 @@ export function claudeQueryEnvironment(
   return { ...environment, CLAUDE_CODE_PROMPT_CACHE_TTL: subagentPromptCacheTtl };
 }
 
-/**
- * The system prompt is fixed when the CLI opens, so after a compaction this re-sends the current
- * rules. A failed read skips the re-send and leaves the session-start copy. Cleared rules are
- * withdrawn explicitly, both those in the fixed system prompt and those only this hook re-sent.
- */
-function claudePinnedRulesHook(input: {
-  /** Undefined means the read failed, which is not the same as cleared (""). */
-  readonly readCurrentPinnedRules: (signal: AbortSignal) => Promise<string | undefined>;
-  readonly openedWithPinnedRules: boolean;
-  readonly onReadRejected: (cause: unknown) => void;
-}): HookCallbackMatcher {
-  const context = (additionalContext: string) => ({
-    hookSpecificOutput: { hookEventName: "SessionStart" as const, additionalContext },
-  });
-  // Sticky on purpose: a later compaction may summarize the copy away, but the
-  // summary can still carry its gist, so every later clear withdraws again.
-  let deliveredByHook = false;
-  return {
-    matcher: "compact",
-    timeout: 5,
-    hooks: [
-      async (hookInput, _toolUseID, options) => {
-        if (hookInput.hook_event_name !== "SessionStart" || hookInput.source !== "compact") {
-          return {};
-        }
-        try {
-          const rules = await input.readCurrentPinnedRules(options.signal);
-          if (rules === undefined) return {};
-          if (rules === "") {
-            return input.openedWithPinnedRules || deliveredByHook
-              ? context(
-                  "There are no pinned rules now. Any earlier pinned rules, in the system prompt or re-sent after a compaction, are withdrawn.",
-                )
-              : {};
-          }
-          deliveredByHook = true;
-          return context(
-            `These are the current pinned rules. They supersede any earlier version in the system prompt.\n\n${rules}`,
-          );
-        } catch (cause) {
-          input.onReadRejected(cause);
-          return {};
-        }
-      },
-    ],
-  };
-}
-
 // Claude Code's auto tool search sends every MCP schema in full while they fit under a share of the
 // context window, which T3's tools do on 1M models. auto:0 already means on and auto:100 off.
 export function claudeToolSearchOverride(value: string | undefined): "true" | undefined {
@@ -1413,8 +1367,10 @@ export function makeClaudeQueryOptions(input: {
    * process instead would fail while background work runs.
    */
   readonly readCurrentPinnedRules?: (signal: AbortSignal) => Promise<string | undefined>;
-  /** Called when the read rejects (a defect or interruption), so it is not lost. */
+  /** Called when a hook read rejects (a defect or interruption), so it is not lost. */
   readonly onPinnedRulesReadRejected?: (cause: unknown) => void;
+  // Fork: ledger and loadout reads for the harness hooks.
+  readonly harness?: Pick<HarnessHookPort, "readLedgerState" | "readStructure" | "delegatedChild">;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
 }): ClaudeAgentSdkQueryOptions {
@@ -1468,6 +1424,15 @@ export function makeClaudeQueryOptions(input: {
           ...compactQuerySettings,
           env: { ...compactQuerySettings?.env, ENABLE_TOOL_SEARCH: input.toolSearchOverride },
         } as ClaudeSdkSettings);
+  const hooks = buildClaudeHarnessHooks({
+    ...input.harness,
+    ...(input.readCurrentPinnedRules === undefined
+      ? {}
+      : { readPinnedRules: input.readCurrentPinnedRules }),
+    openedWithPinnedRules: (input.pinnedRules ?? "") !== "",
+    delegatedChild: input.harness?.delegatedChild ?? false,
+    onHookError: input.onPinnedRulesReadRejected ?? (() => {}),
+  });
   const options: ClaudeAgentSdkQueryOptions = {
     model: compiledSelection.apiModelId,
     tools: claudeAgentSdkQueryToolsForSdk(selectedTools),
@@ -1526,19 +1491,7 @@ export function makeClaudeQueryOptions(input: {
       ].join("\n\n"),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
-    ...(input.readCurrentPinnedRules === undefined
-      ? {}
-      : {
-          hooks: {
-            SessionStart: [
-              claudePinnedRulesHook({
-                readCurrentPinnedRules: input.readCurrentPinnedRules,
-                openedWithPinnedRules: (input.pinnedRules ?? "") !== "",
-                onReadRejected: input.onPinnedRulesReadRejected ?? (() => {}),
-              }),
-            ],
-          },
-        }),
+    ...(hooks === undefined ? {} : { hooks }),
   };
   const additionalDirectories = [
     ...(input.cwd === null ? [] : [input.cwd]),
@@ -9717,6 +9670,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const shouldResume =
             resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
           const readPinnedRules = turnInput.readPinnedRules;
+          const harness = turnInput.harness;
           const toolSearchOverride = yield* resolveToolSearchOverride(turnInput.runtimePolicy.cwd);
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,
@@ -9757,12 +9711,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   // The signal interrupts a read that hangs past the hook timeout.
                   readCurrentPinnedRules: (signal: AbortSignal) =>
                     runPromise(readPinnedRules, { signal }),
-                  onPinnedRulesReadRejected: (cause: unknown) => {
-                    void runPromise(
-                      Effect.logWarning("Pinned rules read failed in the compact hook.", {
-                        cause,
-                      }),
-                    );
+                }),
+            onPinnedRulesReadRejected: (cause: unknown) => {
+              void runPromise(Effect.logWarning("A harness hook read failed.", { cause }));
+            },
+            ...(harness === undefined
+              ? {}
+              : {
+                  harness: {
+                    readLedgerState: (signal: AbortSignal) =>
+                      runPromise(harness.readLedgerState, { signal }),
+                    readStructure: (signal: AbortSignal) =>
+                      runPromise(harness.readStructure, { signal }),
+                    delegatedChild: turnInput.appThread.lineage.relationshipToParent === "subagent",
                   },
                 }),
             ...(toolSearchOverride === undefined ? {} : { toolSearchOverride }),

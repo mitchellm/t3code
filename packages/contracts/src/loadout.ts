@@ -21,6 +21,14 @@ export const LoadoutRole = Schema.Struct({
 });
 export type LoadoutRole = typeof LoadoutRole.Type;
 
+/**
+ * How work is split. `managers` keeps the top-level thread from editing or running shell
+ * commands itself, so every change goes through a delegated role.
+ */
+export const LOADOUT_STRUCTURES = ["solo", "workers", "managers"] as const;
+export const LoadoutStructure = Schema.Literals(LOADOUT_STRUCTURES);
+export type LoadoutStructure = typeof LoadoutStructure.Type;
+
 /** A named agent structure. A role that is absent runs on the thread's own model. */
 export const Loadout = Schema.Struct({
   id: LoadoutId,
@@ -33,6 +41,8 @@ export const Loadout = Schema.Struct({
     worker: Schema.optionalKey(LoadoutRole),
     judge: Schema.optionalKey(LoadoutRole),
   }),
+  /** Absent follows the roles: none is solo, any is workers. Only an explicit choice is managers. */
+  structure: Schema.optionalKey(LoadoutStructure),
 });
 export type Loadout = typeof Loadout.Type;
 

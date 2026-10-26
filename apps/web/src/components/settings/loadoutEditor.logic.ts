@@ -71,7 +71,11 @@ export const sameRoles = (a: Loadout, b: Loadout) =>
   LOADOUT_ROLE_NAMES.every((name) => sameRole(a.roles[name], b.roles[name]));
 
 export const sameLoadout = (a: Loadout, b: Loadout) =>
-  a.id === b.id && a.name === b.name && a.description === b.description && sameRoles(a, b);
+  a.id === b.id &&
+  a.name === b.name &&
+  a.description === b.description &&
+  a.structure === b.structure &&
+  sameRoles(a, b);
 
 const sameLoadoutShape = (a: Loadout, b: Loadout) => a.name === b.name && sameRoles(a, b);
 

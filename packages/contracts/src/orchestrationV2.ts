@@ -332,6 +332,11 @@ export const OrchestrationV2ContextCapabilities = Schema.Struct({
   // transcript, so they survive compaction. Capabilities persisted before this
   // field existed decode to false rather than overclaiming.
   deliversPinnedRules: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Fork: the adapter keeps the agent working inside its own loop while the task ledger has open
+  // items, so the server's between-turn ledger auto-continue stands aside. Absent means false.
+  blocksStopWithOpenLedger: Schema.optionalKey(Schema.Boolean),
+  // Fork: the adapter denies the top-level thread's own edits under a `managers` loadout.
+  enforcesManagersStructure: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2ContextCapabilities = typeof OrchestrationV2ContextCapabilities.Type;
 

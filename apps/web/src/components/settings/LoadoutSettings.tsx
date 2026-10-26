@@ -1,8 +1,10 @@
 import {
   DEFAULT_LOADOUTS,
   LOADOUT_ROLE_NAMES,
+  LOADOUT_STRUCTURES,
   type Loadout,
   type LoadoutRoleName,
+  type LoadoutStructure,
   type ProviderInstanceId,
   SOLO_LOADOUT_ID,
 } from "@t3tools/contracts";
@@ -65,6 +67,20 @@ const ISSUE_LABELS: Record<LoadoutRoleIssueKind, string> = {
 const DEFAULT_EFFORT = "__default__";
 
 const newId = () => `custom-${randomUUID()}`;
+
+const DEFAULT_STRUCTURE = "default";
+
+const STRUCTURE_LABELS: Record<LoadoutStructure | typeof DEFAULT_STRUCTURE, string> = {
+  default: "From roles",
+  solo: "Solo",
+  workers: "Workers",
+  managers: "Managers (top level delegates every edit; Claude only)",
+};
+
+const STRUCTURE_CHOICES: ReadonlyArray<keyof typeof STRUCTURE_LABELS> = [
+  DEFAULT_STRUCTURE,
+  ...LOADOUT_STRUCTURES,
+];
 
 const isBuiltIn = (loadout: Loadout) =>
   DEFAULT_LOADOUTS.some((builtIn) => sameLoadout(builtIn, loadout));
@@ -230,6 +246,32 @@ function LoadoutEditor(props: {
           }
         }}
       />
+      <div className="flex items-center gap-2">
+        <span className="w-24 shrink-0 text-muted-foreground text-xs">Structure</span>
+        <Select
+          value={loadout.structure ?? DEFAULT_STRUCTURE}
+          onValueChange={(value) => {
+            if (value === null) return;
+            const { structure: _previous, ...rest } = loadout;
+            props.onChange(
+              value === DEFAULT_STRUCTURE
+                ? rest
+                : { ...rest, structure: value as LoadoutStructure },
+            );
+          }}
+        >
+          <SelectTrigger aria-label="Loadout structure" size="sm" className="w-fit">
+            <SelectValue>{STRUCTURE_LABELS[loadout.structure ?? DEFAULT_STRUCTURE]}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            {STRUCTURE_CHOICES.map((structure) => (
+              <SelectItem key={structure} value={structure}>
+                {STRUCTURE_LABELS[structure]}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      </div>
       {LOADOUT_ROLE_NAMES.map((name) => (
         <RoleRow
           key={name}

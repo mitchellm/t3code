@@ -44,6 +44,7 @@ import * as PreviewAgentActivity from "../preview/PreviewAgentActivity.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
+import { type HarnessThreadReads, makeHarnessPort } from "./HarnessState.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
@@ -575,6 +576,8 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly loadRunInterruptReason?: () => Effect.Effect<string | undefined, never>;
   /** Current thread pins; absent means `appThread.rulePins` as of turn start. */
   readonly readThreadPins?: () => Effect.Effect<ReadonlyArray<ThreadRulePin>, unknown>;
+  // Fork: absent means the provider gets no harness port.
+  readonly harnessReads?: HarnessThreadReads;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -1680,6 +1683,17 @@ export const layer: Layer.Layer<
           ...(appContext.length === 0 ? {} : { appContext }),
           ...(pinnedRules === "" ? {} : { pinnedRules }),
           readPinnedRules,
+          ...(input.harnessReads === undefined
+            ? {}
+            : {
+                harness: makeHarnessPort(input.harnessReads, (projectId) =>
+                  serverSettings.getSettings.pipe(
+                    Effect.map(
+                      (settings) => resolveProjectSettings(settings, projectId).settings.loadouts,
+                    ),
+                  ),
+                ),
+              }),
         };
         // Check after the context read: ingestion can settle the run while
         // it awaits. A failed ownership read fails the start below.

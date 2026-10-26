@@ -4,6 +4,8 @@ import {
   type Ledger,
   MessageId,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ProviderSession,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type RunId,
   type ThreadId,
@@ -63,19 +65,33 @@ function continuationText(
   ].join("\n\n");
 }
 
+function providerBlocksStopWithOpenLedger(
+  records: {
+    readonly providerThreads: ReadonlyArray<OrchestrationV2ProviderThread>;
+    readonly providerSessions: ReadonlyArray<OrchestrationV2ProviderSession>;
+  },
+  run: OrchestrationV2Run,
+): boolean {
+  const sessionId = records.providerThreads.find(
+    ({ id }) => id === run.providerThreadId,
+  )?.providerSessionId;
+  return (
+    records.providerSessions.find(({ id }) => id === sessionId)?.capabilities.context
+      .blocksStopWithOpenLedger === true
+  );
+}
+
 const NOTICE_TITLES_SHOWN = 3;
 const NOTICE_TITLE_MAX_CHARS = 48;
 
-function stopNoticeText(
-  stuck: Extract<LedgerAutoContinueDecision, { type: "stuck" }>,
-  ledger: Ledger,
-): string {
-  const count = stuck.openIds.length;
-  const why =
-    stuck.reason === "cap"
-      ? `reached the limit of ${LEDGER_AUTO_CONTINUE_CAP} automatic follow-ups`
-      : "no progress last round";
-  const titles = stuck.openIds.map((id) => {
+const stuckReason = (stuck: Extract<LedgerAutoContinueDecision, { type: "stuck" }>) =>
+  stuck.reason === "cap"
+    ? `reached the limit of ${LEDGER_AUTO_CONTINUE_CAP} automatic follow-ups`
+    : "no progress last round";
+
+function stopNoticeText(openIds: ReadonlyArray<string>, why: string, ledger: Ledger): string {
+  const count = openIds.length;
+  const titles = openIds.map((id) => {
     const title = ledger.items.find((item) => item.id === id)?.title ?? id;
     return title.length > NOTICE_TITLE_MAX_CHARS
       ? `${title.slice(0, NOTICE_TITLE_MAX_CHARS - 1)}…`
@@ -98,7 +114,15 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   const { orchestrator } = deps;
   const records = yield* orchestrator.getThreadRecords(
     input.threadId,
-    ["runs", "runtimeRequests", "ledger", "turnItems", "providerThreads", "subagents"],
+    [
+      "runs",
+      "runtimeRequests",
+      "ledger",
+      "turnItems",
+      "providerThreads",
+      "providerSessions",
+      "subagents",
+    ],
     { turnItemTypes: ["run_interrupt_request"] },
   );
   const { thread, runs, runtimeRequests, ledger, turnItems, providerThreads, subagents } = records;
@@ -137,6 +161,20 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   // A stop that raced the provider's own completion still means the user wants this to end.
   if (userStoppedRunIds.has(run.id)) return;
   if (runtimeRequests.some((request) => request.status === "pending")) return;
+  // Fork: a provider that blocks its own stop kept the agent going inside the run, so a run that
+  // still completed with items open means that gate gave up. No follow-up; say so instead.
+  if (providerBlocksStopWithOpenLedger(records, run)) {
+    const openIds = ledger.items
+      .filter((item) => item.status === "open" || item.status === "in_progress")
+      .map(({ id }) => id);
+    yield* postStopNotice(
+      deps,
+      input.threadId,
+      run,
+      stopNoticeText(openIds, "the agent stopped after repeated in-run nudges", ledger),
+    );
+    return;
+  }
 
   const ordinalByRun = new Map(runs.map((candidate) => [candidate.id, candidate.ordinal]));
   const newestFirst = runs.toSorted((a, b) => b.ordinal - a.ordinal);
@@ -171,53 +209,12 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   });
   if (decision.type === "idle") return;
   if (decision.type === "stuck") {
-    // The timeline notice says why; the unread mark is the existing "look at me" signal.
-    const now = yield* DateTime.now;
-    const noticeCommandId = CommandId.make(`server:ledger-stuck-notice:${run.id}`);
-    yield* deps.eventSink.commitCommand({
-      commandId: noticeCommandId,
-      threadId: input.threadId,
-      commandType: "ledger.auto-continue.stop",
-      acceptedAt: now,
-      effects: [],
-      events: [
-        {
-          id: yield* deps.ids.allocate.event({
-            threadId: input.threadId,
-            commandId: noticeCommandId,
-          }),
-          type: "turn-item.updated",
-          threadId: input.threadId,
-          runId: run.id,
-          ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
-          providerInstanceId: run.providerInstanceId,
-          occurredAt: now,
-          payload: {
-            id: deps.ids.derive.runSignalTurnItem({
-              runId: run.id,
-              signal: "ledger-auto-continue-stopped",
-            }),
-            threadId: input.threadId,
-            runId: run.id,
-            nodeId: run.rootNodeId,
-            providerThreadId: run.providerThreadId,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            // Placeholder: EventSink assigns turn item positions when it commits.
-            ordinal: 0,
-            status: "completed",
-            title: "Auto-continue stopped",
-            startedAt: now,
-            completedAt: now,
-            updatedAt: now,
-            type: "system_notice",
-            message: stopNoticeText(decision, ledger),
-          },
-        },
-      ],
-    });
-    yield* markUnread(orchestrator, input.threadId, run.id);
+    yield* postStopNotice(
+      deps,
+      input.threadId,
+      run,
+      stopNoticeText(decision.openIds, stuckReason(decision), ledger),
+    );
     return;
   }
   yield* orchestrator.dispatch({
@@ -237,6 +234,58 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
     createdBy: "agent",
     creationSource: "server",
   });
+});
+
+/** The timeline notice says why; the unread mark is the existing "look at me" signal. */
+const postStopNotice = Effect.fn("LedgerAutoContinue.postStopNotice")(function* (
+  deps: LedgerAutoContinueDeps,
+  threadId: ThreadId,
+  run: OrchestrationV2Run,
+  message: string,
+) {
+  const now = yield* DateTime.now;
+  const noticeCommandId = CommandId.make(`server:ledger-stuck-notice:${run.id}`);
+  yield* deps.eventSink.commitCommand({
+    commandId: noticeCommandId,
+    threadId,
+    commandType: "ledger.auto-continue.stop",
+    acceptedAt: now,
+    effects: [],
+    events: [
+      {
+        id: yield* deps.ids.allocate.event({ threadId, commandId: noticeCommandId }),
+        type: "turn-item.updated",
+        threadId,
+        runId: run.id,
+        ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
+        providerInstanceId: run.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: deps.ids.derive.runSignalTurnItem({
+            runId: run.id,
+            signal: "ledger-auto-continue-stopped",
+          }),
+          threadId,
+          runId: run.id,
+          nodeId: run.rootNodeId,
+          providerThreadId: run.providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          // Placeholder: EventSink assigns turn item positions when it commits.
+          ordinal: 0,
+          status: "completed",
+          title: "Auto-continue stopped",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "system_notice",
+          message,
+        },
+      },
+    ],
+  });
+  yield* markUnread(deps.orchestrator, threadId, run.id);
 });
 
 const markUnread = (

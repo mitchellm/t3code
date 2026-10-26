@@ -101,8 +101,10 @@ import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import {
   buildCodexAdditionalContext,
+  buildCodexChunkedContext,
   buildCodexPinnedRulesContext,
 } from "../../provider/CodexDeveloperInstructions.ts";
+import { formatLedgerBlock } from "./HarnessHooks.ts";
 import {
   describeMcpElicitation,
   toMcpElicitationResponse,
@@ -740,6 +742,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
     readonly pinnedRules?: string;
+    readonly ledgerState?: string;
   }) {
     const runtimeModeDefaults = codexRuntimeModeTurnDefaults(input.runtimePolicy.runtimeMode);
     const approvalPolicy =
@@ -778,7 +781,11 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
         : undefined;
     // The user wrote these rules, so they are trusted (developer role on
     // restore). They do not depend on the T3 MCP, and they are not app text.
-    const pinnedContext = buildCodexPinnedRulesContext(input.pinnedRules ?? "");
+    const pinnedContext = {
+      ...buildCodexPinnedRulesContext(input.pinnedRules ?? ""),
+      // Fork: server-written from the thread's ledger, so trusted like the rules.
+      ...buildCodexChunkedContext("ledger_state", input.ledgerState ?? ""),
+    };
     const additionalContext =
       t3Context === undefined &&
       Object.keys(pinnedContext).length === 0 &&
@@ -1692,12 +1699,36 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             NonNullable<CodexTurnStartParamsWithCollaborationMode["additionalContext"]>
           >(),
         );
+        // Fork: the ledger moves during a turn, so a mid-turn compaction re-reads it through the
+        // live turn's port rather than restoring the turn-start snapshot. Untraced: it only runs
+        // inside restoreAdditionalContext's span.
+        const refreshLedgerState = Effect.fnUntraced(function* (
+          threadId: string,
+          turnId: string,
+          context: NonNullable<CodexTurnStartParamsWithCollaborationMode["additionalContext"]>,
+        ) {
+          const harness = (yield* Ref.get(activeTurns)).get(turnId)?.input.harness;
+          if (harness === undefined) return context;
+          const ledger = yield* harness.readLedgerState;
+          if (ledger === undefined) return context;
+          const fresh = {
+            ...Object.fromEntries(
+              Object.entries(context).filter(([key]) => !key.startsWith("ledger_state")),
+            ),
+            ...buildCodexChunkedContext("ledger_state", formatLedgerBlock(ledger.ledger) ?? ""),
+          };
+          yield* Ref.update(additionalContextByThread, (current) =>
+            new Map(current).set(threadId, fresh),
+          );
+          return fresh;
+        });
         // Codex drops client developer messages during compaction but only
         // resends additionalContext when it changes.
         const restoreAdditionalContext = Effect.fn("CodexAdapterV2.restoreAdditionalContext")(
-          function* (threadId: string) {
-            const context = (yield* Ref.get(additionalContextByThread)).get(threadId);
-            if (!context) return;
+          function* (threadId: string, turnId: string) {
+            const stored = (yield* Ref.get(additionalContextByThread)).get(threadId);
+            if (!stored) return;
+            const context = yield* refreshLedgerState(threadId, turnId, stored);
             yield* client.request("thread/inject_items", {
               threadId,
               items: Object.entries(context).map(([key, entry]) =>
@@ -4770,7 +4801,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           Effect.gen(function* () {
             if (payload.item.type === "contextCompaction")
               // Fork requests off the notification reader so it can read their responses.
-              yield* restoreAdditionalContext(payload.threadId).pipe(
+              yield* restoreAdditionalContext(payload.threadId, payload.turnId).pipe(
                 Effect.forkIn(scope, { startImmediately: true }),
               );
             if (
@@ -6276,6 +6307,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+            const ledgerState =
+              turnInput.harness === undefined
+                ? undefined
+                : formatLedgerBlock((yield* turnInput.harness.readLedgerState)?.ledger);
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
@@ -6289,6 +6324,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ...(turnInput.pinnedRules === undefined
                 ? {}
                 : { pinnedRules: turnInput.pinnedRules }),
+              ...(ledgerState === undefined ? {} : { ledgerState }),
             });
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);

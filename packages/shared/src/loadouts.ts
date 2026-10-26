@@ -3,6 +3,7 @@ import {
   type Loadout,
   type LoadoutRole,
   type LoadoutRoleName,
+  type LoadoutStructure,
   type OrchestratorMcpTarget,
   type ProviderOptionSelection,
   SOLO_LOADOUT_ID,
@@ -38,6 +39,9 @@ export function resolveLoadout(
 }
 
 export const loadoutHasJudge = (loadout: Loadout): boolean => loadout.roles.judge !== undefined;
+
+export const loadoutStructure = (loadout: Loadout): LoadoutStructure =>
+  loadout.structure ?? (Object.keys(loadout.roles).length === 0 ? "solo" : "workers");
 
 export type ThreadLoadoutDecision =
   | { readonly _tag: "set"; readonly loadout: ThreadLoadout | null }
