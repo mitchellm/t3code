@@ -112,7 +112,7 @@ export function loadoutDelegationTarget(
 }
 
 // Drivers name their effort option differently (Claude "effort", Codex "reasoningEffort").
-const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["effort", "reasoningEffort"]);
+export const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["effort", "reasoningEffort"]);
 
 /**
  * Turns a role into a delegation target against the live provider list. Returns undefined when

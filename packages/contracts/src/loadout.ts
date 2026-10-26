@@ -86,4 +86,52 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
     description: "Cheap explorers read and report across the codebase. Nothing is implemented.",
     roles: { explorer: claude("claude-haiku-5-5") },
   },
+  // Fork presets. Ids are the claudeAgent slugs in the model manifest; on an install without that
+  // instance every role degrades to the thread's own model (see loadoutRoleTarget).
+  {
+    id: "opus-blowout",
+    name: "Opus blowout",
+    description: "Opus in every role. The most capable and the most expensive structure.",
+    roles: {
+      planner: claude("claude-opus-5-5", "xhigh"),
+      subPlanner: claude("claude-opus-5-5", "high"),
+      explorer: claude("claude-opus-5-5", "high"),
+      worker: claude("claude-opus-5-5", "high"),
+      judge: claude("claude-opus-5-5", "high"),
+    },
+  },
+  {
+    id: "blitz",
+    name: "Blitz",
+    description:
+      "Opus plans, Sonnet implements and judges, Haiku reads. Balanced cost for big tasks.",
+    roles: {
+      planner: claude("claude-opus-5-5", "high"),
+      explorer: claude("claude-haiku-5-5"),
+      worker: claude("claude-sonnet-5-5"),
+      judge: claude("claude-sonnet-5-5"),
+    },
+  },
+  {
+    id: "napalm",
+    name: "Napalm",
+    description: "Fast and cheap: Sonnet plans and works, Haiku explores and judges.",
+    roles: {
+      planner: claude("claude-sonnet-5-5"),
+      explorer: claude("claude-haiku-5-5"),
+      worker: claude("claude-sonnet-5-5"),
+      judge: claude("claude-haiku-5-5"),
+    },
+  },
+  {
+    id: "haiku-workers",
+    name: "Haiku workers",
+    description:
+      "Opus plans and judges carefully; Haiku at xhigh effort does the bulk of the implementing.",
+    roles: {
+      planner: claude("claude-opus-5-5", "xhigh"),
+      worker: claude("claude-haiku-5-5", "xhigh"),
+      judge: claude("claude-opus-5-5", "high"),
+    },
+  },
 ];
