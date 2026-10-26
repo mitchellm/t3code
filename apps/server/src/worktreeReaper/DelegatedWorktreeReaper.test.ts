@@ -12,11 +12,15 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as GitManager from "../git/GitManager.ts";
 import * as Settings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as DelegatedWorktreeReaper from "./DelegatedWorktreeReaper.ts";
@@ -90,10 +94,11 @@ const fixture = (names: ReadonlyArray<string>) =>
     yield* fs.writeFileString(`${repo}/tracked.txt`, "original\n");
     yield* run(repo, ["add", "."]);
     yield* run(repo, ["commit", "-m", "initial"]);
-    yield* fs.makeDirectory(config.worktreesDir, { recursive: true });
+    // T3 keeps worktrees at <managed root>/<repo>/<name>.
+    yield* fs.makeDirectory(`${config.worktreesDir}/repo`, { recursive: true });
     const worktrees: Record<string, string> = {};
     for (const name of names) {
-      worktrees[name] = `${config.worktreesDir}/${name}`;
+      worktrees[name] = `${config.worktreesDir}/repo/${name}`;
       yield* run(repo, ["worktree", "add", "-b", name, worktrees[name]!]);
       yield* run(worktrees[name]!, ["config", "user.email", "reaper@example.test"]);
       yield* run(worktrees[name]!, ["config", "user.name", "Reaper test"]);
@@ -101,8 +106,21 @@ const fixture = (names: ReadonlyArray<string>) =>
     return { fs, repo, run, worktrees, config };
   });
 
-const reaperFor = (repo: string, threads: ReadonlyArray<OrchestrationV2ThreadShell>) =>
+interface ReaperHooks {
+  /** Runs right after the reaper reads its snapshot; returns the threads as they are by then. */
+  afterSnapshot?: () => ReadonlyArray<OrchestrationV2ThreadShell>;
+  /** A provider session whose working directory is this path, reported live. */
+  liveSessionCwd?: string;
+  readonly invalidated: string[];
+}
+
+const reaperFor = (
+  repo: string,
+  threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+  hooks: ReaperHooks = { invalidated: [] },
+) =>
   Effect.gen(function* () {
+    let current = threads;
     const git = yield* GitVcsDriver.GitVcsDriver;
     const config = yield* ServerConfig.ServerConfig;
     const context = yield* Layer.build(DelegatedWorktreeReaper.layer).pipe(
@@ -115,8 +133,50 @@ const reaperFor = (repo: string, threads: ReadonlyArray<OrchestrationV2ThreadShe
         listShells: () => Effect.succeed([{ id: projectId, workspaceRoot: repo }]),
       } as unknown as ProjectStore.ProjectStoreV2["Service"]),
       Effect.provideService(ProjectionStore.ProjectionStoreV2, {
-        getShellSnapshot: () => Effect.succeed({ threads, archivedThreads: [] }),
+        getShellSnapshot: () =>
+          Effect.sync(() => {
+            const snapshot = { threads: current, archivedThreads: [] };
+            current = hooks.afterSnapshot?.() ?? current;
+            return snapshot;
+          }),
+        getThreadWorktreePaths: () =>
+          Effect.sync(() =>
+            current.flatMap((thread) =>
+              thread.worktreePath === null
+                ? []
+                : [{ threadId: thread.id, worktreePath: thread.worktreePath }],
+            ),
+          ),
+        getThreadShell: (threadId: ThreadId) =>
+          Effect.sync(() => current.find((thread) => thread.id === threadId) ?? null),
       } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
+      Effect.provideService(ProviderSessionManager.ProviderSessionManagerV2, {
+        isLive: () => Effect.succeed(true),
+      } as unknown as ProviderSessionManager.ProviderSessionManagerV2["Service"]),
+      Effect.provideService(GitManager.GitManager, {
+        invalidateStatus: (cwd: string) => Effect.sync(() => void hooks.invalidated.push(cwd)),
+      } as unknown as GitManager.GitManager["Service"]),
+      Effect.provideService(SqlClient.SqlClient, (() =>
+        Effect.succeed(
+          hooks.liveSessionCwd === undefined
+            ? []
+            : [
+                {
+                  payload_json: JSON.stringify({
+                    id: "session-1",
+                    driver: "codex",
+                    providerInstanceId: "codex",
+                    status: "ready",
+                    cwd: hooks.liveSessionCwd,
+                    model: null,
+                    capabilities: CodexProviderCapabilitiesV2,
+                    createdAt: "2026-06-01T12:00:00.000Z",
+                    updatedAt: "2026-06-01T12:00:00.000Z",
+                    lastError: null,
+                  }),
+                },
+              ],
+        )) as unknown as SqlClient.SqlClient),
     );
     yield* TestClock.setTime(NOW_MS);
     return Context.get(context, DelegatedWorktreeReaper.DelegatedWorktreeReaper);
@@ -252,6 +312,78 @@ describe("DelegatedWorktreeReaper", () => {
       expect(outcomeOf(report, worktrees.young!)?.reason).toContain("grace");
       for (const name of ["running", "young", "waiting"])
         expect(yield* fs.exists(worktrees[name]!)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("keeps a worktree whose child resumed after the snapshot was read", () =>
+    Effect.gen(function* () {
+      const { fs, repo, worktrees } = yield* fixture(["resumed"]);
+      const finished = child("resumed", worktrees);
+      const hooks: ReaperHooks = {
+        invalidated: [],
+        // The child starts a new run between the reaper's snapshot and its removal.
+        afterSnapshot: () => [
+          parent,
+          { ...finished, status: "running", activeRunId: "run-2" as never },
+        ],
+      };
+      const reaper = yield* reaperFor(repo, [parent, finished], hooks);
+
+      const report = yield* reaper.reap();
+
+      expect(outcomeOf(report, worktrees.resumed!)?.outcome).toBe("kept");
+      expect(outcomeOf(report, worktrees.resumed!)?.reason).toContain("changed since check");
+      expect(yield* fs.exists(worktrees.resumed!)).toBe(true);
+      expect(hooks.invalidated).toEqual([]);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("keeps a worktree while a live provider session is open in it", () =>
+    Effect.gen(function* () {
+      const { fs, repo, worktrees } = yield* fixture(["session"]);
+      const reaper = yield* reaperFor(repo, [parent, child("session", worktrees)], {
+        invalidated: [],
+        liveSessionCwd: worktrees.session!,
+      });
+
+      const report = yield* reaper.reap();
+
+      expect(outcomeOf(report, worktrees.session!)?.reason).toContain("session is still open");
+      expect(yield* fs.exists(worktrees.session!)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("refreshes git status after removing, and treats interrupted as finished", () =>
+    Effect.gen(function* () {
+      const { fs, repo, worktrees } = yield* fixture(["stopped"]);
+      const hooks: ReaperHooks = { invalidated: [] };
+      const reaper = yield* reaperFor(
+        repo,
+        [parent, child("stopped", worktrees, { status: "interrupted" })],
+        hooks,
+      );
+
+      expect(outcomeOf(yield* reaper.reap(), worktrees.stopped!)?.outcome).toBe("removed");
+      expect(yield* fs.exists(worktrees.stopped!)).toBe(false);
+      expect(hooks.invalidated).toEqual([repo]);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("only reaps worktrees at exactly <root>/<repo>/<name>", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run, config } = yield* fixture([]);
+      const deep = `${config.worktreesDir}/repo/nested/deep`;
+      yield* run(repo, ["worktree", "add", "-b", "deep", deep]);
+      const reaper = yield* reaperFor(repo, [
+        parent,
+        shell({ id: ThreadId.make("thread-deep"), branch: "deep", worktreePath: deep }),
+      ]);
+
+      const entry = outcomeOf(yield* reaper.reap(), deep);
+
+      expect(entry?.outcome).toBe("kept");
+      expect(entry?.reason).toContain("not created by T3");
+      expect(yield* fs.exists(deep)).toBe(true);
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 

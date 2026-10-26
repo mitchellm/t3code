@@ -27,6 +27,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import { isolationReport, resolveDelegationWorkspace } from "./WorkerIsolation.ts";
 
 const codex = ProviderInstanceId.make("codex");
 const threadId = ThreadId.make("thread:worker-isolation");
@@ -262,6 +263,31 @@ describe("delegate_task default isolation", () => {
       assert.isUndefined(command?.workspaceStrategy);
       // The only failure is the refused test dispatch, never an isolation error.
       assert.include(JSON.stringify(exit), "Unable to create delegated task");
+    }),
+  );
+
+  it.effect("tells the parent which checkout the child got, including a fallback", () =>
+    Effect.gen(function* () {
+      const resolve = (isGitRepo: boolean, isolation?: "worktree" | "none") =>
+        resolveDelegationWorkspace({
+          delegation: { role: "worker", ...(isolation === undefined ? {} : { isolation }) },
+          thread: { projectId, worktreePath: null },
+          activeLoadout: Effect.succeed({ roles: { worker: role } }),
+          requireProject: () => Effect.succeed({ workspaceRoot: "/repo", title: "Project" }),
+          git: {
+            resolveCommit: () =>
+              isGitRepo
+                ? Effect.succeed({ commitSha })
+                : Effect.fail({ _tag: "GitCommandError" } as never),
+          },
+        });
+
+      assert.deepEqual(isolationReport(yield* resolve(true)), { isolation: "worktree" });
+      assert.deepEqual(isolationReport(yield* resolve(true, "none")), { isolation: "shared" });
+      const fellBack = isolationReport(yield* resolve(false));
+      assert.equal(fellBack.isolation, "shared");
+      assert.include(fellBack.isolationNote, "shares your checkout");
+      assert.deepEqual(isolationReport(undefined), {});
     }),
   );
 
