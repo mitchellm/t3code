@@ -61,6 +61,8 @@ const closeItem: LedgerCommand = {
   ledgerId,
   itemId,
   status: "closed",
+  // The agent's close: the judge gate applies to it, while a user's close is final.
+  createdBy: "agent",
 };
 
 describe("planLedgerCommand judge gate", () => {
@@ -76,7 +78,7 @@ describe("planLedgerCommand judge gate", () => {
     assert.isTrue(Result.isSuccess(explicit));
   });
 
-  it("refuses to close without a verdict or after a failing one when a judge is required", () => {
+  it("starts a judgement instead of closing without a verdict or after a failing one", () => {
     for (const verdictOnItem of [null, verdict("fail")]) {
       const planned = planLedgerCommand({
         command: closeItem,
@@ -84,8 +86,12 @@ describe("planLedgerCommand judge gate", () => {
         now,
         requiresJudge: true,
       });
-      assert.isTrue(Result.isFailure(planned));
-      assert.include(Result.isFailure(planned) ? planned.failure : "", "passing judge verdict");
+      const next =
+        Result.isSuccess(planned) && planned.success[0]?.type === "ledger.item.updated"
+          ? planned.success[0].payload.item
+          : undefined;
+      assert.equal(next?.status, "in_progress");
+      assert.isTrue(next?.judging);
     }
   });
 
@@ -152,19 +158,28 @@ describe("planLedgerCommand judge gate", () => {
       now,
       requiresJudge: true,
     });
-    assert.isTrue(Result.isFailure(closing));
+    const judging =
+      Result.isSuccess(closing) && closing.success[0]?.type === "ledger.item.updated"
+        ? closing.success[0].payload.item
+        : undefined;
+    assert.equal(judging?.status, "in_progress");
+    assert.isTrue(judging?.judging);
+    assert.isNull(judging?.verdict);
   });
 });
 
 describe("planLedgerCommand ledger-level judge requirement", () => {
   it("gates a close on the ledger's own requiresJudge with no parameter passed", () => {
-    const refused = planLedgerCommand({
+    const judged = planLedgerCommand({
       command: closeItem,
       ledger: { ...ledgerWith(), requiresJudge: true },
       now,
     });
-    assert.isTrue(Result.isFailure(refused));
-    assert.include(Result.isFailure(refused) ? refused.failure : "", "passing judge verdict");
+    assert.isTrue(
+      Result.isSuccess(judged) &&
+        judged.success[0]?.type === "ledger.item.updated" &&
+        judged.success[0].payload.item.judging === true,
+    );
 
     const passed = planLedgerCommand({
       command: closeItem,

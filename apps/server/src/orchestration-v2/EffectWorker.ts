@@ -18,6 +18,7 @@ import {
 } from "../observability/Metrics.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as LedgerAutoContinue from "./LedgerAutoContinue.ts";
+import * as LedgerJudgeRunner from "./LedgerJudgeRunner.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
@@ -86,6 +87,7 @@ export const layerExecutor: Layer.Layer<
   Effect.gen(function* () {
     const runFinalization = yield* RunFinalizationService.RunFinalizationService;
     const ledgerAutoContinue = yield* LedgerAutoContinue.LedgerAutoContinue;
+    const ledgerJudge = yield* LedgerJudgeRunner.LedgerJudgeRunner;
     const resourceCleanup = yield* ResourceCleanupService.ResourceCleanupService;
     const checkpointRollback = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -564,6 +566,48 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "ledger-judge.start": {
+            const request = effect.request;
+            return ledgerJudge
+              .start({
+                threadId: effect.threadId,
+                ledgerId: request.ledgerId,
+                itemId: request.itemId,
+                requestedAt: request.requestedAt,
+              })
+              .pipe(
+                // Out of retries: hand the item back rather than leave it judging for good.
+                Effect.tapError((error) =>
+                  willRetry
+                    ? Effect.void
+                    : threads
+                        .dispatch({
+                          type: "ledger.item.judgement.abandon",
+                          commandId: CommandId.make(`${effect.id}:abandon`),
+                          threadId: effect.threadId,
+                          ledgerId: request.ledgerId,
+                          itemId: request.itemId,
+                          reason: `The judge could not be started: ${error.detail}`,
+                        })
+                        .pipe(
+                          Effect.catchCause((cause) =>
+                            Effect.logWarning("Failed to hand back an unstarted ledger judge", {
+                              effectId: effect.id,
+                              cause,
+                            }),
+                          ),
+                        ),
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: request.type,
+                      cause,
+                    }),
+                ),
+              );
+          }
         }
       },
     });

@@ -17,7 +17,12 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
 import { v2Now, v2Projection, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
 import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
-import { deriveLedgerProgress, formatLedgerProgress } from "./threadLedger.ts";
+import {
+  deriveLedgerProgress,
+  deriveLedgerView,
+  formatLedgerProgress,
+  ledgerItemStatusLabel,
+} from "./threadLedger.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE } from "./threadState.ts";
 
 const item = (id: string, status: LedgerItem["status"]): LedgerItem => ({
@@ -87,11 +92,69 @@ describe("formatLedgerProgress", () => {
     ).toBe("1 of 2 done · 1 dropped");
   });
 
+  it("leaves deferred items out of the total and the remaining count", () => {
+    const progress = deriveLedgerProgress(
+      ledgerOf([...Array(5).fill("closed"), "open", "in_progress", "open", "deferred", "deferred"]),
+    );
+    expect(progress).toMatchObject({ deferred: 2, remaining: 3, scope: 8 });
+    expect(formatLedgerProgress(progress)).toBe("5 of 8 done · 2 deferred");
+    expect(deriveLedgerProgress(ledgerOf(["closed", "deferred"])).active).toBe(false);
+  });
+
   it("handles a ledger with no items and one where everything was dropped", () => {
     expect(formatLedgerProgress(deriveLedgerProgress(ledgerOf([])))).toBe("No items yet");
     expect(formatLedgerProgress(deriveLedgerProgress(ledgerOf(["dropped", "dropped"])))).toBe(
       "All 2 dropped",
     );
+  });
+});
+
+describe("deriveLedgerView", () => {
+  const shaped = (items: ReadonlyArray<LedgerItem>): Ledger => ({ ...ledgerOf([]), items });
+  const id = LedgerItemId.make;
+
+  it("nests children under their parent in order and keeps deferred items apart", () => {
+    const view = deriveLedgerView(
+      shaped([
+        item("P", "in_progress"),
+        item("Q", "open"),
+        { ...item("C1", "open"), parentItemId: id("P") },
+        { ...item("G", "open"), parentItemId: id("C1") },
+        { ...item("D", "deferred"), deferReason: "later", parentItemId: id("P") },
+        { ...item("C2", "closed"), parentItemId: id("P") },
+      ]),
+    );
+    expect(view.rows.map((row) => [row.item.id, row.depth])).toEqual([
+      ["P", 0],
+      ["C1", 1],
+      ["G", 2],
+      ["C2", 1],
+      ["Q", 0],
+    ]);
+    expect(view.deferred.map((entry) => entry.id)).toEqual(["D"]);
+  });
+
+  it("lists only unfinished blockers, and lifts a child whose parent is gone or deferred", () => {
+    const view = deriveLedgerView(
+      shaped([
+        item("A", "open"),
+        { ...item("B", "closed") },
+        { ...item("C", "open"), blockedBy: [id("A"), id("B")] },
+        { ...item("X", "deferred"), deferReason: "later" },
+        { ...item("Y", "open"), parentItemId: id("X") },
+        { ...item("Z", "open"), parentItemId: id("missing") },
+      ]),
+    );
+    const row = (name: string) => view.rows.find((entry) => entry.item.id === name);
+    expect(row("C")?.blockedBy).toEqual(["A"]);
+    expect(row("A")?.blockedBy).toEqual([]);
+    expect(row("Y")?.depth).toBe(0);
+    expect(row("Z")?.depth).toBe(0);
+  });
+
+  it("labels an item under judgement as judging", () => {
+    expect(ledgerItemStatusLabel({ ...item("J", "in_progress"), judging: true })).toBe("Judging");
+    expect(ledgerItemStatusLabel(item("J", "deferred"))).toBe("Deferred");
   });
 });
 

@@ -910,4 +910,62 @@ describe("task ledger contracts", () => {
       decodeCommand({ ...update, status: "closed", verdict: ledger.items[0]?.verdict }),
     ).not.toHaveProperty("verdict");
   });
+
+  it("keeps a client from starting or ending a judgement through an item update", () => {
+    const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+    const decoded = decodeCommand({
+      type: "ledger.item.update",
+      commandId: "command-1",
+      threadId: "thread-1",
+      ledgerId: "ledger-1",
+      itemId: "item-1",
+      status: "closed",
+      judging: false,
+    });
+    expect(decoded).not.toHaveProperty("judging");
+  });
+
+  it("decodes the ledger shape fields, and old ledgers without them", () => {
+    const shaped = {
+      ...ledger,
+      items: [
+        ...ledger.items,
+        {
+          ...ledger.items[1],
+          id: "item-3",
+          status: "deferred",
+          dropReason: null,
+          deferReason: "Belongs to the next task",
+          blockedBy: ["item-1"],
+          parentItemId: "item-1",
+          judging: true,
+        },
+      ],
+    };
+    const decoded = decodeProjection({ ...projection, ledger: shaped });
+    const third = decoded.ledger?.items[2];
+    expect(third?.status).toBe("deferred");
+    expect(third?.blockedBy).toEqual(["item-1"]);
+    expect(third?.parentItemId).toBe("item-1");
+    expect(encodeProjection(decoded).ledger).toEqual(shaped);
+    const old = decodeProjection({ ...projection, ledger }).ledger?.items[0];
+    expect(old).not.toHaveProperty("blockedBy");
+    expect(old).not.toHaveProperty("judging");
+  });
+
+  it("accepts structure-only item updates", () => {
+    const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+    const update = {
+      type: "ledger.item.update",
+      commandId: "command-1",
+      threadId: "thread-1",
+      ledgerId: "ledger-1",
+      itemId: "item-1",
+    };
+    expect(decodeCommand({ ...update, blockedBy: [] }).type).toBe("ledger.item.update");
+    expect(decodeCommand({ ...update, parentItemId: null }).type).toBe("ledger.item.update");
+    expect(decodeCommand({ ...update, status: "deferred", deferReason: "later" }).type).toBe(
+      "ledger.item.update",
+    );
+  });
 });

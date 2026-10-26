@@ -100,6 +100,7 @@ import {
   type LedgerCommand,
   type LedgerEventBody,
   ledgerEventFromPlan,
+  ledgerJudgeEffects,
   planLedgerCommand,
 } from "./TaskLedger.ts";
 import {
@@ -545,6 +546,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "ledger.close":
     case "ledger.reopen":
     case "ledger.item.verdict.record":
+    case "ledger.item.judgement.abandon":
+    case "ledger.item.judgement.started":
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.wake-policy":
@@ -11681,6 +11684,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchLedgerCommand = Effect.fn("orchestrationV2.dispatch.ledger")(function* (
     command: LedgerCommand,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     const { thread, ledger } = yield* projectionStore
       .getThreadRecords(command.threadId, ["ledger"])
@@ -11742,6 +11746,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
     }
+    yield* Ref.update(effects, (current) => [
+      ...current,
+      ...ledgerJudgeEffects(command, ledger, planned.success),
+    ]);
     // The planner returns no events for a redundant command; that is accepted, not an error.
     return { redundant: planned.success.length === 0 };
   });
@@ -12109,7 +12117,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "ledger.close":
       case "ledger.reopen":
       case "ledger.item.verdict.record":
-        acceptsNoEvents = (yield* dispatchLedgerCommand(command, events)).redundant;
+      case "ledger.item.judgement.abandon":
+      case "ledger.item.judgement.started":
+        acceptsNoEvents = (yield* dispatchLedgerCommand(command, events, effects)).redundant;
         break;
       default:
         return yield* dispatchUnsupported(command);

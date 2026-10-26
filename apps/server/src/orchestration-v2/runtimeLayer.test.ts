@@ -12,6 +12,8 @@ import {
   CommandId,
   ContextTransferId,
   EventId,
+  LedgerId,
+  LedgerItemId,
   MessageId,
   NodeId,
   RuntimeRequestId,
@@ -62,6 +64,7 @@ import { ROLLBACK_FAILED_MESSAGE } from "./CheckpointRollbackService.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
+import * as LedgerJudgeRunner from "./LedgerJudgeRunner.ts";
 import * as ProviderRuntimeRecoveryService from "./ProviderRuntimeRecoveryService.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -713,6 +716,33 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           }),
       };
     });
+
+  it.effect("binds the ledger judge runner the server sees to the one the effect worker runs", () =>
+    Effect.gen(function* () {
+      // The instance the runtime layer exports, which the server binds at startup.
+      const runner = yield* LedgerJudgeRunner.LedgerJudgeRunner;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const started: Array<string> = [];
+      yield* runner.bind({ start: (input) => Effect.sync(() => void started.push(input.itemId)) });
+      yield* outbox.enqueue([
+        {
+          id: "effect:runtime-ledger-judge",
+          commandId: CommandId.make("runtime-ledger-judge"),
+          threadId: ThreadId.make("runtime-ledger-judge"),
+          request: {
+            type: "ledger-judge.start",
+            ledgerId: LedgerId.make("ledger:runtime"),
+            itemId: LedgerItemId.make("L1"),
+            requestedAt: "2026-01-01T00:00:00.000Z",
+          },
+        },
+      ]);
+      yield* worker.drain();
+      // Two instances would leave the worker's unbound, failing the effect instead.
+      assert.deepEqual(started, ["L1"]);
+    }),
+  );
 
   it.effect("projects a rollback that fails every attempt and clears it on the next one", () =>
     Effect.gen(function* () {

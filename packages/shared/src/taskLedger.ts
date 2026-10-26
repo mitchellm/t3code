@@ -14,7 +14,7 @@ export type LedgerAutoContinueDecision =
       readonly type: "continue";
       readonly round: number;
       readonly open: ReadonlyArray<LedgerItem>;
-      readonly items: ReadonlyArray<Pick<LedgerItem, "id" | "status">>;
+      readonly items: ReadonlyArray<LedgerProgressMark>;
     }
   | {
       readonly type: "stuck";
@@ -30,24 +30,26 @@ type LedgerContinueMessage = Pick<
 const isOpen = (item: Pick<LedgerItem, "status">) =>
   item.status === "open" || item.status === "in_progress";
 
-const signatureOf = (items: ReadonlyArray<Pick<LedgerItem, "id" | "status">>) =>
+/** What a follow-up records per item; a judge's hand-back changes it without a status change. */
+export type LedgerProgressMark = Pick<LedgerItem, "id" | "status" | "judging" | "judgements">;
+
+const signatureOf = (items: ReadonlyArray<LedgerProgressMark>) =>
   items
-    .map((item) => `${item.id}:${item.status}`)
+    .map((item) => `${item.id}:${item.status}:${item.judging === true}:${item.judgements ?? 0}`)
     .sort()
     .join("\n");
 
+const progressMark = ({ id, status, judging, judgements }: LedgerItem): LedgerProgressMark => ({
+  id,
+  status,
+  ...(judging === true ? { judging } : {}),
+  ...(judgements === undefined ? {} : { judgements }),
+});
+
 /**
- * What the server does when a run ends and the thread's ledger may still have work. Derived from
- * the ledger and the thread's messages alone: each follow-up records its round and the item
- * statuses it was sent against, so the streak since the user last spoke is both the counter and
- * the progress check, and neither can drift from the event log. The server calls this when a run
- * ends and records a stop as a timeline notice; clients render that notice and do not re-derive it.
- *
- * `messages` is chronological. Only a message the user sent resets the streak; the server's own
- * wakes (limit resume, restart continuation, other notifications) neither count nor reset it.
- *
- * A follow-up in that streak whose run is in `cancelledRunIds` means the user declined it, so the
- * thread stays quiet until their next message.
+ * Each follow-up records its round and the item statuses it was sent against, so the streak
+ * since the user last spoke (chronological `messages`; server wakes neither count nor reset it)
+ * is both counter and progress check. A follow-up in `cancelledRunIds` was declined: stay quiet.
  */
 export function decideLedgerAutoContinue(input: {
   readonly ledger: Ledger | undefined;
@@ -60,7 +62,7 @@ export function decideLedgerAutoContinue(input: {
   if (open.length === 0) return { type: "idle" };
 
   let streak = 0;
-  let previous: ReadonlyArray<Pick<LedgerItem, "id" | "status">> | undefined;
+  let previous: ReadonlyArray<LedgerProgressMark> | undefined;
   for (let index = input.messages.length - 1; index >= 0; index -= 1) {
     const message = input.messages[index]!;
     if (message.role !== "user") continue;
@@ -75,7 +77,7 @@ export function decideLedgerAutoContinue(input: {
     }
   }
 
-  const items = ledger.items.map(({ id, status }) => ({ id, status }));
+  const items = ledger.items.map(progressMark);
   if (streak >= LEDGER_AUTO_CONTINUE_CAP) {
     return { type: "stuck", reason: "cap", openIds: open.map((item) => item.id) };
   }
@@ -83,6 +85,90 @@ export function decideLedgerAutoContinue(input: {
     return { type: "stuck", reason: "stalled", openIds: open.map((item) => item.id) };
   }
   return { type: "continue", round: streak + 1, open, items };
+}
+
+/**
+ * Items in tree order: each parent followed by its sub-items, depth first, ledger order among
+ * siblings. A sub-item whose parent is not in `items` is lifted to the top level. Linear in items,
+ * because ledgers reach thousands; iterative, so a deep chain cannot overflow the stack.
+ */
+export function orderLedgerTree(
+  items: ReadonlyArray<LedgerItem>,
+): ReadonlyArray<{ readonly item: LedgerItem; readonly depth: number }> {
+  const present = new Set<string>(items.map((item) => item.id));
+  const roots: Array<LedgerItem> = [];
+  const children = new Map<string, Array<LedgerItem>>();
+  for (const item of items) {
+    const parent = item.parentItemId;
+    if (parent === undefined || !present.has(parent)) {
+      roots.push(item);
+      continue;
+    }
+    const siblings = children.get(parent);
+    if (siblings === undefined) children.set(parent, [item]);
+    else siblings.push(item);
+  }
+  const ordered: Array<{ item: LedgerItem; depth: number }> = [];
+  // The planner rejects parent cycles; `placed` still keeps a corrupt record from looping.
+  const placed = new Set<string>();
+  const stack = [...roots].reverse().map((item) => ({ item, depth: 0 }));
+  while (stack.length > 0) {
+    const entry = stack.pop()!;
+    if (placed.has(entry.item.id)) continue;
+    placed.add(entry.item.id);
+    ordered.push(entry);
+    const below = children.get(entry.item.id) ?? [];
+    for (let index = below.length - 1; index >= 0; index -= 1) {
+      stack.push({ item: below[index]!, depth: entry.depth + 1 });
+    }
+  }
+  return ordered;
+}
+
+/** Ids of blockers that are not closed or dropped yet. */
+export function unreleasedBlockers(
+  item: LedgerItem,
+  released: ReadonlySet<string>,
+): ReadonlyArray<LedgerItem["id"]> {
+  return (item.blockedBy ?? []).filter((id) => !released.has(id));
+}
+
+/** Items that release their dependents: closed or dropped. */
+export function releasedLedgerItemIds(ledger: Ledger): ReadonlySet<string> {
+  return new Set(
+    ledger.items
+      .filter((item) => item.status === "closed" || item.status === "dropped")
+      .map((item) => item.id),
+  );
+}
+
+export interface LedgerFollowUpItem {
+  readonly item: LedgerItem;
+  /** Blockers not yet closed or dropped. */
+  readonly waitingOn: ReadonlyArray<LedgerItem["id"]>;
+}
+
+/**
+ * Splits unfinished items into what the agent can work on now and what waits on a blocker or on
+ * the server's judge, keeping ledger order inside each group.
+ */
+export function partitionLedgerFollowUp(
+  ledger: Ledger,
+  unfinished: ReadonlyArray<LedgerItem>,
+): {
+  readonly actionable: ReadonlyArray<LedgerFollowUpItem>;
+  readonly waiting: ReadonlyArray<LedgerFollowUpItem>;
+} {
+  const released = releasedLedgerItemIds(ledger);
+  const actionable: Array<LedgerFollowUpItem> = [];
+  const waiting: Array<LedgerFollowUpItem> = [];
+  for (const item of unfinished) {
+    const waitingOn = unreleasedBlockers(item, released);
+    const entry = { item, waitingOn };
+    if (waitingOn.length > 0 || item.judging === true) waiting.push(entry);
+    else actionable.push(entry);
+  }
+  return { actionable, waiting };
 }
 
 export type LedgerDomainEvent = Extract<
