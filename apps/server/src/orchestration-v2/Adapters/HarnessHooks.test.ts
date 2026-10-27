@@ -467,6 +467,110 @@ describe("managers structure", () => {
   });
 });
 
+describe("plan before editing", () => {
+  const FILE_EDIT_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+  const gated = (
+    current: Current,
+    extra: Partial<HarnessHookPort> & { planBeforeEditing?: boolean | undefined } = {},
+  ) => {
+    const { planBeforeEditing, ...port } = extra;
+    // An explicit undefined is a failed read, not the default.
+    const setting = "planBeforeEditing" in extra ? planBeforeEditing : true;
+    return make({
+      ...ledgerReader(current),
+      readPlanBeforeEditing: async () => setting,
+      ...port,
+    });
+  };
+  const reasonFor = async (fire: ReturnType<typeof make>["fire"], tool: string) =>
+    decisionOf(await fire("PreToolUse", preToolUse(tool)))?.permissionDecisionReason;
+
+  it("denies every file edit while the thread has no ledger, asking for the plan first", async () => {
+    const { fire } = gated({ value: state(null) });
+    for (const tool of FILE_EDIT_TOOLS) {
+      const decision = decisionOf(await fire("PreToolUse", preToolUse(tool)));
+      expect(decision?.permissionDecision).toBe("deny");
+      for (const step of [tool, "ledger_create", "t3_loadout_propose"]) {
+        expect(decision?.permissionDecisionReason).toContain(step);
+      }
+    }
+  });
+
+  it("leaves reads, searches, shells and T3 tools alone, so a question needs no ledger", async () => {
+    const { fire } = gated({ value: state(null) });
+    for (const tool of [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash",
+      "PowerShell",
+      "mcp__t3-code__ledger_create",
+    ]) {
+      expect(await fire("PreToolUse", preToolUse(tool))).toEqual({});
+    }
+  });
+
+  it("lifts on the next edit once a ledger opens, and gates again after it closes", async () => {
+    const current: Current = { value: state(null) };
+    const { fire } = gated(current);
+    expect(await reasonFor(fire, "Edit")).toContain("ledger_create");
+
+    current.value = state(ledgerOf([item("L1", "open")]));
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+    // Every item done but the ledger not yet closed is still an open plan.
+    current.value = state(ledgerOf([item("L1", "closed")]));
+    expect(await fire("PreToolUse", preToolUse("Write"))).toEqual({});
+
+    current.value = state(ledgerOf([item("L1", "closed")], { closedAt: at }));
+    const reason = await reasonFor(fire, "Edit");
+    expect(reason).toContain("closed");
+    expect(reason).toContain("ledger_create");
+    expect(reason).toContain("ledger_reopen");
+  });
+
+  it("tells a native subagent to report back instead of planning for the thread", async () => {
+    const { fire } = gated({ value: state(null) });
+    const decision = decisionOf(await fire("PreToolUse", preToolUse("Edit", { agent_id: "sub" })));
+    expect(decision?.permissionDecision).toBe("deny");
+    expect(decision?.permissionDecisionReason).toContain("report");
+    expect(decision?.permissionDecisionReason).not.toContain("t3_loadout_propose");
+  });
+
+  it("never gates a delegated child thread", async () => {
+    const { fire } = gated({ value: state(null) }, { delegatedChild: true });
+    for (const tool of FILE_EDIT_TOOLS) {
+      expect(await fire("PreToolUse", preToolUse(tool))).toEqual({});
+    }
+  });
+
+  it("allows edits when the setting is off or a read fails", async () => {
+    expect(
+      await gated({ value: state(null) }, { planBeforeEditing: false }).fire(
+        "PreToolUse",
+        preToolUse("Edit"),
+      ),
+    ).toEqual({});
+    expect(
+      await gated({ value: state(null) }, { planBeforeEditing: undefined }).fire(
+        "PreToolUse",
+        preToolUse("Edit"),
+      ),
+    ).toEqual({});
+    expect(await gated({ value: undefined }).fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+  });
+
+  it("is off without its own reader, so a session without the T3 tools is never stranded", async () => {
+    const { fire } = make(ledgerReader({ value: state(null) }));
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+  });
+
+  it("leaves a managers loadout's stricter denial in charge", async () => {
+    const { fire } = gated({ value: state(null) }, { readStructure: async () => "managers" });
+    expect(await reasonFor(fire, "Edit")).toContain("delegate_task");
+    expect(await reasonFor(fire, "Bash")).toContain("delegate_task");
+  });
+});
+
 describe("registration", () => {
   it("registers nothing without any reader", () => {
     expect(make({}).hooks).toBeUndefined();

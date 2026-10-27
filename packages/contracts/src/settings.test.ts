@@ -50,6 +50,29 @@ describe("pinned rules setting", () => {
   });
 });
 
+describe("plan before editing setting", () => {
+  it("is on for settings written before it existed", () => {
+    expect(decodeServerSettings({}).planBeforeEditing).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.planBeforeEditing).toBe(true);
+  });
+
+  it("keeps a project's override and patches it per project", () => {
+    expect(
+      decodeServerSettings({ projectSettingsOverrides: { project: { planBeforeEditing: false } } })
+        .projectSettingsOverrides[ProjectId.make("project")]?.planBeforeEditing,
+    ).toBe(false);
+    expect(
+      decodeServerSettingsPatch({
+        planBeforeEditing: false,
+        projectSettingsOverrides: { project: { planBeforeEditing: true } },
+      }),
+    ).toEqual({
+      planBeforeEditing: false,
+      projectSettingsOverrides: { project: { planBeforeEditing: true } },
+    });
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();

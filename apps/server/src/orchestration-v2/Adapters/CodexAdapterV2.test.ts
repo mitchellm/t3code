@@ -2142,6 +2142,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 delegatedWorkActive: false,
               })),
               readStructure: Effect.succeed("solo"),
+              readPlanBeforeEditing: Effect.succeed(true),
             },
           });
           yield* harness.firstTerminal;

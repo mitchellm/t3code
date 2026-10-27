@@ -454,6 +454,7 @@ export interface ProviderAdapterV2TurnInput {
 export interface ProviderAdapterV2HarnessPort {
   readonly readLedgerState: Effect.Effect<ProviderAdapterV2HarnessLedgerState | undefined>;
   readonly readStructure: Effect.Effect<LoadoutStructure | undefined>;
+  readonly readPlanBeforeEditing: Effect.Effect<boolean | undefined>;
 }
 
 export interface ProviderAdapterV2HarnessLedgerState {

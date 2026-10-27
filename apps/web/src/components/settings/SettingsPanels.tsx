@@ -55,6 +55,7 @@ import { scopedIdleCompaction } from "./scopedSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { PinnedRulesSettings } from "./PinnedRulesSettings";
 import { LoadoutSettings } from "./LoadoutSettings";
+import { PlanBeforeEditingSettings } from "./PlanBeforeEditingSettings";
 import { ThreadTitleInstructionsSettings } from "./ThreadTitleInstructionsSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
@@ -549,6 +550,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(JSON.stringify(settings.loadouts) !== JSON.stringify(DEFAULT_UNIFIED_SETTINGS.loadouts)
       ? ["Loadouts"]
       : []),
+    ...(settings.planBeforeEditing !== DEFAULT_UNIFIED_SETTINGS.planBeforeEditing
+      ? ["Plan before editing"]
+      : []),
     ...getChangedBrowserSettingLabels(settings),
     ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
       ? ["Agent browser access"]
@@ -664,6 +668,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       threadTitleInstructions: DEFAULT_UNIFIED_SETTINGS.threadTitleInstructions,
       pinnedRules: DEFAULT_UNIFIED_SETTINGS.pinnedRules,
       loadouts: [...DEFAULT_UNIFIED_SETTINGS.loadouts],
+      planBeforeEditing: DEFAULT_UNIFIED_SETTINGS.planBeforeEditing,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
@@ -1919,6 +1924,7 @@ export function ThreadsSettingsPanel() {
             }
           />
         </AdvancedSettings>
+        <PlanBeforeEditingSettings />
         <LoadoutSettings />
       </SettingsSection>
 

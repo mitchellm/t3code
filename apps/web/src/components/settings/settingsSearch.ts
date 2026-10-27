@@ -691,6 +691,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["agent structure planner worker judge explorer solo model roles delegate"],
   },
   {
+    id: "plan-before-editing",
+    title: "Plan before editing",
+    to: "/settings/threads",
+    scope: "project-defaults",
+    searchTerms: ["task ledger plan first checklist edit files gate claude codex"],
+  },
+  {
     id: "app-version",
     title: "Version",
     to: "/settings/about",

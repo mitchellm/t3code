@@ -1688,9 +1688,7 @@ export const layer: Layer.Layer<
             : {
                 harness: makeHarnessPort(input.harnessReads, (projectId) =>
                   serverSettings.getSettings.pipe(
-                    Effect.map(
-                      (settings) => resolveProjectSettings(settings, projectId).settings.loadouts,
-                    ),
+                    Effect.map((settings) => resolveProjectSettings(settings, projectId).settings),
                   ),
                 ),
               }),

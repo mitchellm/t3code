@@ -1441,7 +1441,10 @@ export function makeClaudeQueryOptions(input: {
   /** Called when a hook read rejects (a defect or interruption), so it is not lost. */
   readonly onPinnedRulesReadRejected?: (cause: unknown) => void;
   // Fork: ledger and loadout reads for the harness hooks.
-  readonly harness?: Pick<HarnessHookPort, "readLedgerState" | "readStructure" | "delegatedChild">;
+  readonly harness?: Pick<
+    HarnessHookPort,
+    "readLedgerState" | "readStructure" | "readPlanBeforeEditing" | "delegatedChild"
+  >;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
 }): ClaudeAgentSdkQueryOptions {
@@ -9819,6 +9822,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       runPromise(harness.readLedgerState, { signal }),
                     readStructure: (signal: AbortSignal) =>
                       runPromise(harness.readStructure, { signal }),
+                    // Without the T3 tools there is no ledger_create to lift the gate with.
+                    ...(mcpOverrides.mcpServers === undefined
+                      ? {}
+                      : {
+                          readPlanBeforeEditing: (signal: AbortSignal) =>
+                            runPromise(harness.readPlanBeforeEditing, { signal }),
+                        }),
                     delegatedChild: turnInput.appThread.lineage.relationshipToParent === "subagent",
                   },
                 }),
