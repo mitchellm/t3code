@@ -1105,7 +1105,10 @@ it.effect("settles, at startup, a judge whose task ended while the server was do
       itemId: itemId("a"),
       requestedAt: judging.updatedAt,
       taskId: NodeId.make("task:judge-scan"),
+      promptDigest: "digest:judge-scan",
     });
+    // The settle after a restart reads what was delegated from the projection alone.
+    assert.equal(itemOf(yield* ledgerOf(threadId), "a")?.judgePromptDigest, "digest:judge-scan");
 
     const service = yield* LedgerJudgeService.make;
     yield* service.scanJudging();

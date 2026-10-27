@@ -2052,7 +2052,7 @@ const make = Effect.gen(function* () {
             Effect.map(({ sequence }) => sequence),
             Effect.mapError(dispatchFailureMessage),
           ),
-      started: ({ itemId, taskId }) => {
+      started: ({ itemId, taskId, promptDigest }) => {
         const judging = ledger?.items.find(({ id }) => id === itemId);
         return threadManagement
           .dispatch({
@@ -2063,6 +2063,7 @@ const make = Effect.gen(function* () {
             itemId,
             requestedAt: judging?.updatedAt ?? DateTime.makeUnsafe(0),
             taskId,
+            promptDigest,
           })
           .pipe(
             Effect.map(({ sequence }) => sequence),

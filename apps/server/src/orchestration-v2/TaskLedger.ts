@@ -137,6 +137,7 @@ function withOptional<
     | "deferReason"
     | "judging"
     | "judgeTaskId"
+    | "judgePromptDigest"
     | "judgeError"
     | "judgementsAtReopen",
 >(item: LedgerItem, key: Key, value: LedgerItem[Key] | undefined): LedgerItem {
@@ -487,7 +488,11 @@ function planCoreLedgerCommand(input: {
         DateTime.toEpochMillis(item.updatedAt) === DateTime.toEpochMillis(command.requestedAt);
       if (!current || item.judgeTaskId === command.taskId) return Result.succeed([]);
       // `updatedAt` stays the request's stamp, which keys the judge's effects and delegation.
-      return itemUpdated(ledger.id, { ...item, judgeTaskId: command.taskId }, now);
+      return itemUpdated(
+        ledger.id,
+        { ...item, judgeTaskId: command.taskId, judgePromptDigest: command.promptDigest },
+        now,
+      );
     }
     case "ledger.item.task.link": {
       const item = ledger.items.find(({ id }) => id === command.itemId);
@@ -726,7 +731,11 @@ function planCoreLedgerCommand(input: {
 }
 
 const endJudging = (item: LedgerItem): LedgerItem =>
-  withOptional(withOptional(item, "judging", undefined), "judgeTaskId", undefined);
+  withOptional(
+    withOptional(withOptional(item, "judging", undefined), "judgeTaskId", undefined),
+    "judgePromptDigest",
+    undefined,
+  );
 
 /** Finished work takes no new tasks; a deferred item may still be explored. */
 const itemLinkProblem = (item: LedgerItem) =>

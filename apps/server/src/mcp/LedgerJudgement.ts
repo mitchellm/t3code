@@ -12,6 +12,8 @@ import {
 import { parseJudgeVerdict } from "@t3tools/shared/loadouts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- A synchronous digest keeps the verdict check a pure comparison.
+import * as NodeCrypto from "node:crypto";
 
 import {
   acceptanceCriteria,
@@ -213,11 +215,14 @@ interface PreparedJudgement {
   readonly keySource: string;
 }
 
-/** Checks there is something to judge and builds the server-owned prompt and delegation key. */
-const prepareJudgement = Effect.fn("LedgerJudgement.prepare")(function* (
+/** A digest rather than the prompt itself, so the ledger every client reads stays small. */
+const digestPrompt = (prompt: string) =>
+  NodeCrypto.createHash("sha256").update(prompt).digest("hex");
+
+/** Checks there is something to judge: the item, the evidence it is judged on, its criteria. */
+const judgeableItem = Effect.fn("LedgerJudgement.judgeable")(function* (
   ledger: Ledger | undefined,
   itemId: LedgerItemId,
-  ports: Pick<JudgementPorts, "checkpoints" | "taskRecords">,
 ) {
   if (ledger === undefined) {
     return yield* invalid("This thread has no ledger. Create one with ledger_create first.");
@@ -238,7 +243,16 @@ const prepareJudgement = Effect.fn("LedgerJudgement.prepare")(function* (
       `Item ${item.id} needs evidence before it can be judged. Set it with ledger_update_item.`,
     );
   }
-  const criteria = judgedCriteria(ledger, item);
+  return { ledger, item, evidence, criteria: judgedCriteria(ledger, item) };
+});
+
+/** Builds the server-owned prompt and delegation key for an item there is something to judge in. */
+const prepareJudgement = Effect.fn("LedgerJudgement.prepare")(function* (
+  candidate: Ledger | undefined,
+  itemId: LedgerItemId,
+  ports: Pick<JudgementPorts, "checkpoints" | "taskRecords">,
+) {
+  const { ledger, item, evidence, criteria } = yield* judgeableItem(candidate, itemId);
   const base = judgeBase(item, yield* ports.checkpoints());
   const linked =
     item.tasks === undefined || item.tasks.length === 0
@@ -265,26 +279,29 @@ const prepareJudgement = Effect.fn("LedgerJudgement.prepare")(function* (
 });
 
 /**
- * Reads the verdict from a finished judge run. A clean judge thread holds exactly the server-built
- * prompt, run on the model the loadout resolved; anything else (a delegation the agent seeded, a
- * message sent into the thread, another model) cannot be attributed to the judge, so it fails.
+ * Reads the verdict from a finished judge run. A clean judge thread holds exactly the prompt the
+ * server delegated, run on the model the loadout resolved; anything else (a delegation the agent
+ * seeded, a message sent into the thread, another model) cannot be attributed to the judge, so it
+ * fails.
  */
 const verdictOf = Effect.fn("LedgerJudgement.verdictOf")(function* (
-  prepared: PreparedJudgement,
+  delegated: { readonly promptDigest: string; readonly criteriaCount: number },
   run: JudgeRun,
   ports: Pick<JudgementPorts, "userMessages">,
 ) {
   const messages = yield* ports.userMessages(run.childThreadId);
+  const [prompt] = messages;
   const tainted =
     messages.length !== 1 ||
-    messages[0] !== prepared.prompt ||
+    prompt === undefined ||
+    digestPrompt(prompt) !== delegated.promptDigest ||
     run.judge.instanceId !== run.expectedJudge.instanceId ||
     run.judge.model !== run.expectedJudge.model;
   const parsed = tainted ? null : parseJudgeVerdict(run.summary);
   // A pass stands only when every criterion has its own PASS line with proof.
   const unmet =
     parsed?.outcome === "pass"
-      ? criteriaProblem(run.summary ?? "", prepared.criteriaCount)
+      ? criteriaProblem(run.summary ?? "", delegated.criteriaCount)
       : undefined;
   const verdict: LedgerItemVerdict = {
     outcome: unmet === undefined ? (parsed?.outcome ?? "fail") : "fail",
@@ -332,7 +349,11 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
       message: `The judge for ${prepared.item.id} (task ${run.taskId}) ${detail}.`,
     });
   }
-  const verdict = yield* verdictOf(prepared, run, ports);
+  const verdict = yield* verdictOf(
+    { promptDigest: digestPrompt(prepared.prompt), criteriaCount: prepared.criteriaCount },
+    run,
+    ports,
+  );
   const sequence = yield* ports.recordVerdict({
     itemId: prepared.item.id,
     judgedEvidence: prepared.evidence,
@@ -352,6 +373,7 @@ export interface BackgroundJudgementPorts extends JudgementPorts {
   readonly started: (input: {
     readonly itemId: LedgerItemId;
     readonly taskId: NodeId;
+    readonly promptDigest: string;
   }) => Effect.Effect<number, OrchestratorMcpFailure>;
   /** The judge task as it stands now, without waiting for it. */
   readonly readTask: (taskId: NodeId) => Effect.Effect<JudgeRun, OrchestratorMcpFailure>;
@@ -369,16 +391,22 @@ const startFailureReason = (failure: OrchestratorMcpFailure) =>
     ? "No agent turn was running on this thread to start the judge from. Close the item again from a running turn, or ask for a judgement with ledger_request_judgement."
     : failure.message;
 
-/** Records the outcome of a finished judge run: its verdict, or why there is none. */
+/**
+ * Records the outcome of a finished judge run: its verdict, or why there is none. The run is held
+ * to the prompt recorded when the judge started, never one rebuilt now: a checkpoint stamped before
+ * the item can land after the judge started, so a rebuilt prompt can differ.
+ */
 const settleRun = Effect.fn("LedgerJudgement.settleRun")(function* (
   ledger: Ledger,
   item: LedgerItem,
   run: JudgeRun,
   ports: BackgroundJudgementPorts,
+  /** What the caller just delegated, when the item read before the start does not hold it yet. */
+  delegatedDigest?: string,
 ) {
-  const prepared = yield* Effect.result(prepareJudgement(ledger, item.id, ports));
-  if (prepared._tag === "Failure") {
-    yield* ports.abandon({ itemId: item.id, reason: prepared.failure.message });
+  const judgeable = yield* Effect.result(judgeableItem(ledger, item.id));
+  if (judgeable._tag === "Failure") {
+    yield* ports.abandon({ itemId: item.id, reason: judgeable.failure.message });
     return;
   }
   if (run.status !== "completed") {
@@ -388,10 +416,20 @@ const settleRun = Effect.fn("LedgerJudgement.settleRun")(function* (
     });
     return;
   }
-  const verdict = yield* verdictOf(prepared.success, run, ports);
+  // Only a judge started before its prompt was recorded (a server upgraded mid-judge) has no
+  // record, so for it alone the prompt is rebuilt.
+  const promptDigest =
+    delegatedDigest ??
+    item.judgePromptDigest ??
+    digestPrompt((yield* prepareJudgement(ledger, item.id, ports)).prompt);
+  const verdict = yield* verdictOf(
+    { promptDigest, criteriaCount: judgeable.success.criteria.length },
+    run,
+    ports,
+  );
   yield* ports.recordVerdict({
     itemId: item.id,
-    judgedEvidence: prepared.success.evidence,
+    judgedEvidence: judgeable.success.evidence,
     verdict,
     taskId: run.taskId,
     // The close request this answers; a newer or settled request makes the verdict a no-op.
@@ -439,12 +477,13 @@ export const startBackgroundJudgement = Effect.fn("LedgerJudgement.startBackgrou
       yield* ports.abandon({ itemId: item.id, reason: startFailureReason(run.failure) });
       return;
     }
-    yield* ports.started({ itemId: item.id, taskId: run.success.taskId });
+    const promptDigest = digestPrompt(prepared.success.prompt);
+    yield* ports.started({ itemId: item.id, taskId: run.success.taskId, promptDigest });
     // Read again after the task is on record: a judge that ended before then fired its terminal
     // event while nothing could match it to this item, so only this read sees it.
     const current = yield* ports.readTask(run.success.taskId);
     if (TERMINAL_STATUSES.has(current.status)) {
-      yield* settleRun(ledger, item, current, ports);
+      yield* settleRun(ledger, item, current, ports, promptDigest);
     }
   },
 );

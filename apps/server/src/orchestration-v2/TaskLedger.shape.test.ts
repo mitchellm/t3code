@@ -514,11 +514,14 @@ describe("judge start bookkeeping", () => {
     itemId: id("L1"),
     requestedAt,
     taskId: NodeId.make("task:judge"),
+    promptDigest: "digest:delegated",
   });
 
   it("records the judge task for the request that started it, and only that one", () => {
     const recorded = updatedItem(plan(started(judgingAt), judging));
     assert.equal(recorded?.judgeTaskId, "task:judge");
+    // What the server delegated, so the verdict is checked against it and not a rebuilt prompt.
+    assert.equal(recorded?.judgePromptDigest, "digest:delegated");
     // The request stamp stays, since it keys the judge's effect and delegation.
     assert.equal(DateTime.toEpochMillis(recorded!.updatedAt), DateTime.toEpochMillis(judgingAt));
     const stale = plan(started(earlier), judging);
@@ -533,6 +536,7 @@ describe("judge start bookkeeping", () => {
           evidence: "ok",
           judging: true,
           judgeTaskId: NodeId.make("task:judge"),
+          judgePromptDigest: "digest:delegated",
         }),
       ],
       true,
@@ -557,6 +561,7 @@ describe("judge start bookkeeping", () => {
       ),
     );
     assert.notProperty(settled ?? {}, "judgeTaskId");
+    assert.notProperty(settled ?? {}, "judgePromptDigest");
   });
 
   it("emits one start effect per close request, keyed by ledger, item and request stamp", () => {
