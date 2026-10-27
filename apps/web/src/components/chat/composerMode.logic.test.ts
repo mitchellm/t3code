@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { composerModeChange, composerModeOptions, resolveComposerMode } from "./composerMode.logic";
+import {
+  composerModeChange,
+  composerModeOptions,
+  resolveComposerMode,
+  settleComposerMode,
+} from "./composerMode.logic";
 
 describe("composer mode", () => {
   it("reads Plan from the interaction mode, Investigate from its open fields, Build otherwise", () => {
@@ -34,6 +39,15 @@ describe("composer mode", () => {
       toggleInteractionMode: true,
       investigating: false,
     });
+  });
+
+  it("lands in Build when Plan ends, however Plan was entered", () => {
+    const investigating = { interactionMode: "default", investigating: true } as const;
+    // The proposed-plan card or the server switches to Plan without going through the picker.
+    const inPlan = settleComposerMode({ ...investigating, interactionMode: "plan" });
+    expect(resolveComposerMode(inPlan)).toBe("plan");
+    expect(resolveComposerMode({ ...inPlan, interactionMode: "default" })).toBe("build");
+    expect(settleComposerMode(investigating)).toBe(investigating);
   });
 
   it("offers only the modes this composer can use, and no picker for Build alone", () => {

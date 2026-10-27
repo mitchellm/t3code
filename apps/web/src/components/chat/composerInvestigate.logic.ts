@@ -154,3 +154,34 @@ export function planInvestigateSend(input: {
     steps: [{ type: "create-thread" }, { type: "set-loadout", loadout: target.loadout }, begin],
   };
 }
+
+const isFailure = <R extends { readonly _tag: string }>(
+  result: R,
+): result is Extract<R, { readonly _tag: "Failure" }> => result._tag === "Failure";
+
+/**
+ * Runs a planned start in order, stopping at the first failure. `inFlight` is the composer's own
+ * send guard for this thread or draft, so while a draft's thread is being created no other send
+ * from it, in any mode, can create a second one.
+ */
+export async function runInvestigateSteps<R extends { readonly _tag: string }>(input: {
+  readonly steps: ReadonlyArray<InvestigateSendStep>;
+  readonly inFlight: { current: boolean };
+  readonly run: (step: InvestigateSendStep) => Promise<R>;
+}): Promise<
+  | { readonly kind: "done" | "busy" }
+  | { readonly kind: "failed"; readonly result: Extract<R, { readonly _tag: "Failure" }> }
+> {
+  if (input.inFlight.current) return { kind: "busy" };
+  input.inFlight.current = true;
+  // A step that throws instead of settling must not leave the composer unable to send.
+  try {
+    for (const step of input.steps) {
+      const result = await input.run(step);
+      if (isFailure(result)) return { kind: "failed", result };
+    }
+    return { kind: "done" };
+  } finally {
+    input.inFlight.current = false;
+  }
+}

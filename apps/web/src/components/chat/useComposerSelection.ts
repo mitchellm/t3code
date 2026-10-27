@@ -20,7 +20,6 @@ import { toastManager } from "../ui/toast";
 import { resolveAppModelSelectionForInstance } from "../../modelSelection";
 import { resolveNewDraftStartFromOrigin } from "../../lib/chatThreadActions";
 import { type DraftThreadEnvMode, useComposerDraftStore } from "../../composerDraftStore";
-import { setInvestigating } from "./ComposerInvestigate";
 import {
   getStartedThreadModelChangeBlockReason,
   deriveLockedProvider,
@@ -104,8 +103,6 @@ export function useComposerSelection(input: ComposerSelectionInput) {
   const handleInteractionModeChange = (mode: ProviderInteractionMode) => {
     if (mode === "plan" && !interactionModeEnabled) return;
     if (mode === interactionMode) return;
-    // Fork: Plan and Investigate are separate modes; the shortcut and /plan leave Investigate too.
-    if (mode === "plan" && activeThread) setInvestigating(environmentId, activeThread.id, false);
     setComposerDraftInteractionMode(composerDraftTarget, mode);
     if (isLocalDraftThread) {
       setDraftThreadContext(composerDraftTarget, { interactionMode: mode });

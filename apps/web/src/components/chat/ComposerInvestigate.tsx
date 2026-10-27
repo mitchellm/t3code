@@ -18,9 +18,16 @@ import {
 } from "@t3tools/contracts";
 import { loadoutHasJudge } from "@t3tools/shared/loadouts";
 import { AsyncResult } from "effect/reactivity";
-import { useId } from "react";
+import { useEffect, useId } from "react";
 import { create } from "zustand";
 
+import {
+  type ComposerThreadTarget,
+  type DraftId,
+  type DraftThreadEnvMode,
+  useComposerDraftStore,
+} from "~/composerDraftStore";
+import type { ComposerHandleRef } from "~/composerHandleContext";
 import { newMessageId } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { formatEnvironmentQueryError } from "~/state/query";
@@ -31,14 +38,16 @@ import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
+import { draftSendState } from "./chatViewSend";
 import {
   EMPTY_INVESTIGATE_DRAFT,
   type InvestigateDraft,
   type InvestigateSendStep,
   planInvestigateSend,
+  runInvestigateSteps,
 } from "./composerInvestigate.logic";
-import { resolveComposerMode } from "./composerMode.logic";
-import type { draftLaunchLoadout } from "./draftLoadout";
+import { resolveComposerMode, settleComposerMode } from "./composerMode.logic";
+import { useDraftLaunchLoadout } from "./useComposerLoadout";
 
 const threadKey = (environmentId: EnvironmentId, threadId: ThreadId) =>
   `${environmentId}:${threadId}`;
@@ -88,10 +97,13 @@ export function ComposerInvestigateFields({
 }) {
   const draft = useInvestigateDraft(environmentId, threadId);
   const id = useId();
-  if (
-    draft === null ||
-    resolveComposerMode({ interactionMode, investigating: true }) !== "investigate"
-  ) {
+  const investigating = draft !== null;
+  // oxlint-disable-next-line t3code/react-effect-budget -- Plan is also entered outside the composer (the proposed-plan card, the server). This component mounts once per composer, so it is where Plan is seen and the fields it outranks end, and leaving Plan lands in Build.
+  useEffect(() => {
+    const state = { interactionMode, investigating };
+    if (settleComposerMode(state) !== state) setInvestigating(environmentId, threadId, false);
+  }, [environmentId, threadId, interactionMode, investigating]);
+  if (draft === null || resolveComposerMode({ interactionMode, investigating }) !== "investigate") {
     return null;
   }
   const key = threadKey(environmentId, threadId);
@@ -151,26 +163,46 @@ export function ComposerInvestigateFields({
   );
 }
 
-/** What a new chat's thread is created with when its first send starts an investigation. */
-export interface InvestigateDraftThread {
-  readonly projectId: ProjectId;
+/**
+ * What the composer's send path already knows about where it is sending. Its own send input is
+ * passed whole, so the call site carries only what changes per send.
+ */
+export interface InvestigateSendContext {
+  readonly environmentId: EnvironmentId;
+  readonly routeThreadKey: string;
+  readonly draftId: DraftId | null;
+  readonly activeThread:
+    | { readonly id: ThreadId; readonly worktreePath: string | null; readonly createdAt: string }
+    | undefined;
+  readonly activeThreadBranch: string | null;
+  readonly activeProject: { readonly id: ProjectId } | null;
+  readonly isServerThread: boolean;
+  readonly isLocalDraftThread: boolean;
   readonly runtimeMode: RuntimeMode;
-  readonly branch: string | null;
-  readonly worktreePath: string | null;
-  readonly createdAt: string;
-  readonly newWorktree: boolean;
-  readonly loadout: ReturnType<typeof draftLaunchLoadout>;
+  readonly sendEnvMode: DraftThreadEnvMode;
+  readonly localCheckoutBranchMismatch: { readonly currentBranch: string } | null;
+  readonly composerRef: ComposerHandleRef;
+  readonly composerDraftTarget: ComposerThreadTarget;
+  readonly promptRef: { current: string };
+  readonly beginLocalDispatch: (options?: { preparingWorktree?: boolean }) => void;
+  readonly resetLocalDispatch: () => void;
+  readonly persistThreadSettingsForNextTurn: (input: {
+    threadId: ThreadId;
+    createdAt: string;
+    branch?: string;
+    runtimeMode: RuntimeMode;
+    interactionMode: ProviderInteractionMode;
+  }) => Promise<AtomCommandResult<void, unknown>>;
 }
-
-// A second Send while the first is still creating the thread would create it twice.
-const startsInFlight = new Set<string>();
 
 /**
  * For the composer's send path: in Investigate mode, starts the investigation with the prompt as
  * its goal (creating a new chat's thread first) and returns true, so the caller sends nothing
  * else. Returns false in Build and Plan, which send the composer's ordinary turn.
  */
-export function useComposerInvestigateSend() {
+export function useComposerInvestigateSend(context: InvestigateSendContext) {
+  const { environmentId, activeThread, activeProject, isLocalDraftThread, promptRef, composerRef } =
+    context;
   const startInvestigation = useAtomCommand(orchestrationEnvironment.startInvestigation, {
     reportFailure: false,
   });
@@ -178,40 +210,43 @@ export function useComposerInvestigateSend() {
   const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
-  return async (input: {
-    readonly environmentId: EnvironmentId;
-    readonly threadId: ThreadId;
+  const clearComposerContent = useComposerDraftStore((store) => store.clearComposerContent);
+  const draftLoadout = useDraftLaunchLoadout(
+    environmentId,
+    isLocalDraftThread ? context.draftId : null,
+  );
+  return async (send: {
     readonly prompt: string;
     readonly modelSelection: ModelSelection;
     readonly interactionMode: ProviderInteractionMode;
     /** Images, files or attached context: the goal travels as text only. */
     readonly hasAttachments: boolean;
-    /** An existing thread's runtime and interaction settings, which the kickoff turn runs under. */
-    readonly persistThreadSettings: () => Promise<AtomCommandResult<void, unknown>>;
-    /** Set for a new chat, whose thread this send creates. */
-    readonly draft: InvestigateDraftThread | null;
-    readonly clearPrompt: () => void;
   }): Promise<boolean> => {
-    const key = threadKey(input.environmentId, input.threadId);
+    // A draft that no longer points to a project is the ordinary send's to report.
+    const draftProject = isLocalDraftThread ? activeProject : null;
+    if (activeThread === undefined || (!context.isServerThread && draftProject === null)) {
+      return false;
+    }
+    const threadId = activeThread.id;
+    const key = threadKey(environmentId, threadId);
     const fields = useInvestigateDrafts.getState().drafts[key] ?? null;
-    const { draft } = input;
     const plan = planInvestigateSend({
       mode: resolveComposerMode({
-        interactionMode: input.interactionMode,
+        interactionMode: send.interactionMode,
         investigating: fields !== null,
       }),
       fields,
-      prompt: input.prompt,
-      hasAttachments: input.hasAttachments,
+      prompt: send.prompt,
+      hasAttachments: send.hasAttachments,
       target:
-        draft === null
+        draftProject === null
           ? { kind: "thread" }
           : {
               kind: "draft",
-              loadout: draft.loadout.threadLoadout,
-              loadoutName: draft.loadout.active.name,
-              hasJudge: loadoutHasJudge(draft.loadout.active),
-              newWorktree: draft.newWorktree,
+              loadout: draftLoadout.threadLoadout,
+              loadoutName: draftLoadout.active.name,
+              hasJudge: loadoutHasJudge(draftLoadout.active),
+              newWorktree: context.sendEnvMode === "worktree" && !activeThread.worktreePath,
             },
     });
     if (plan.kind === "turn") return false;
@@ -219,29 +254,35 @@ export function useComposerInvestigateSend() {
       toastManager.add({ type: "warning", title: "Not started yet", description: plan.problem });
       return true;
     }
-    if (startsInFlight.has(key)) return true;
     const run = (step: InvestigateSendStep): Promise<AtomCommandResult<unknown, unknown>> => {
-      const { environmentId, threadId } = input;
       switch (step.type) {
         case "persist-thread-settings":
-          return input.persistThreadSettings();
+          return context.persistThreadSettingsForNextTurn({
+            threadId,
+            createdAt: new Date().toISOString(),
+            ...(context.localCheckoutBranchMismatch
+              ? { branch: context.localCheckoutBranchMismatch.currentBranch }
+              : {}),
+            runtimeMode: context.runtimeMode,
+            // Investigate is a Build mode: its approaches change code.
+            interactionMode: "default",
+          });
         case "create-thread":
           // Planned only for a draft; an existing thread has nothing to create.
-          return draft === null
+          return draftProject === null
             ? Promise.resolve(AsyncResult.success(undefined))
             : createThread({
                 environmentId,
                 input: {
                   threadId,
-                  projectId: draft.projectId,
-                  title: deriveThreadTitleSeed({ text: input.prompt, attachments: [] }),
-                  modelSelection: input.modelSelection,
-                  // Investigate is a Build mode: its approaches change code.
+                  projectId: draftProject.id,
+                  title: deriveThreadTitleSeed({ text: send.prompt, attachments: [] }),
+                  modelSelection: send.modelSelection,
                   interactionMode: "default",
-                  runtimeMode: draft.runtimeMode,
-                  branch: draft.branch,
-                  worktreePath: draft.worktreePath,
-                  createdAt: draft.createdAt,
+                  runtimeMode: context.runtimeMode,
+                  branch: context.activeThreadBranch,
+                  worktreePath: activeThread.worktreePath,
+                  createdAt: activeThread.createdAt,
                 },
               });
         case "set-loadout":
@@ -253,27 +294,31 @@ export function useComposerInvestigateSend() {
               threadId,
               requestId: newMessageId(),
               ...step.start,
-              modelSelection: input.modelSelection,
+              modelSelection: send.modelSelection,
             },
           });
       }
     };
-    startsInFlight.add(key);
-    for (const step of plan.steps) {
-      const result = await run(step);
-      if (result._tag === "Failure") {
-        startsInFlight.delete(key);
-        toastManager.add({
-          type: "error",
-          title: "Could not start the investigation",
-          description: formatEnvironmentQueryError(result.cause),
-        });
-        return true;
-      }
+    // The composer's own guard for this thread or draft: any send from it waits for this one.
+    const inFlight = draftSendState(context.routeThreadKey).sendInFlight;
+    if (inFlight.current) return true;
+    // Busy like any send: the button shows it, and the loadout picker keeps the draft's pick.
+    context.beginLocalDispatch({ preparingWorktree: false });
+    const outcome = await runInvestigateSteps({ steps: plan.steps, inFlight, run });
+    if (outcome.kind === "busy") return true;
+    if (outcome.kind === "failed") {
+      context.resetLocalDispatch();
+      toastManager.add({
+        type: "error",
+        title: "Could not start the investigation",
+        description: formatEnvironmentQueryError(outcome.result.cause),
+      });
+      return true;
     }
-    startsInFlight.delete(key);
     setDraft(key, null);
-    input.clearPrompt();
+    promptRef.current = "";
+    clearComposerContent(context.composerDraftTarget);
+    composerRef.current?.resetCursorState();
     return true;
   };
 }

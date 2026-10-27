@@ -376,7 +376,7 @@ export function useComposerSend(input: ComposerSendInput) {
     anchorNewTurn,
     persistThreadSettingsForNextTurn,
   });
-  const startComposerInvestigation = useComposerInvestigateSend();
+  const startComposerInvestigation = useComposerInvestigateSend(input);
   const draftLoadout = useDraftLaunchLoadout(environmentId, isLocalDraftThread ? draftId : null);
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
@@ -565,35 +565,10 @@ export function useComposerSend(input: ComposerSendInput) {
     // Fork: in Investigate mode the message is the goal of an investigation, not a turn.
     if (
       !queuedRunEdit.isEditing &&
-      (isServerThread || (isLocalDraftThread && activeProject !== null)) &&
       (await startComposerInvestigation({
-        environmentId,
-        threadId: activeThread.id,
         prompt: promptForSend,
         modelSelection: ctxSelectedModelSelection,
         interactionMode: sendInteractionMode,
-        persistThreadSettings: () =>
-          persistThreadSettingsForNextTurn({
-            threadId: activeThread.id,
-            createdAt: new Date().toISOString(),
-            ...(localCheckoutBranchMismatch
-              ? { branch: localCheckoutBranchMismatch.currentBranch }
-              : {}),
-            runtimeMode,
-            interactionMode: "default",
-          }),
-        draft:
-          isLocalDraftThread && activeProject
-            ? {
-                projectId: activeProject.id,
-                runtimeMode,
-                branch: activeThreadBranch,
-                worktreePath: activeThread.worktreePath,
-                createdAt: activeThread.createdAt,
-                newWorktree: sendEnvMode === "worktree" && !activeThread.worktreePath,
-                loadout: draftLoadout,
-              }
-            : null,
         hasAttachments:
           composerImages.length +
             composerFiles.length +
@@ -602,11 +577,6 @@ export function useComposerSend(input: ComposerSendInput) {
             composerReviewComments.length +
             composerThreadContexts.length >
           0,
-        clearPrompt: () => {
-          promptRef.current = "";
-          clearComposerDraftContent(composerDraftTarget);
-          composerRef.current?.resetCursorState();
-        },
       }))
     ) {
       return;

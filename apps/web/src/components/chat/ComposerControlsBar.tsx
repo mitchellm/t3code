@@ -135,7 +135,7 @@ export function ComposerControlsBar(props: {
   const loadout = useComposerLoadout(
     environmentId,
     routeThreadRef,
-    routeKind === "draft" ? draftId : null,
+    routeKind === "draft" && draftId ? { draftId, sending: isSendBusy } : null,
   );
   // Fork: Build, Plan and Investigate in one picker, on drafts as on threads.
   const composerMode = useComposerMode({

@@ -18,6 +18,7 @@ import {
   draftLaunchLoadout,
   pickLoadout,
   setDraftLoadoutChoice,
+  shownLoadoutChoice,
   useDraftLoadoutChoice,
 } from "./draftLoadout";
 
@@ -56,29 +57,30 @@ const useDraftProjectId = (draftId: DraftId | null) =>
 /**
  * A thread's loadout and the list its project resolves to. A draft has no thread yet, so it holds
  * its own pick until the first send creates the thread under it; once that thread exists, its own
- * loadout is what runs and what this shows.
+ * loadout is what runs and what this shows. `draft.sending` keeps the pick shown while the send
+ * creates the thread and then sets its loadout.
  */
 export function useComposerLoadout(
   environmentId: EnvironmentId,
   threadRef: ScopedThreadRef | null,
-  draftId: DraftId | null,
+  draft: { readonly draftId: DraftId; readonly sending: boolean } | null,
 ): ComposerLoadout | null {
   const shell = useThreadShell(threadRef);
-  const draftTarget = shell === null ? draftId : null;
-  const draftProjectId = useDraftProjectId(draftTarget);
-  const draftChoice = useDraftLoadoutChoice(draftTarget);
+  const draftId = draft?.draftId ?? null;
+  const draftProjectId = useDraftProjectId(shell === null ? draftId : null);
+  const draftChoice = useDraftLoadoutChoice(draftId);
   const projectId = shell?.projectId ?? draftProjectId;
   const scope = useProjectLoadouts(environmentId, projectId);
   const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: true,
   });
   if (scope === null || projectId === null) return null;
-  const choice = shell === null ? draftChoice : (shell.loadout ?? null);
+  const choice = shownLoadoutChoice({ shell, draftChoice, sending: draft?.sending === true });
   const setChoice = (next: ThreadLoadout | null) => {
     if (shell !== null) {
       void updateMetadata({ environmentId, input: { threadId: shell.id, loadout: next } });
-    } else if (draftTarget !== null) {
-      setDraftLoadoutChoice(draftTarget, next);
+    } else if (draftId !== null) {
+      setDraftLoadoutChoice(draftId, next);
     }
   };
   return {

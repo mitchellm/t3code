@@ -7,11 +7,29 @@ import { type Loadout, SOLO_LOADOUT_ID, type ThreadLoadout } from "@t3tools/cont
 import { resolveLoadout } from "@t3tools/shared/loadouts";
 import { create } from "zustand";
 
-import type { DraftId } from "../../composerDraftStore";
+import { type DraftId, useComposerDraftStore } from "../../composerDraftStore";
 
 const useDraftLoadouts = create<{
   readonly choices: Readonly<Record<string, ThreadLoadout>>;
 }>(() => ({ choices: {} }));
+
+/**
+ * A pick lives as long as its draft. A sent draft is finalized only once its thread has started,
+ * which is after the thread got its loadout, and a discarded one is cleared; either way the draft
+ * session goes, and so does the pick. Picks are rare, so most store changes return at once.
+ */
+useComposerDraftStore.subscribe((drafts) => {
+  const { choices } = useDraftLoadouts.getState();
+  const gone = Object.keys(choices).filter(
+    (draftId) => !(draftId in drafts.draftThreadsByThreadKey),
+  );
+  if (gone.length === 0) return;
+  useDraftLoadouts.setState({
+    choices: Object.fromEntries(
+      Object.entries(choices).filter(([draftId]) => !gone.includes(draftId)),
+    ),
+  });
+});
 
 export function setDraftLoadoutChoice(draftId: DraftId, choice: ThreadLoadout | null) {
   useDraftLoadouts.setState(({ choices }) => {
@@ -35,6 +53,20 @@ export function pickLoadout(current: ThreadLoadout | null, loadoutId: string) {
     return current;
   }
   return { id: loadoutId, reason: null, setBy: "user" } satisfies ThreadLoadout;
+}
+
+/**
+ * The choice the picker shows. A draft's send creates the thread and sets its loadout in two
+ * steps; the pick stays on screen between them, while the send is in flight, rather than flashing
+ * Solo. Once the send settles, a thread is shown as it is, Solo included.
+ */
+export function shownLoadoutChoice(input: {
+  readonly shell: { readonly loadout?: ThreadLoadout | null | undefined } | null;
+  readonly draftChoice: ThreadLoadout | null;
+  readonly sending: boolean;
+}): ThreadLoadout | null {
+  if (input.shell === null) return input.draftChoice;
+  return input.shell.loadout ?? (input.sending ? input.draftChoice : null);
 }
 
 /**

@@ -22,7 +22,7 @@ const OPTIONS: Record<ComposerMode, ComposerModeOption> = {
   },
 };
 
-interface ComposerModeState {
+export interface ComposerModeState {
   readonly interactionMode: ProviderInteractionMode;
   readonly investigating: boolean;
 }
@@ -31,6 +31,17 @@ interface ComposerModeState {
 export function resolveComposerMode(state: ComposerModeState): ComposerMode {
   if (state.interactionMode === "plan") return "plan";
   return state.investigating ? "investigate" : "build";
+}
+
+/**
+ * The state to keep once Plan is seen. Plan is entered from places that never pass through the
+ * picker (the proposed-plan card, the server, Shift+Tab, /plan), so Investigate ends whenever Plan
+ * is in force, and leaving Plan always lands in Build.
+ */
+export function settleComposerMode(state: ComposerModeState): ComposerModeState {
+  return state.interactionMode === "plan" && state.investigating
+    ? { ...state, investigating: false }
+    : state;
 }
 
 /** Null when only Build is left, so the composer shows no picker. */

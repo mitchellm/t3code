@@ -41,6 +41,7 @@ import {
   startFanoutThread,
 } from "./chatViewSend";
 import type { useLocalDispatchState } from "./useLocalDispatchState";
+import { useDraftLaunchLoadout } from "./useComposerLoadout";
 
 interface MultipleModelSendInput {
   readonly environmentId: EnvironmentId;
@@ -80,6 +81,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     reportFailure: false,
   });
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
+  const draftLoadout = useDraftLaunchLoadout(environmentId, draftId);
   const fanoutSelectionsAtom = draftFanoutSelectionsAtom(routeThreadKey);
   const { sendInFlight: sendInFlightRef, uncertainSubmissions: uncertainSubmissionsRef } =
     draftSendState(routeThreadKey);
@@ -190,6 +192,10 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                       branch,
                       worktreePath: null,
                       createdAt: createdAt,
+                      // Fork: every thread a draft starts runs under the draft's loadout.
+                      ...(draftLoadout.threadLoadout === null
+                        ? {}
+                        : { loadout: draftLoadout.threadLoadout }),
                     },
                     prepareWorktree: {
                       projectCwd: project.workspaceRoot,

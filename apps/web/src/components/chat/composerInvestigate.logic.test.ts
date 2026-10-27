@@ -5,6 +5,7 @@ import {
   EMPTY_INVESTIGATE_DRAFT,
   type InvestigateSendTarget,
   planInvestigateSend,
+  runInvestigateSteps,
 } from "./composerInvestigate.logic";
 
 const fields = { ...EMPTY_INVESTIGATE_DRAFT, solvedWhen: "A failing test passes." };
@@ -79,6 +80,46 @@ describe("planInvestigateSend", () => {
       kind: "refused",
     });
     expect(send("investigate", draft(), { prompt: " " })).toMatchObject({ kind: "refused" });
+  });
+});
+
+describe("runInvestigateSteps", () => {
+  it("holds the composer's send guard until the start settles, and stops at the first failure", async () => {
+    type Result =
+      | { readonly _tag: "Success" }
+      | { readonly _tag: "Failure"; readonly cause: string };
+    const inFlight = { current: false };
+    const ran: string[] = [];
+    let settle: (result: Result) => void = () => {};
+    const steps = [{ type: "create-thread" }, { type: "start-investigation", start }] as const;
+    const pending = runInvestigateSteps<Result>({
+      steps,
+      inFlight,
+      run: (step) => {
+        ran.push(step.type);
+        return new Promise((resolve) => {
+          settle = resolve;
+        });
+      },
+    });
+
+    // A Build send, or a second Investigate, from the same draft is refused meanwhile.
+    expect(inFlight.current).toBe(true);
+    await expect(
+      runInvestigateSteps<Result>({
+        steps,
+        inFlight,
+        run: () => Promise.resolve({ _tag: "Success" }),
+      }),
+    ).resolves.toEqual({ kind: "busy" });
+
+    settle({ _tag: "Failure", cause: "unknown loadout" });
+    await expect(pending).resolves.toEqual({
+      kind: "failed",
+      result: { _tag: "Failure", cause: "unknown loadout" },
+    });
+    expect(ran).toEqual(["create-thread"]);
+    expect(inFlight.current).toBe(false);
   });
 });
 
