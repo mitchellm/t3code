@@ -88,6 +88,53 @@ describe("loadout settings", () => {
       DEFAULT_LOADOUTS,
     );
   });
+
+  // As commit d55a7d14b9 removed them, and as a settings file that saved its list once holds them.
+  const plannerWorkersJudge = {
+    id: "planner-workers-judge",
+    name: "Planner + workers + judge",
+    description:
+      "A strong planner splits the task, cheaper workers implement, and a separate judge must pass each ledger item before it closes.",
+    roles: {
+      planner: { instanceId: "claudeAgent", model: "claude-opus-5-5", effort: "xhigh" },
+      worker: { instanceId: "claudeAgent", model: "claude-sonnet-5-5" },
+      judge: { instanceId: "claudeAgent", model: "claude-opus-5-5", effort: "high" },
+    },
+  };
+  const readOnlySweep = {
+    id: "read-only-sweep",
+    name: "Read-only sweep",
+    description: "Cheap explorers read and report across the codebase. Nothing is implemented.",
+    roles: { explorer: { instanceId: "claudeAgent", model: "claude-haiku-5-5" } },
+  };
+
+  it("drops untouched copies of retired presets from saved settings and project overrides", () => {
+    const stored = JSON.parse(
+      JSON.stringify([
+        DEFAULT_LOADOUTS[0],
+        plannerWorkersJudge,
+        readOnlySweep,
+        DEFAULT_LOADOUTS[1],
+      ]),
+    ) as unknown;
+    const kept = [SOLO_LOADOUT_ID, "opus-blowout"];
+    expect(decodeServerSettings({ loadouts: stored }).loadouts.map(({ id }) => id)).toEqual(kept);
+    expect(decodeProjectOverrides({ loadouts: stored }).loadouts?.map(({ id }) => id)).toEqual(
+      kept,
+    );
+  });
+
+  it("keeps a retired preset the user edited, since it is theirs now", () => {
+    const retargeted = {
+      ...readOnlySweep,
+      roles: { explorer: { instanceId: "claudeAgent", model: "claude-sonnet-5-5" } },
+    };
+    const renamed = { ...plannerWorkersJudge, name: "My planner" };
+    expect(decodeServerSettings({ loadouts: [retargeted, renamed] }).loadouts).toEqual([
+      retargeted,
+      renamed,
+    ]);
+  });
 });
 
 describe("ledger requiresJudge", () => {
