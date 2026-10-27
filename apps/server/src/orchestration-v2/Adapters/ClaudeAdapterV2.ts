@@ -1,6 +1,7 @@
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
+import { makeClaudeAgentStops } from "./ClaudeAgentStops.ts";
 import {
   CLAUDE_STEER_START_DEADLINE,
   expireClaudeSteers,
@@ -4645,6 +4646,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const nestedSubagentTaskIds = yield* Ref.make<ReadonlySet<string>>(new Set());
         const isNestedSubagentTask = (taskId: string) =>
           Ref.get(nestedSubagentTaskIds).pipe(Effect.map((ids) => ids.has(taskId)));
+        const agentStops = makeClaudeAgentStops();
         const recordWakeReport = (
           nativeThreadId: string,
           taskId: string,
@@ -4659,7 +4661,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 turn: userTurns.get(nativeThreadId) ?? 0,
               }),
             ),
-          }));
+          })).pipe(
+            // Fork: a shell or monitor the agent stopped wakes no turn, so it labels none.
+            Effect.when(Effect.sync(() => !agentStops.wakesNoTurn(taskId, report))),
+          );
         const startUserTurnForWakeReports = (nativeThreadId: string) =>
           Ref.update(wakeReportsByNativeThread, ({ userTurns, reports }) => {
             const turn = (userTurns.get(nativeThreadId) ?? 0) + 1;
@@ -7924,6 +7929,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const message = input.message;
           // Track before routing: idle-wake Monitors report tasks before replaying their tool calls.
           yield* trackClaudeMonitorCalls(message);
+          agentStops.observe(message);
           // Update before routing because the idle wake gate reads this.
           if (
             message.type === "system" &&
@@ -10224,17 +10230,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   yield* finalizeActiveTurn({ context, status: "completed", completedAt });
                   return;
                 }
-                // Replay results last to avoid rebuffering later frames. An empty turn's result must not settle a newer running turn.
+                // Replay results last to avoid rebuffering later frames.
                 const lastResultIndex = drained.findLastIndex((entry) => entry.type === "result");
-                const tailResult = drained[lastResultIndex];
-                const emptyTurnBeforeNextTurn =
-                  tailResult?.type === "result" &&
-                  tailResult.num_turns === 0 &&
-                  !tailResult.is_error &&
-                  terminalStatusFromResult(tailResult) === "completed" &&
-                  drained
-                    .slice(lastResultIndex + 1)
-                    .some((entry) => isClaudeTurnStartMessage(entry));
+                // Fork: a turn frame after the last result means the CLI is still running a newer
+                // turn, so no buffered result may settle this run; that turn's own result will.
+                const newerTurnRunning = drained
+                  .slice(lastResultIndex + 1)
+                  .some((entry) => isClaudeRootTurnFrame(entry));
                 // The CLI can append empty task successes after a failure. Filter
                 // those for replay without changing the raw-tail successor guard.
                 const isEmptyTaskNotificationSuccess = (entry: SDKMessage) =>
@@ -10283,7 +10285,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     return next;
                   });
                 }
-                if (lastResult !== undefined && !emptyTurnBeforeNextTurn) {
+                if (lastResult !== undefined && !newerTurnRunning) {
                   yield* handleSdkMessage({ query: querySession.query, message: lastResult });
                   return;
                 }
