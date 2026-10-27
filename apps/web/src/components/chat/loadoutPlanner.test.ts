@@ -614,7 +614,44 @@ describe("plannerRun", () => {
     ).toEqual({
       _tag: "notRunning",
       reason:
-        "This chat sends to 2 models at once, so the planner does not run. Superbot is not available here. This thread stays on its current model.",
+        "This chat sends to 2 models at once, so the planner does not run. Superbot is not available here. This chat keeps sending to 2 models.",
+    });
+  });
+
+  describe("on the planner's own model while the picker hides it and the fallback could run", () => {
+    const hidden: UnifiedSettings = {
+      ...settings,
+      providerModelPreferences: { [superbot]: { hiddenModels: ["superbot"], modelOrder: [] } },
+    };
+    const loadout = withPlanner({
+      ...oversight.roles.planner!,
+      fallback: { instanceId: claude, model: "claude-opus-5-5" },
+    });
+
+    it("counts as running at the planner's effort, and a pick leaves it there", () => {
+      const onOwn = picker({ settings: hidden, composer: { selected: onPlanner } });
+      expect(plannerRun({ loadout, picker: onOwn })).toEqual({
+        _tag: "running",
+        onFallback: false,
+      });
+      expect(plannerModelSwitch({ pick: picked(loadout), loadout, picker: onOwn })).toEqual({
+        _tag: "none",
+      });
+    });
+
+    it("says to set the effort by hand at another effort, rather than moving to the fallback", () => {
+      const lowered = picker({
+        settings: hidden,
+        composer: { selected: { ...onPlanner, options: [{ id: "effort", value: "low" }] } },
+      });
+      expect(plannerRun({ loadout, picker: lowered })).toEqual({
+        _tag: "notRunning",
+        reason:
+          "This thread runs superbot at low effort, not the planner's high. Set the effort in the composer; picking the loadout cannot change it here.",
+      });
+      expect(plannerModelSwitch({ pick: picked(loadout), loadout, picker: lowered })).toEqual({
+        _tag: "none",
+      });
     });
   });
 
