@@ -271,7 +271,14 @@ describe("automatic judge", () => {
     at: now,
   });
   const judged = ledgerOf([item("L1", { status: "in_progress", evidence: "suite passed" })], true);
-  const record = (outcome: "pass" | "fail", ledger: Ledger, notes = ""): LedgerCommand => ({
+  // The stamp of the judging request the verdict answers: the judging item's `updatedAt`.
+  const record = (
+    outcome: "pass" | "fail",
+    _ledger: Ledger,
+    notes = "",
+    /** Null for an unstamped verdict, as an explicit judgement records. */
+    judgingRequestedAt: DateTime.Utc | null = earlier,
+  ): LedgerCommand => ({
     type: "ledger.item.verdict.record",
     commandId,
     threadId,
@@ -279,21 +286,52 @@ describe("automatic judge", () => {
     itemId: id("L1"),
     verdict: verdict(outcome, notes),
     judgedEvidence: "suite passed",
+    ...(judgingRequestedAt === null ? {} : { judgingRequestedAt }),
   });
+  const agentClose = (fields: UpdateFields = {}): LedgerCommand =>
+    update("L1", { status: "closed", ...fields, createdBy: "agent" });
 
-  it("turns a close request without a passing verdict into a judgement in progress", () => {
-    const requested = updatedItem(plan(update("L1", { status: "closed" }), judged));
+  it("turns the agent's close without a passing verdict into a judgement in progress", () => {
+    const requested = updatedItem(plan(agentClose(), judged));
     assert.equal(requested?.status, "in_progress");
     assert.isTrue(requested?.judging);
     assert.isNull(requested?.closedAt ?? null);
   });
 
-  it("treats a repeated close request while judging as already applied", () => {
+  it("closes directly when the user closes, judging or not", () => {
+    const closed = updatedItem(plan(update("L1", { status: "closed" }), judged));
+    assert.equal(closed?.status, "closed");
+    assert.notProperty(closed ?? {}, "judging");
     const judging = ledgerOf(
       [item("L1", { status: "in_progress", evidence: "suite passed", judging: true })],
       true,
     );
-    const again = plan(update("L1", { status: "closed" }), judging);
+    const overruled = updatedItem(plan(update("L1", { status: "closed" }), judging));
+    assert.equal(overruled?.status, "closed");
+    assert.notProperty(overruled ?? {}, "judging");
+  });
+
+  it("ignores a verdict that answers a different or settled judging request", () => {
+    const judging = ledgerOf(
+      [item("L1", { status: "in_progress", evidence: "suite passed", judging: true })],
+      true,
+    );
+    const stale = plan(record("pass", judging, "", now), judging);
+    assert.deepEqual(Result.isSuccess(stale) ? stale.success : "failed", []);
+    const settled = plan(record("pass", judged), judged);
+    assert.deepEqual(Result.isSuccess(settled) ? settled.success : "failed", []);
+    // An unstamped verdict, the explicit judgement's, records without settling a request.
+    const unstamped = updatedItem(plan(record("pass", judging, "", null), judging));
+    assert.equal(unstamped?.status, "in_progress");
+    assert.isTrue(unstamped?.judging);
+  });
+
+  it("treats the agent repeating its close while judging as already applied", () => {
+    const judging = ledgerOf(
+      [item("L1", { status: "in_progress", evidence: "suite passed", judging: true })],
+      true,
+    );
+    const again = plan(agentClose(), judging);
     assert.deepEqual(Result.isSuccess(again) ? again.success : "failed", []);
     assert.include(
       failureOf(plan(update("L1", { evidence: "something else" }), judging)),
@@ -354,7 +392,7 @@ describe("automatic judge", () => {
   });
 
   it("still only records the verdict for an item nobody asked to close", () => {
-    const recorded = updatedItem(plan(record("pass", judged), judged));
+    const recorded = updatedItem(plan(record("pass", judged, "", null), judged));
     assert.equal(recorded?.status, "in_progress");
     assert.equal(recorded?.verdict?.outcome, "pass");
   });
@@ -371,7 +409,10 @@ describe("automatic judge", () => {
       [item("L0"), item("L1", { status: "in_progress", evidence: "x", blockedBy: [id("L0")] })],
       true,
     );
-    assert.include(failureOf(plan(update("L1", { status: "closed" }), blocked)), "L0");
+    assert.include(
+      failureOf(plan(update("L1", { status: "closed", createdBy: "agent" }), blocked)),
+      "L0",
+    );
   });
 });
 
@@ -416,7 +457,7 @@ describe("what the agent may set aside on a judged ledger", () => {
     true,
   );
   const asAgent = (name: string, fields: UpdateFields) =>
-    plan({ ...update(name, fields), createdBy: "agent" } as LedgerCommand, judgedLedger);
+    plan(update(name, { ...fields, createdBy: "agent" }), judgedLedger);
 
   it("refuses the agent dropping, deferring or un-starting work it started", () => {
     for (const fields of [
@@ -443,10 +484,7 @@ describe("what the agent may set aside on a judged ledger", () => {
   it("does not restrict the agent on a ledger without a judge", () => {
     const plain = ledgerOf([item("S", { status: "in_progress", evidence: "half" })]);
     const dropped = plan(
-      {
-        ...update("S", { status: "dropped", dropReason: "moot" }),
-        createdBy: "agent",
-      } as LedgerCommand,
+      update("S", { status: "dropped", dropReason: "moot", createdBy: "agent" }),
       plain,
     );
     assert.equal(updatedItem(dropped)?.status, "dropped");
@@ -504,6 +542,7 @@ describe("judge start bookkeeping", () => {
             notes: "no",
             at: now,
           },
+          judgingRequestedAt: earlier,
         },
         withTask,
       ),
@@ -513,7 +552,7 @@ describe("judge start bookkeeping", () => {
 
   it("emits one start effect per close request, keyed by ledger, item and request stamp", () => {
     const ledger = ledgerOf([item("L1", { status: "in_progress", evidence: "ok" })], true);
-    const command = update("L1", { status: "closed" });
+    const command = update("L1", { status: "closed", createdBy: "agent" });
     const planned = plan(command, ledger);
     const effects = ledgerJudgeEffects(
       command,

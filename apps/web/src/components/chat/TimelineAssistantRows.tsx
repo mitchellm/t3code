@@ -237,6 +237,7 @@ export function ProposedPlanTimelineRow({
         cwd={ctx.markdownCwd}
         workspaceRoot={ctx.workspaceRoot}
         findActive={ctx.findActive}
+        buildable={row.proposedPlan.status === "active"}
       />
     </div>
   );

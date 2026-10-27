@@ -43,6 +43,8 @@ export interface JudgementPorts {
     readonly judgedEvidence: string;
     readonly verdict: LedgerItemVerdict;
     readonly taskId: NodeId;
+    /** Set when the verdict answers a pending close request: that request's stamp. */
+    readonly judgingRequestedAt?: DateTime.Utc;
   }) => Effect.Effect<number, OrchestratorMcpFailure>;
 }
 
@@ -221,6 +223,11 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
 }) {
   const { ports } = input;
   const prepared = yield* prepareJudgement(input.ledger, input.itemId);
+  if (prepared.item.judging === true) {
+    return yield* invalid(
+      `Item ${prepared.item.id} is already being judged. Its verdict closes it or hands it back with the judge's notes; read the ledger with ledger_read to see it.`,
+    );
+  }
   const run = yield* ports.delegate({
     prompt: prepared.prompt,
     title: prepared.title,
@@ -297,6 +304,8 @@ const settleRun = Effect.fn("LedgerJudgement.settleRun")(function* (
     judgedEvidence: prepared.success.evidence,
     verdict,
     taskId: run.taskId,
+    // The close request this answers; a newer or settled request makes the verdict a no-op.
+    judgingRequestedAt: item.updatedAt,
   });
 });
 
@@ -341,8 +350,11 @@ export const startBackgroundJudgement = Effect.fn("LedgerJudgement.startBackgrou
       return;
     }
     yield* ports.started({ itemId: item.id, taskId: run.success.taskId });
-    if (TERMINAL_STATUSES.has(run.success.status)) {
-      yield* settleRun(ledger, item, run.success, ports);
+    // Read again after the task is on record: a judge that ended before then fired its terminal
+    // event while nothing could match it to this item, so only this read sees it.
+    const current = yield* ports.readTask(run.success.taskId);
+    if (TERMINAL_STATUSES.has(current.status)) {
+      yield* settleRun(ledger, item, current, ports);
     }
   },
 );

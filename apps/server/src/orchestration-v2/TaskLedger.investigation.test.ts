@@ -138,14 +138,19 @@ function running(): Ledger {
   ).ledger;
 }
 
-const recordVerdict = (name: string, outcome: "pass" | "fail"): LedgerCommand => ({
-  type: "ledger.item.verdict.record",
-  commandId,
-  threadId,
-  ledgerId,
-  itemId: id(name),
-  verdict: verdict(outcome),
-});
+// Answers the item's pending close request, as the server judge does (LedgerJudgement).
+const recordVerdict = (ledger: Ledger, name: string, outcome: "pass" | "fail"): LedgerCommand => {
+  const item = ledger.items.find((candidate) => candidate.id === id(name));
+  return {
+    type: "ledger.item.verdict.record",
+    commandId,
+    threadId,
+    ledgerId,
+    itemId: id(name),
+    verdict: verdict(outcome),
+    ...(item === undefined ? {} : { judgingRequestedAt: item.updatedAt }),
+  };
+};
 
 const statusOf = (ledger: Ledger, name: string) =>
   ledger.items.find((item) => item.id === id(name))?.status;
@@ -173,7 +178,7 @@ describe("investigation state machine", () => {
       investigationLanes(thesis).find((lane) => lane.item.id === id("a"))?.status,
       "judging",
     );
-    const { ledger, planned } = step(thesis, recordVerdict("a", "fail"), at(3));
+    const { ledger, planned } = step(thesis, recordVerdict(thesis, "a", "fail"), at(3));
     assert.strictEqual(statusOf(ledger, "a"), "in_progress");
     assert.strictEqual(ledger.investigation?.status, "running");
     assert.strictEqual(ledger.closedAt, null);
@@ -185,7 +190,7 @@ describe("investigation state machine", () => {
   });
 
   it("the first PASS solves it, drops the other approaches and stops every child", () => {
-    const { ledger, planned } = step(running(), recordVerdict("a", "pass"), at(4));
+    const { ledger, planned } = step(running(), recordVerdict(running(), "a", "pass"), at(4));
     assert.strictEqual(ledger.investigation?.status, "solved");
     assert.strictEqual(ledger.investigation?.solvedItemId, id("a"));
     assert.strictEqual(statusOf(ledger, "a"), "closed");
@@ -272,7 +277,7 @@ describe("investigation state machine", () => {
     assert.isTrue(
       Result.isFailure(planLedgerCommand({ command: addVariant, ledger: full, now: at(6) })),
     );
-    const refuted = step(full, recordVerdict("a", "fail"), at(7)).ledger;
+    const refuted = step(full, recordVerdict(full, "a", "fail"), at(7)).ledger;
     assert.isTrue(
       Result.isFailure(planLedgerCommand({ command: addVariant, ledger: refuted, now: at(8) })),
       "a refuted approach handed back in progress still holds its slot",
@@ -335,7 +340,7 @@ describe("investigation state machine", () => {
   });
 
   it("after it ends, the agent cannot reopen the ledger; the user can", () => {
-    const solved = step(running(), recordVerdict("a", "pass"), at(4)).ledger;
+    const solved = step(running(), recordVerdict(running(), "a", "pass"), at(4)).ledger;
     const reopen = (createdBy?: "agent" | "user"): LedgerCommand => ({
       type: "ledger.reopen",
       commandId,
@@ -379,7 +384,7 @@ describe("investigation state machine", () => {
       at(7),
     ).ledger;
     // `ledger_request_judgement` records a verdict without a pending close request.
-    return step(ledger, recordVerdict("x", "pass"), at(8)).ledger;
+    return step(ledger, recordVerdict(ledger, "x", "pass"), at(8)).ledger;
   }
 
   it("refuses moving a judged item under Approaches, so the refuter cannot be skipped", () => {
@@ -443,7 +448,7 @@ describe("investigation state machine", () => {
   it("delegate_task is refused once the investigation has ended, even on a reopened ledger", () => {
     const thesis = running();
     assert.strictEqual(delegationProblem(thesis, 0), undefined);
-    const solved = step(thesis, recordVerdict("a", "pass"), at(4)).ledger;
+    const solved = step(thesis, recordVerdict(thesis, "a", "pass"), at(4)).ledger;
     assert.include(delegationProblem(solved, 0) ?? "", "has ended (solved");
     // Reopening does not revive the investigation, so its workers stay stopped.
     const reopened = step(
@@ -462,7 +467,7 @@ describe("investigation state machine", () => {
 
   it("only a refuter's pass solves it: a plain pass on an approach item does not", () => {
     // The verdict is stamped as a refutation only when the item was an approach when judged.
-    const { ledger } = step(running(), recordVerdict("a", "pass"), at(4));
+    const { ledger } = step(running(), recordVerdict(running(), "a", "pass"), at(4));
     const solved = ledger.items.find((item) => item.id === id("a"));
     assert.strictEqual(solved?.verdict?.refuter, true);
     const unstamped: Ledger = {
@@ -507,7 +512,7 @@ describe("investigation state machine", () => {
     Effect.gen(function* () {
       const child = ThreadId.make("thread:worker");
       const grandchild = ThreadId.make("thread:sub-worker");
-      const solved = step(running(), recordVerdict("a", "pass"), at(4)).ledger;
+      const solved = step(running(), recordVerdict(running(), "a", "pass"), at(4)).ledger;
       const chain: Record<string, InvestigationChainRecords> = {
         [threadId]: chainLink(solved, null),
         [child]: chainLink(undefined, threadId),
@@ -596,7 +601,7 @@ describe("investigation state machine", () => {
   );
 
   it("the spawn guard locks a running thread, and an ended one until the user writes again", () => {
-    const solved = step(running(), recordVerdict("a", "pass"), at(4)).ledger;
+    const solved = step(running(), recordVerdict(running(), "a", "pass"), at(4)).ledger;
     assert.strictEqual(investigationSpawnGuard(running(), null).state, "running");
     // No user message since the end (a report or wake turn is not one): still locked.
     assert.strictEqual(investigationSpawnGuard(solved, null).state, "ended");

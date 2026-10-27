@@ -1,4 +1,9 @@
-import { LOADOUT_ROLE_NAMES, type Loadout, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  DEFAULT_LOADOUTS,
+  LOADOUT_ROLE_NAMES,
+  type Loadout,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -58,6 +63,33 @@ describe("newRoleDefault", () => {
     });
     expect(newRoleDefault([])).toBeUndefined();
     expect(newRoleDefault([entry("empty", true, [])])).toBeUndefined();
+  });
+});
+
+describe("cross-check preset", () => {
+  const stored = DEFAULT_LOADOUTS.filter(({ id }) => id !== "cross-check");
+
+  it("is offered automatically to a list saved before it existed", () => {
+    expect(missingPresets(stored, DEFAULT_LOADOUTS, () => "fresh").map(({ id }) => id)).toEqual([
+      "cross-check",
+    ]);
+    expect(missingPresets(DEFAULT_LOADOUTS, DEFAULT_LOADOUTS, () => "fresh")).toEqual([]);
+  });
+
+  it("counts a changed fallback as a different role", () => {
+    const judge = DEFAULT_LOADOUTS.find(({ id }) => id === "cross-check")!.roles.judge!;
+    const { fallback: _dropped, ...bare } = judge;
+    expect(
+      sameRoles({ ...loadout, roles: { judge } }, { ...loadout, roles: { judge: bare } }),
+    ).toBe(false);
+  });
+
+  it("keeps the fallback when the judge's model is changed in the editor", () => {
+    const judge = DEFAULT_LOADOUTS.find(({ id }) => id === "cross-check")!.roles.judge!;
+    expect(
+      roleAfterModelChange(judge, ProviderInstanceId.make("codex"), "gpt-6-astra", undefined)
+        .fallback,
+    ).toEqual(judge.fallback);
   });
 });
 

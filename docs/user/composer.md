@@ -51,7 +51,7 @@ See [images and videos](#images-and-videos-in-messages) for previewing and savin
 
 ## Send while the agent is working
 
-On web and desktop, choose **Settings → General → Follow-up behavior** to queue
+On web and desktop, choose **Settings → Chat → Follow-up behavior** to queue
 new messages for a later turn or steer the running turn immediately. The setting
 applies to this client; already queued messages keep their place. Queued messages
 are saved on the server and can be edited, reordered, or removed above the composer.
@@ -245,8 +245,8 @@ Type `/` for commands or `$` to add a skill from the selected environment and
 provider. On mobile, both are also available before starting a thread on
 **New task**.
 
-The slash menu also includes skills unless you turn off **Settings → General →
-Show skills in slash menu**. Only skills enabled for the provider are listed.
+The slash menu also includes skills unless you turn off **Settings → Chat →
+Show skills in slash menu**, under Advanced. Only skills enabled for the provider are listed.
 
 After you add or change skills, plugins, or MCP servers, use **Restart agent
 session** in the command palette on web and desktop. The conversation continues,
@@ -270,9 +270,13 @@ row above the composer shows the goal and its progress.
 
 - `/goal` alone shows the current goal. `/goal clear` removes it.
 - Codex also supports `/goal pause` and `/goal resume`. Stopping a Codex goal
-  pauses it.
+  pauses it, and so does Codex ending its work without meeting the goal.
 - Stopping Claude ends the current turn, but the goal stays set. Claude checks it
   again at the end of your next message.
+- Sending a new goal, or `/goal resume`, while the agent works stops the current
+  turn and starts the goal, unless you queue it. `/goal clear` and `/goal pause`
+  stop the turn only when it is working on the goal. Other goal commands wait for
+  the turn to end.
 
 ## Task ledger
 
@@ -280,7 +284,7 @@ For a task with several parts, the agent can keep a task ledger: a checklist for
 
 Watch progress in two places: the **Overview** tab and the thread details panel. Both list every item as open, in progress, done or dropped, with its evidence, the reason for any dropped item, and a judge's verdict when there is one. Sub-items sit indented under their parent, an item waiting on another shows which one it is blocked by, and work the agent found out of scope is kept in a collapsed **Deferred** group instead of being done. Deferred items do not count toward progress and do not keep the thread going. While items remain open, a **Ledger** count such as `3/8` also shows at the right of the thread header.
 
-If a turn ends while items are still open, T3 Code continues for you. It sends a follow-up marked as automatic in the thread, so it is not mistaken for something you typed. It continues up to five times in a row, and stops sooner if a round makes no progress. When it stops, the thread says why and is marked unread. While a `/goal` is set and not yet met, it stands aside and lets the goal keep the agent going.
+If a turn ends while items are still open, T3 Code continues for you. It sends a follow-up marked as automatic in the thread, so it is not mistaken for something you typed. It continues up to five times in a row. If a round makes no progress, or the judge has failed one item three times, the next follow-up asks the agent to rethink the plan for the stuck items (split, reword, block or defer them) instead of retrying; if the ledger is still unchanged after that, it stops. When it stops, the thread says why and is marked unread. While a `/goal` is set and not yet met, it stands aside and lets the goal keep the agent going.
 
 To stop it earlier, stop the running turn, remove the queued follow-up before it starts, or ask the agent to close or drop the remaining items. Sending your own message starts the count again.
 

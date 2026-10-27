@@ -58,6 +58,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   // An investigation runs several agents on this environment's providers.
   [ORCHESTRATION_V2_WS_METHODS.startInvestigation]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_V2_WS_METHODS.stopInvestigation]: AuthOrchestrationOperateScope,
+  // Fork: starts turns, and for an audit a judge model, on this environment's providers.
+  [ORCHESTRATION_V2_WS_METHODS.runBuildMode]: AuthOrchestrationOperateScope,
   // A guest link hands thread access to someone outside, like a pairing link.
   [WS_METHODS.guestShareCreate]: AuthAccessWriteScope,
 } as const;

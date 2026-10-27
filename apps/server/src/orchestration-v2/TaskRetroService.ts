@@ -10,6 +10,7 @@ import {
   type TaskRetro,
   type TaskRetroRollup,
   ThreadId,
+  resolveProjectProviderInstanceEnabled,
 } from "@t3tools/contracts";
 import { loadoutDelegationTarget, resolveLoadout, withSolo } from "@t3tools/shared/loadouts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -256,7 +257,15 @@ export const make = Effect.gen(function* () {
       const settings = yield* readSettings;
       const available = projectLoadouts(settings, shell.projectId);
       const active = resolveLoadout(available, shell.loadout?.id);
-      const providers = yield* providerRegistry.getProviders.pipe(Effect.mapError(readFailed));
+      // Narrowed by the project's own enable state, as delegation does.
+      const providers = (yield* providerRegistry.getProviders.pipe(
+        Effect.mapError(readFailed),
+      )).map((provider) => ({
+        ...provider,
+        enabled:
+          provider.enabled &&
+          resolveProjectProviderInstanceEnabled(settings, shell.projectId, provider.instanceId),
+      }));
       // The judge or planner is the loadout's strongest seat; with neither, the thread's own model.
       const target =
         loadoutDelegationTarget(active, "judge", providers) ??

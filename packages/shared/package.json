@@ -259,6 +259,10 @@
       "types": "./src/investigation.ts",
       "import": "./src/investigation.ts"
     },
+    "./buildModes": {
+      "types": "./src/buildModes.ts",
+      "import": "./src/buildModes.ts"
+    },
     "./composerTrigger": {
       "types": "./src/composerTrigger.ts",
       "import": "./src/composerTrigger.ts"

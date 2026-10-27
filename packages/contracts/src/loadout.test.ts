@@ -42,8 +42,28 @@ describe("loadout settings", () => {
       "blitz",
       "napalm",
       "haiku-workers",
+      "cross-check",
     ]);
     expect(DEFAULT_LOADOUTS[1]?.roles.judge?.model).toBe("claude-opus-5-5");
+  });
+
+  it("judges Cross-check on Codex with an Opus fallback that survives a round trip", () => {
+    const judge = DEFAULT_LOADOUTS.find(({ id }) => id === "cross-check")?.roles.judge;
+    expect(judge).toMatchObject({
+      instanceId: "codex",
+      model: "gpt-6.1-sol",
+      fallback: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+    });
+  });
+
+  it("decodes a role stored before fallback existed, leaving it unset", () => {
+    const decoded = decodeLoadout({
+      id: "old",
+      name: "Old",
+      description: "",
+      roles: { judge: { instanceId: "claudeAgent", model: "claude-opus-5-5" } },
+    });
+    expect(decoded.roles.judge).not.toHaveProperty("fallback");
   });
 
   it("puts Opus on every role of Opus blowout", () => {

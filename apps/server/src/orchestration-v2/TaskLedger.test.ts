@@ -7,6 +7,7 @@ import {
   type Ledger,
   type LedgerItemStatus,
   NodeId,
+  OrchestratorMcpFailure,
   type OrchestrationV2DomainEvent,
   ProjectId,
   ProviderDriverKind,
@@ -18,6 +19,7 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as TestClock from "effect/testing/TestClock";
@@ -147,6 +149,7 @@ const updateItem = (
     readonly status?: LedgerItemStatus;
     readonly evidence?: string | null;
     readonly dropReason?: string | null;
+    readonly createdBy?: "user" | "agent";
   },
 ) =>
   Effect.gen(function* () {
@@ -198,6 +201,8 @@ const addItems = (threadId: ThreadId, names: ReadonlyArray<string>, id: LedgerId
 const recordVerdict = (threadId: ThreadId, name: string, outcome: "pass" | "fail") =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
+    // Like the server's judge, a verdict for a pending close answers that request by its stamp.
+    const judging = itemOf((yield* orchestrator.getThreadProjection(threadId)).ledger, name);
     return yield* orchestrator.dispatch({
       type: "ledger.item.verdict.record",
       commandId: nextCommandId(),
@@ -210,6 +215,7 @@ const recordVerdict = (threadId: ThreadId, name: string, outcome: "pass" | "fail
         notes: `${outcome} notes`,
         at: yield* DateTime.now,
       },
+      ...(judging?.judging === true ? { judgingRequestedAt: judging.updatedAt } : {}),
     });
   });
 
@@ -894,8 +900,8 @@ it.effect("fixes requiresJudge when the ledger is created and gates closing on a
     yield* setLoadout(org, judged);
     yield* createLedger(org, { items: ["a"] });
     assert.isTrue((yield* ledgerOf(org))?.requiresJudge);
-    // Asking to close starts the server's judge instead of closing.
-    yield* updateItem(org, "a", { status: "closed", evidence: "tests pass" });
+    // The agent asking to close starts the server's judge instead of closing.
+    yield* updateItem(org, "a", { status: "closed", evidence: "tests pass", createdBy: "agent" });
     const judging = itemOf(yield* ledgerOf(org), "a");
     assert.equal(judging?.status, "in_progress");
     assert.isTrue(judging?.judging);
@@ -906,10 +912,17 @@ it.effect("fixes requiresJudge when the ledger is created and gates closing on a
     assert.notOk(failed?.judging);
     assert.equal(failed?.verdict?.notes, "fail notes");
     // Asking again judges again; a passing verdict closes it.
-    yield* updateItem(org, "a", { status: "closed" });
+    yield* updateItem(org, "a", { status: "closed", createdBy: "agent" });
     assert.isTrue(itemOf(yield* ledgerOf(org), "a")?.judging);
     yield* recordVerdict(org, "a", "pass");
     assert.equal(itemOf(yield* ledgerOf(org), "a")?.status, "closed");
+
+    // The user closing it is final: no judge.
+    yield* addItems(org, ["b"]);
+    yield* updateItem(org, "b", { status: "closed", evidence: "I checked it" });
+    const byUser = itemOf(yield* ledgerOf(org), "b");
+    assert.equal(byUser?.status, "closed");
+    assert.notOk(byUser?.judging);
 
     // Switching to solo later does not un-gate a ledger that already exists.
     const switched = yield* createThread("judge-switched");
@@ -940,6 +953,7 @@ it.effect(
           itemId: itemId("a"),
           status: "closed",
           evidence: "a second run",
+          createdBy: "agent",
         },
         ledger: yield* ledgerOf(threadId),
         now: yield* DateTime.now,
@@ -965,22 +979,26 @@ const judgeRunnerSpy = () => {
   return { starts, layer };
 };
 
-const judgedLedgerClosedByClient = (name: string) =>
+const judgedLedgerClosedByAgent = (name: string) =>
   Effect.gen(function* () {
     const threadId = yield* createThread(name);
     yield* setLoadout(threadId, judged);
     yield* createLedger(threadId, { items: ["a"] });
     // Settle whatever creating the thread queued, so the close's effect is the only one left.
     yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
-    // The plain command a web or mobile client sends, not the MCP tool.
-    yield* updateItem(threadId, "a", { status: "closed", evidence: "tests pass" });
+    // The plain orchestrator command, not the MCP tool, so nothing outside the commit starts it.
+    yield* updateItem(threadId, "a", {
+      status: "closed",
+      evidence: "tests pass",
+      createdBy: "agent",
+    });
     return threadId;
   });
 
-it.effect("starts the judge through the outbox when a client closes an item", () => {
+it.effect("starts the judge through the outbox from the close command alone", () => {
   const spy = judgeRunnerSpy();
   return Effect.gen(function* () {
-    const threadId = yield* judgedLedgerClosedByClient("judge-outbox");
+    const threadId = yield* judgedLedgerClosedByAgent("judge-outbox");
     const item = itemOf(yield* ledgerOf(threadId), "a");
     assert.isTrue(item?.judging);
 
@@ -995,7 +1013,7 @@ it.effect("starts the judge through the outbox when a client closes an item", ()
       },
     ]);
     // A retried close request is redundant: no second judge.
-    yield* updateItem(threadId, "a", { status: "closed" });
+    yield* updateItem(threadId, "a", { status: "closed", createdBy: "agent" });
     yield* worker.drain();
     assert.lengthOf(spy.starts, 1);
   }).pipe(Effect.provide(layerTest.pipe(Layer.provide(spy.layer))));
@@ -1004,7 +1022,7 @@ it.effect("starts the judge through the outbox when a client closes an item", ()
 it.effect("resumes a judge start the server crashed in the middle of", () => {
   const spy = judgeRunnerSpy();
   return Effect.gen(function* () {
-    const threadId = yield* judgedLedgerClosedByClient("judge-restart");
+    const threadId = yield* judgedLedgerClosedByAgent("judge-restart");
     const outbox = yield* EffectOutbox.EffectOutboxV2;
     // The old process claimed the start and died before settling it.
     const claimed = yield* outbox.claimNext({ workerId: "crashed", leaseDurationMs: 60_000 });
@@ -1032,8 +1050,8 @@ it.effect("settles, at startup, a judge whose task ended while the server was do
     settleLedgerJudgement: (input) => Effect.sync(() => void settled.push(input)),
   });
   return Effect.gen(function* () {
-    const threadId = yield* judgedLedgerClosedByClient("judge-scan");
-    const idle = yield* judgedLedgerClosedByClient("judge-scan-unstarted");
+    const threadId = yield* judgedLedgerClosedByAgent("judge-scan");
+    const idle = yield* judgedLedgerClosedByAgent("judge-scan-unstarted");
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const judging = itemOf(yield* ledgerOf(threadId), "a")!;
     yield* orchestrator.dispatch({
@@ -1052,4 +1070,46 @@ it.effect("settles, at startup, a judge whose task ended while the server was do
     assert.deepEqual(settled, [{ threadId, taskId: NodeId.make("task:judge-scan") }]);
     assert.isTrue(itemOf(yield* ledgerOf(idle), "a")?.judging);
   }).pipe(Effect.provide(Layer.merge(layerTest, orchestratorMcp).pipe(Layer.provide(spy.layer))));
+});
+
+const flakySettle = (failures: number) => {
+  let attempts = 0;
+  const layer = Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+    settleLedgerJudgement: () =>
+      Effect.suspend(() => {
+        attempts += 1;
+        return attempts <= failures
+          ? Effect.fail(
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: "busy" }),
+            )
+          : Effect.void;
+      }),
+  });
+  return { layer, attempts: () => attempts };
+};
+
+it.effect("retries a failed live settle until it lands", () => {
+  const flaky = flakySettle(2);
+  return Effect.gen(function* () {
+    const service = yield* LedgerJudgeService.make;
+    const settling = yield* Effect.forkChild(
+      service.settle(ThreadId.make("thread:settle"), NodeId.make("task:settle")),
+    );
+    yield* TestClock.adjust("1 minute");
+    yield* Fiber.join(settling);
+    assert.equal(flaky.attempts(), 3);
+  }).pipe(Effect.provide(Layer.merge(layerTest, flaky.layer)));
+});
+
+it.effect("gives a failing live settle up after a bounded number of tries", () => {
+  const flaky = flakySettle(Number.POSITIVE_INFINITY);
+  return Effect.gen(function* () {
+    const service = yield* LedgerJudgeService.make;
+    const settling = yield* Effect.forkChild(
+      service.settle(ThreadId.make("thread:settle"), NodeId.make("task:settle")),
+    );
+    yield* TestClock.adjust("10 minutes");
+    yield* Fiber.join(settling);
+    assert.equal(flaky.attempts(), LedgerJudgeService.SETTLE_ATTEMPTS);
+  }).pipe(Effect.provide(Layer.merge(layerTest, flaky.layer)));
 });

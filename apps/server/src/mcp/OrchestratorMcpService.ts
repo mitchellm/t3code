@@ -72,8 +72,14 @@ import {
   type ServerProviderModel,
   ThreadId,
   isOrchestrationV2WorkActive,
+  resolveProjectProviderInstanceEnabled,
 } from "@t3tools/contracts";
-import { loadoutDelegationTarget, resolveLoadout, withSolo } from "@t3tools/shared/loadouts";
+import {
+  loadoutDelegationTarget,
+  matchRoleCandidate,
+  resolveLoadout,
+  withSolo,
+} from "@t3tools/shared/loadouts";
 import { isolationReport, resolveDelegationWorkspace } from "./WorkerIsolation.ts";
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -866,7 +872,7 @@ function threadTitle(input: {
   return detail.length > 80 ? `${detail.slice(0, 77)}...` : detail;
 }
 
-function taskPrompt(input: OrchestratorMcpDelegateTaskInput): string {
+export function taskPrompt(input: OrchestratorMcpDelegateTaskInput): string {
   return input.role === undefined || input.role === "general"
     ? input.task
     : `Act as the ${input.role} sub-agent for this task.\n\n${input.task}`;
@@ -1267,7 +1273,21 @@ const make = Effect.gen(function* () {
   ) {
     if (role === undefined) return undefined;
     const { active } = yield* loadLoadouts(thread);
-    const target = loadoutDelegationTarget(active, role, providers);
+    // Fork: a project that disabled an instance must not resolve to it, so the machine-wide
+    // snapshot is narrowed by the project's own enable state (the ledger gate does the same).
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+    );
+    const target = loadoutDelegationTarget(
+      active,
+      role,
+      providers.map((provider) => ({
+        ...provider,
+        enabled:
+          provider.enabled &&
+          resolveProjectProviderInstanceEnabled(settings, thread.projectId, provider.instanceId),
+      })),
+    );
     // A judge that quietly ran on the thread's own model would be marking its own work.
     if (role === "judge" && target === undefined) {
       return yield* failure(
@@ -1975,14 +1995,28 @@ const make = Effect.gen(function* () {
       readTask: Effect.fn("OrchestratorMcpService.judgeReadTask")(function* (taskId) {
         // Not acknowledged: the parent's completion wake still delivers the judge's answer.
         const result = yield* readTask(scope, taskId, false, false);
-        return judgeRun(result, yield* expectedJudge());
+        // Fork: what the judge ran on is what was resolved when it started. Resolving again from
+        // live snapshots would fail a healthy judge that began on the fallback once a slow
+        // probe made the primary resolvable. Only a configured candidate is accepted; anything
+        // else is compared with the current resolution and reported as the mismatch it is.
+        const { active } = yield* loadLoadouts(parent.thread);
+        const ran =
+          active.roles.judge === undefined ||
+          result.model === null ||
+          result.providerInstanceId === null
+            ? undefined
+            : matchRoleCandidate(active.roles.judge, {
+                instanceId: result.providerInstanceId,
+                model: result.model,
+              });
+        return judgeRun(result, ran ?? (yield* expectedJudge()));
       }),
       userMessages: (threadId) =>
         threadManagement.getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] }).pipe(
           Effect.map(({ messages }) => messages.map(({ text }) => text)),
           Effect.mapError(threadManagementFailure),
         ),
-      recordVerdict: ({ itemId, judgedEvidence, verdict, taskId }) =>
+      recordVerdict: ({ itemId, judgedEvidence, verdict, taskId, judgingRequestedAt }) =>
         threadManagement
           .dispatch({
             type: "ledger.item.verdict.record",
@@ -1996,6 +2030,7 @@ const make = Effect.gen(function* () {
             itemId,
             verdict,
             judgedEvidence,
+            ...(judgingRequestedAt === undefined ? {} : { judgingRequestedAt }),
           })
           .pipe(
             Effect.map(({ sequence }) => sequence),

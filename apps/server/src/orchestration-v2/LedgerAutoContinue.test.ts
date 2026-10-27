@@ -19,6 +19,7 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { LEDGER_AUTO_CONTINUE_CAP } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
@@ -467,25 +468,128 @@ it.effect("stops at the cap and marks the thread stuck", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("stops when a round made no ledger progress and marks the thread stuck", () =>
+const replanOf = (message: OrchestrationV2ConversationMessage | undefined) =>
+  message?.notification?.source.kind === "ledger_continue"
+    ? message.notification.source.replan
+    : undefined;
+
+it.effect("replans once when a round made no progress, then stops if nothing changed", () =>
   Effect.gen(function* () {
     const threadId = yield* setup("stall");
     yield* sendUserMessage(threadId);
     yield* completeLatest(threadId);
     assert.equal((yield* autoContinues(threadId)).length, 1);
-    assert.isFalse(yield* isMarkedStuck(threadId));
 
+    // No progress: the next nudge asks for a new plan instead of more of the same.
+    yield* completeLatest(threadId);
+    const followUps = yield* autoContinues(threadId);
+    assert.equal(followUps.length, 2);
+    const replan = followUps[1]!;
+    assert.deepEqual(replanOf(replan), {
+      reason: "stalled",
+      itemIds: [itemId("a"), itemId("b")],
+    });
+    assert.include(replan.notification?.summary ?? "", "Replanning the task ledger");
+    for (const step of ["split", "acceptance", "blocked", "defer"]) {
+      assert.include(replan.text, step);
+    }
+    assert.include(replan.text, "item:a");
+    assert.isFalse(yield* isMarkedStuck(threadId));
     assert.deepEqual(yield* stopNotices(threadId), []);
 
     const event = yield* completeLatest(threadId);
     yield* afterRun(event);
-    assert.equal((yield* autoContinues(threadId)).length, 1);
+    assert.equal((yield* autoContinues(threadId)).length, 2);
     assert.isTrue(yield* isMarkedStuck(threadId));
     const notices = yield* stopNotices(threadId);
     assert.equal(notices.length, 1);
     assert.include(notices[0], "Stopped continuing the task ledger: 2 items still open");
-    assert.include(notices[0], "no progress last round");
+    assert.include(notices[0], "no progress after a replan");
     assert.include(notices[0], "Item a, Item b.");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("goes back to plain follow-ups once the replan moved the ledger", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("stall-progress");
+    yield* sendUserMessage(threadId);
+    yield* completeLatest(threadId);
+    yield* completeLatest(threadId);
+    assert.equal(replanOf((yield* autoContinues(threadId)).at(-1))?.reason, "stalled");
+
+    yield* addItem(threadId, "a.1");
+    yield* completeLatest(threadId);
+    const followUps = yield* autoContinues(threadId);
+    assert.deepEqual(followUps.map(roundOf), [1, 2, 3]);
+    assert.isUndefined(replanOf(followUps[2]));
+    assert.include(followUps[2]!.notification?.summary ?? "", "Continuing the task ledger");
+
+    // A fresh stall is a new episode with its own replan before any stop.
+    yield* completeLatest(threadId);
+    assert.equal(replanOf((yield* autoContinues(threadId)).at(-1))?.reason, "stalled");
+    assert.deepEqual(yield* stopNotices(threadId), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+const recordFailure = (threadId: ThreadId, name: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "ledger.item.verdict.record",
+      commandId: CommandId.make(nextId("verdict")),
+      threadId,
+      ledgerId,
+      itemId: itemId(name),
+      verdict: {
+        outcome: "fail",
+        judge: modelSelection,
+        notes: "The empty-input case still throws",
+        at: yield* DateTime.now,
+      },
+    });
+  });
+
+it.effect("replans an item the judge failed three times, naming it", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("judge-fails");
+    yield* sendUserMessage(threadId);
+    yield* recordFailure(threadId, "a");
+    yield* recordFailure(threadId, "a");
+    yield* completeLatest(threadId);
+    assert.isUndefined(replanOf((yield* autoContinues(threadId)).at(-1)));
+
+    yield* recordFailure(threadId, "a");
+    yield* completeLatest(threadId);
+    const replan = (yield* autoContinues(threadId)).at(-1)!;
+    assert.deepEqual(replanOf(replan), { reason: "judge", itemIds: [itemId("a")] });
+    assert.include(replan.text, "item:a");
+    assert.include(replan.text, "failed the judge 3 times");
+    assert.include(replan.text, "The empty-input case still throws");
+    assert.notInclude(replan.text, "Continue working through them");
+    assert.include(replan.notification?.summary ?? "", "item:a");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("counts judge failures only since the item was reopened", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = yield* setup("judge-fails-reopened");
+    for (let failure = 0; failure < 3; failure += 1) yield* recordFailure(threadId, "a");
+    yield* updateItem(threadId, "a", "closed");
+    yield* orchestrator.dispatch({
+      type: "ledger.item.update",
+      commandId: CommandId.make(nextId("reopen")),
+      threadId,
+      ledgerId,
+      itemId: itemId("a"),
+      status: "open",
+    });
+    yield* recordFailure(threadId, "a");
+    yield* sendUserMessage(threadId);
+    yield* completeLatest(threadId);
+    const followUp = (yield* autoContinues(threadId)).at(-1);
+    assert.equal(roundOf(followUp), 1);
+    assert.isUndefined(replanOf(followUp));
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -791,7 +895,11 @@ it.effect("waits for a running delegated task instead of nudging the agent", () 
 );
 
 /** Puts the latest run on a provider session whose adapter keeps the agent going itself. */
-const runOnSessionThatBlocksStops = (threadId: ThreadId, blocksStops: boolean) =>
+const runOnSessionThatBlocksStops = (
+  threadId: ThreadId,
+  blocksStops: boolean,
+  pendingBackgroundTasks: OrchestrationV2ProviderThread["pendingBackgroundTasks"] = [],
+) =>
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
     const now = yield* DateTime.now;
@@ -843,7 +951,7 @@ const runOnSessionThatBlocksStops = (threadId: ThreadId, blocksStops: boolean) =
             lastRunOrdinal: null,
             handoffIds: [],
             forkedFrom: null,
-            pendingBackgroundTasks: [],
+            pendingBackgroundTasks,
             contextUsage: null,
             nativeMetadata: null,
             goal: null,
@@ -889,12 +997,90 @@ it.effect("posts no stop notice for a self-blocking provider waiting on a delega
   }).pipe(Effect.provide(layerTest)),
 );
 
+/** The provider's own subagent row in the parent's timeline, which the composer reads as waiting. */
+const setNativeSubagentItem = (threadId: ThreadId, runId: RunId, status: "running" | "completed") =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(nextId("event:native-subagent")),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:native-subagent:${threadId}`),
+            threadId,
+            runId,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            status,
+            title: "Audit the API",
+            startedAt: now,
+            completedAt: status === "completed" ? now : null,
+            updatedAt: now,
+            type: "subagent",
+            subagentId: NodeId.make(`node:native-subagent:${threadId}`),
+            origin: "provider_native",
+            driver: adapter.driver,
+            providerInstanceId: instanceId,
+            childThreadId: null,
+            prompt: "Audit the API",
+            result: status === "completed" ? "Done" : null,
+          },
+        },
+      ],
+    });
+  });
+
+it.effect.each([
+  { source: "roster", blocksStops: true },
+  { source: "roster", blocksStops: false },
+  { source: "turn item", blocksStops: true },
+  { source: "turn item", blocksStops: false },
+] as const)(
+  "waits for the provider's own background subagent ($source, blocks: $blocksStops)",
+  ({ source, blocksStops }) =>
+    Effect.gen(function* () {
+      const threadId = yield* setup(`native-subagent-${source}-${blocksStops}`);
+      yield* sendUserMessage(threadId);
+      const launchRun = yield* latestRun(threadId);
+      if (source === "turn item") yield* setNativeSubagentItem(threadId, launchRun.id, "running");
+      yield* runOnSessionThatBlocksStops(
+        threadId,
+        blocksStops,
+        source === "roster"
+          ? [{ taskId: "agent-1", kind: "subagent", description: "Audit the API" }]
+          : [],
+      );
+      // The provider wakes the agent when the subagent reports, so this stop is not giving up.
+      assert.equal((yield* autoContinues(threadId)).length, 0);
+      assert.deepEqual(yield* stopNotices(threadId), []);
+      assert.isFalse(yield* isMarkedStuck(threadId));
+
+      // The report wakes the agent; a turn after that which moves nothing is judged as usual.
+      yield* serverWake(threadId);
+      if (source === "turn item") yield* setNativeSubagentItem(threadId, launchRun.id, "completed");
+      yield* runOnSessionThatBlocksStops(threadId, blocksStops);
+      assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), blocksStops ? [] : [1]);
+      assert.equal((yield* stopNotices(threadId)).length, blocksStops ? 1 : 0);
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("truncates a long item title in the stop notice", () =>
   Effect.gen(function* () {
     const threadId = yield* setup("long-title", ["a"]);
     const longTitle = "Rework the whole onboarding flow so every step explains itself clearly";
     yield* addItem(threadId, "long", longTitle);
     yield* sendUserMessage(threadId);
+    yield* completeLatest(threadId);
+    // The stall's replan round comes before the stop.
     yield* completeLatest(threadId);
     yield* completeLatest(threadId);
     const [notice] = yield* stopNotices(threadId);

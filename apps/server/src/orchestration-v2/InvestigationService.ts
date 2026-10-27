@@ -504,9 +504,14 @@ export const make = Effect.gen(function* () {
     ),
   );
 
+  // Untraced: startInvestigation and stopInvestigation already open the named spans.
   return InvestigationService.of({
-    start: (input) => startInvestigation(deps, input),
-    stop: (threadId) => stopInvestigation(deps, threadId),
+    start: Effect.fnUntraced(function* (input: OrchestrationStartInvestigationInput) {
+      return yield* startInvestigation(deps, input);
+    }),
+    stop: Effect.fnUntraced(function* (threadId: ThreadId) {
+      return yield* stopInvestigation(deps, threadId);
+    }),
   });
 });
 

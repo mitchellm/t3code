@@ -25,6 +25,7 @@ const RPC_AGGREGATES = {
   [ORCHESTRATION_V2_WS_METHODS.resolveTaskRetro]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.startInvestigation]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.stopInvestigation]: "orchestration",
+  [ORCHESTRATION_V2_WS_METHODS.runBuildMode]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.searchThread]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.searchThreadStream]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: "orchestration",

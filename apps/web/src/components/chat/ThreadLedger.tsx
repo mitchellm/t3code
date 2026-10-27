@@ -23,6 +23,7 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collaps
 import { ThreadTabSection } from "../thread/ThreadOverviewTab";
 import { InvestigationPanel } from "./InvestigationPanel";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
+import { BuildModeBar } from "./BuildModeBar";
 
 const ITEM_STATUS_PRESENTATION: Record<
   LedgerItem["status"],
@@ -215,6 +216,8 @@ export function ThreadLedgerDetailsSection({ threadRef }: { threadRef: ScopedThr
     <ThreadDetailsSection headingId="thread-details-ledger-heading" title="Task ledger">
       <InvestigationPanel threadRef={threadRef} ledger={ledger} />
       <ThreadLedgerView ledger={ledger} />
+      {/* Fork: a ledger made while planning offers the plan card's build actions. */}
+      <BuildModeBar threadRef={threadRef} className="px-2.5 pt-2" />
     </ThreadDetailsSection>
   );
 }
@@ -227,6 +230,7 @@ export function ThreadLedgerOverviewSection({ threadRef }: { threadRef: ScopedTh
     <ThreadTabSection title="Task ledger">
       <InvestigationPanel threadRef={threadRef} ledger={ledger} />
       <ThreadLedgerView ledger={ledger} />
+      <BuildModeBar threadRef={threadRef} className="px-2.5 pt-2" />
     </ThreadTabSection>
   );
 }

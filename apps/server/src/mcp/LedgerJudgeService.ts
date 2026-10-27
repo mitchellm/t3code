@@ -1,6 +1,7 @@
-import { type NodeId, ThreadId } from "@t3tools/contracts";
+import { NodeId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -10,6 +11,9 @@ import { forkParked } from "../serverActivation.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+/** Tries per live settle, the first included. */
+export const SETTLE_ATTEMPTS = 5;
 
 /**
  * Fork: the automatic ledger judge's two server-side halves. Starting is an outbox effect, so it
@@ -23,30 +27,29 @@ export const make = Effect.gen(function* () {
   const runner = yield* LedgerJudgeRunner.LedgerJudgeRunner;
   const sql = yield* SqlClient.SqlClient;
 
+  // A live terminal event is seen once, so a transient failure gets a few tries before it waits
+  // for the next startup scan. Settling is idempotent, so a retry after a partial success is safe.
   const settle = (threadId: ThreadId, taskId: NodeId) =>
-    orchestratorMcp
-      .settleLedgerJudgement({ threadId, taskId })
-      .pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("ledger judge settle failed", { threadId, taskId, cause }),
-        ),
-      );
+    orchestratorMcp.settleLedgerJudgement({ threadId, taskId }).pipe(
+      Effect.retry({ times: SETTLE_ATTEMPTS - 1, schedule: Schedule.exponential("200 millis") }),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("ledger judge settle failed", { threadId, taskId, cause }),
+      ),
+    );
 
-  // Rows are one per thread; the JSON filter only narrows which ledgers to read.
   const scanJudging = Effect.fn("LedgerJudgeService.scanJudging")(function* () {
-    const rows = yield* sql<{ readonly thread_id: string }>`
-      SELECT thread_id FROM orchestration_v2_projection_ledgers
-      WHERE open_item_count > 0 AND payload_json LIKE '%"judging":true%'
+    // A judging item without a task still has its start effect in the outbox, so only items
+    // whose judge was started can have ended unseen.
+    const rows = yield* sql<{ readonly thread_id: string; readonly task_id: string }>`
+      SELECT ledger.thread_id AS thread_id, json_extract(item.value, '$.judgeTaskId') AS task_id
+      FROM orchestration_v2_projection_ledgers AS ledger,
+        json_each(ledger.payload_json, '$.items') AS item
+      WHERE ledger.open_item_count > 0
+        AND json_extract(item.value, '$.judging') = 1
+        AND json_extract(item.value, '$.judgeTaskId') IS NOT NULL
     `;
     for (const row of rows) {
-      const threadId = ThreadId.make(row.thread_id);
-      const { ledger } = yield* orchestrator.getThreadRecords(threadId, ["ledger"]);
-      for (const item of ledger?.items ?? []) {
-        // A judging item without a task still has its start effect in the outbox.
-        if (item.judging === true && item.judgeTaskId !== undefined) {
-          yield* settle(threadId, item.judgeTaskId);
-        }
-      }
+      yield* settle(ThreadId.make(row.thread_id), NodeId.make(row.task_id));
     }
   });
 
@@ -80,7 +83,7 @@ export const make = Effect.gen(function* () {
       ),
     );
   });
-  return { start, scanJudging };
+  return { start, settle, scanJudging };
 });
 
 export const layer = Layer.effectDiscard(make.pipe(Effect.flatMap((service) => service.start())));

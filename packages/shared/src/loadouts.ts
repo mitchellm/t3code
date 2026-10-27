@@ -80,6 +80,13 @@ export function decideThreadLoadout(
 /** The slice of a provider snapshot needed to turn a role into a delegation target. */
 export interface LoadoutProviderView {
   readonly instanceId: string;
+  readonly enabled?: boolean | undefined;
+  /**
+   * False when the CLI is absent. Such a provider is still registered and enabled but lists no
+   * models, which `loadoutRoleTarget` would otherwise read as "cannot enumerate, trust the role".
+   */
+  readonly installed?: boolean | undefined;
+  readonly availability?: "available" | "unavailable" | undefined;
   readonly models: ReadonlyArray<{
     readonly slug: string;
     readonly capabilities?:
@@ -115,6 +122,55 @@ export function loadoutDelegationTarget(
   return assigned === undefined ? undefined : loadoutRoleTarget(assigned, providers);
 }
 
+export function providerUnusable(
+  provider: LoadoutProviderView,
+): "disabled_instance" | "not_installed" | null {
+  if (provider.enabled === false) return "disabled_instance";
+  return provider.installed === false || provider.availability === "unavailable"
+    ? "not_installed"
+    : null;
+}
+
+/** The role's own model then its fallback, as plain targets, with no live provider state. */
+export function loadoutRoleCandidates(role: LoadoutRole): ReadonlyArray<{
+  readonly providerInstanceId: LoadoutRole["instanceId"];
+  readonly model: string;
+}> {
+  return [role, ...(role.fallback === undefined ? [] : [role.fallback])].map((candidate) => ({
+    providerInstanceId: candidate.instanceId,
+    model: candidate.model,
+  }));
+}
+
+/**
+ * The candidate a recorded run matches. Judging compares against what actually started, not a
+ * fresh resolution: a slow probe can make the primary resolvable after the judge began on the
+ * fallback, and that judge is still the right one.
+ */
+export function matchRoleCandidate(
+  role: LoadoutRole,
+  ran: { readonly instanceId: string; readonly model: string },
+) {
+  return loadoutRoleCandidates(role).find(
+    ({ providerInstanceId, model }) => providerInstanceId === ran.instanceId && model === ran.model,
+  );
+}
+
+/**
+ * Whether new ledgers must be judged. `canRun` is registration and project enablement only, never
+ * install state: before the first provider probe every snapshot reads "not installed", and
+ * stamping false then would switch judging off for that ledger permanently.
+ */
+export function loadoutRequiresJudge(
+  loadout: Loadout,
+  canRun: (instanceId: LoadoutRole["instanceId"]) => boolean,
+): boolean {
+  const judge = loadout.roles.judge;
+  return (
+    judge !== undefined && loadoutRoleCandidates(judge).some((c) => canRun(c.providerInstanceId))
+  );
+}
+
 // Drivers name their effort option differently (Claude "effort", Codex "reasoningEffort").
 export const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["effort", "reasoningEffort"]);
 
@@ -127,8 +183,20 @@ export function loadoutRoleTarget(
   role: LoadoutRole,
   providers: ReadonlyArray<LoadoutProviderView>,
 ): OrchestratorMcpTarget | undefined {
+  const { fallback, ...own } = role;
+  return (
+    modelTarget(own, providers) ??
+    (fallback === undefined ? undefined : modelTarget(fallback, providers))
+  );
+}
+
+function modelTarget(
+  role: Omit<LoadoutRole, "fallback">,
+  providers: ReadonlyArray<LoadoutProviderView>,
+): OrchestratorMcpTarget | undefined {
   const provider = providers.find(({ instanceId }) => instanceId === role.instanceId);
-  if (provider === undefined) return undefined;
+  // Fork: a disabled or uninstalled instance cannot run, so it counts as gone and the fallback applies.
+  if (provider === undefined || providerUnusable(provider) !== null) return undefined;
   const model = provider.models.find(({ slug }) => slug === role.model);
   // An empty list means the provider cannot enumerate models, so the role's model is trusted.
   if (model === undefined && provider.models.length > 0) return undefined;

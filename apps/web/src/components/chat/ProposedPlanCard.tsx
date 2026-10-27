@@ -37,6 +37,7 @@ import { projectEnvironment } from "~/state/projects";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
+import { BuildModeBar } from "./BuildModeBar";
 
 export const ProposedPlanCard = memo(function ProposedPlanCard({
   planMarkdown,
@@ -45,6 +46,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
   cwd,
   workspaceRoot,
   findActive = false,
+  buildable = false,
 }: {
   planMarkdown: string;
   environmentId: EnvironmentId;
@@ -52,6 +54,8 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
   cwd: string | undefined;
   workspaceRoot: string | undefined;
   findActive?: boolean;
+  /** Fork: the plan is still waiting to be built, so the build actions show under it. */
+  buildable?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
@@ -229,6 +233,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
             </Button>
           </div>
         ) : null}
+        {buildable && threadRef ? <BuildModeBar threadRef={threadRef} className="mt-4" /> : null}
       </div>
 
       <Dialog

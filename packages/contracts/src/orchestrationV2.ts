@@ -585,6 +585,37 @@ export function isCompactionCommandMessage(message: CompactionMessageFields): bo
   );
 }
 
+export type OrchestrationV2GoalCommand =
+  | { readonly type: "show" }
+  | { readonly type: "clear" }
+  | { readonly type: "pause" }
+  | { readonly type: "resume" }
+  | { readonly type: "set"; readonly objective: string };
+
+/** Reads a `/goal` control message. Messages with attachments are ordinary prompts. */
+export function parseGoalCommand(message: {
+  readonly text: string;
+  readonly attachments?: ReadonlyArray<unknown> | undefined;
+}): OrchestrationV2GoalCommand | null {
+  if ((message.attachments?.length ?? 0) > 0) return null;
+  const match = /^\/goal(?:\s+([\s\S]*))?$/u.exec(message.text.trim());
+  if (match === null) return null;
+  const argument = (match[1] ?? "").trim();
+  switch (argument.toLowerCase()) {
+    case "":
+    case "edit":
+      return { type: "show" };
+    case "clear":
+      return { type: "clear" };
+    case "pause":
+      return { type: "pause" };
+    case "resume":
+      return { type: "resume" };
+    default:
+      return { type: "set", objective: argument };
+  }
+}
+
 /** Why T3 Code sent this `/compact` on its own, or undefined for one someone asked for. */
 export function idleCompactionOf(
   message: CompactionMessageFields,
@@ -702,6 +733,8 @@ export const OrchestrationV2Run = Schema.Struct({
   checkpointId: Schema.NullOr(CheckpointId),
   contextHandoffId: Schema.NullOr(ContextHandoffId),
   restartContinuationOfRunId: Schema.optional(RunId),
+  /** Fork: this run started a fresh native conversation; earlier runs are not in its context. */
+  freshProviderThread: Schema.optional(Schema.Literal(true)),
   delegatedTaskId: Schema.optional(NodeId),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
@@ -1254,6 +1287,16 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
           // A judge's verdict or hand-back is progress even when the status did not change.
           judging: Schema.optionalKey(Schema.Boolean),
           judgements: Schema.optionalKey(NonNegativeInt),
+        }),
+      ),
+      /**
+       * Present on a replan nudge: a stalled round or an item the judge kept failing. One stall
+       * gets one replan, and an item one judge replan, until the user speaks again.
+       */
+      replan: Schema.optionalKey(
+        Schema.Struct({
+          reason: Schema.Literals(["stalled", "judge"]),
+          itemIds: Schema.Array(LedgerItemId),
         }),
       ),
     }),
@@ -3230,6 +3273,8 @@ export const OrchestrationV2Command = Schema.Union([
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
+    /** Fork: start a new native conversation on this thread; the old transcript stays visible. */
+    freshProviderThread: Schema.optional(Schema.Literal(true)),
     delegatedCompletion: Schema.optional(
       Schema.Struct({
         parentRunId: RunId,
@@ -3556,6 +3601,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   resolveTaskRetro: "orchestration.resolveTaskRetro",
   startInvestigation: "orchestration.startInvestigation",
   stopInvestigation: "orchestration.stopInvestigation",
+  runBuildMode: "orchestration.runBuildMode",
   searchThread: "orchestration.searchThread",
   searchThreadStream: "orchestration.searchThreadStream",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",

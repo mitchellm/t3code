@@ -190,6 +190,7 @@ import * as TaskTimingService from "./orchestration-v2/TaskTimingService.ts";
 import * as TaskRetroService from "./orchestration-v2/TaskRetroService.ts";
 import * as InvestigationService from "./orchestration-v2/InvestigationService.ts";
 import * as TaskRetros from "./persistence/TaskRetros.ts";
+import * as BuildModeService from "./orchestration-v2/BuildModeService.ts";
 import * as ThreadPreviews from "./orchestration-v2/ThreadPreviews.ts";
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
 import * as IdleCompactionService from "./orchestration-v2/IdleCompactionService.ts";
@@ -603,6 +604,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       Layer.merge(EventStoreV2.layerFromOrchestrationEventStore, ProjectionStoreV2.layer),
     ),
   ),
+  BuildModeService.layer,
   TaskRetroService.layer.pipe(
     Layer.provide(TaskRetros.layer),
     // Stateless, so the retro reads its own copy rather than sharing the sibling's.

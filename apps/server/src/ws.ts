@@ -177,6 +177,7 @@ import * as TaskTimingService from "./orchestration-v2/TaskTimingService.ts";
 import type * as TaskRetro from "./orchestration-v2/TaskRetro.ts";
 import * as TaskRetroService from "./orchestration-v2/TaskRetroService.ts";
 import * as InvestigationService from "./orchestration-v2/InvestigationService.ts";
+import * as BuildModeService from "./orchestration-v2/BuildModeService.ts";
 import * as ThreadPreviews from "./orchestration-v2/ThreadPreviews.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
@@ -3324,6 +3325,7 @@ const layerForkWsRpc = ServerForkWsRpcGroup.toLayer(
     const taskTiming = yield* TaskTimingService.TaskTimingService;
     const taskRetro = yield* TaskRetroService.TaskRetroService;
     const investigations = yield* InvestigationService.InvestigationService;
+    const buildModes = yield* BuildModeService.BuildModeService;
     // The service's messages are fixed text, so they are safe to show.
     const taskRetroError = (error: TaskRetro.TaskRetroError) =>
       new OrchestrationTaskRetroError({ message: error.message, cause: error });
@@ -3369,6 +3371,8 @@ const layerForkWsRpc = ServerForkWsRpcGroup.toLayer(
       [ORCHESTRATION_V2_WS_METHODS.startInvestigation]: (input) => investigations.start(input),
       [ORCHESTRATION_V2_WS_METHODS.stopInvestigation]: (input) =>
         investigations.stop(input.threadId),
+      [ORCHESTRATION_V2_WS_METHODS.runBuildMode]: ({ action, ...input }) =>
+        BuildModeService.buildModeMethod(buildModes, action)(input),
       [WS_METHODS.projectsResolveFileReference]: (input) =>
         workspaceFileReferences.resolve(input).pipe(
           Effect.mapError(

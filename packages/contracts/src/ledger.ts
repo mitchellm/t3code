@@ -57,6 +57,11 @@ export const LedgerItem = Schema.Struct({
    * so repeated asking is visible. Absent means none.
    */
   judgements: Schema.optionalKey(NonNegativeInt),
+  /**
+   * `judgements` when the item was last reopened or last passed, so failures since then are the
+   * difference. Absent means zero. Only the planner sets it.
+   */
+  judgementsAtReopen: Schema.optionalKey(NonNegativeInt),
   /** Items that must be closed or dropped before this one can start or close. Absent means none. */
   blockedBy: Schema.optionalKey(Schema.Array(LedgerItemId)),
   /** The item this one is a sub-item of; a parent cannot close while a child is unfinished. */
@@ -261,6 +266,12 @@ export const LedgerVerdictRecordCommand = Schema.Struct({
   verdict: LedgerItemVerdict,
   /** The evidence the judge was shown; a verdict for evidence that has since changed is stale. */
   judgedEvidence: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * The close request this verdict answers (the judging item's `updatedAt`). With it the verdict
+   * settles that request, and is ignored once a newer request or a settlement replaced it.
+   * Without it the verdict only records, as an explicit judgement does.
+   */
+  judgingRequestedAt: Schema.optionalKey(Schema.DateTimeUtc),
 });
 
 /** Server-only: ends an automatic judgement that produced no verdict, handing the item back. */

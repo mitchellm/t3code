@@ -211,10 +211,9 @@ const make = Effect.gen(function* () {
       Effect.flatMap(({ sequence }) => settle(sequence)),
     );
     const settled = yield* hashed.pipe(
-      Effect.flatMap((first) =>
-        first.applied
-          ? Effect.succeed(first)
-          : Effect.flatMap(fresh, send).pipe(Effect.flatMap(({ sequence }) => settle(sequence))),
+      Effect.filterOrElse(
+        (first) => first.applied,
+        () => Effect.flatMap(fresh, send).pipe(Effect.flatMap(({ sequence }) => settle(sequence))),
       ),
       toToolError,
     );

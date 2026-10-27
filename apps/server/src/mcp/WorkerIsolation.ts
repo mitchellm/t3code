@@ -123,17 +123,18 @@ export const resolveDelegationWorkspace = Effect.fn("WorkerIsolation.resolveDele
     if (decision === "explicit") return yield* worktree.pipe(asFailure);
     // Only a missing repository falls back; any other failure is a real problem to surface.
     return yield* worktree.pipe(
-      Effect.catch((error) =>
-        error instanceof WorktreeUnavailable && error.notGitRepository
-          ? Effect.logInfo("delegate_task.default-worktree-fallback", {
-              error: error.failure,
-            }).pipe(
-              Effect.as({
-                ...shared,
-                note: "This project is not a git repository, so the child shares your checkout.",
-              } satisfies DelegationWorkspace),
-            )
-          : Effect.fail(error),
+      Effect.catchIf(
+        (error): error is WorktreeUnavailable & { readonly notGitRepository: true } =>
+          error instanceof WorktreeUnavailable && error.notGitRepository,
+        (error) =>
+          Effect.logInfo("delegate_task.default-worktree-fallback", {
+            error: error.failure,
+          }).pipe(
+            Effect.as({
+              ...shared,
+              note: "This project is not a git repository, so the child shares your checkout.",
+            } satisfies DelegationWorkspace),
+          ),
       ),
       asFailure,
     );

@@ -61,6 +61,8 @@ const closeItem: LedgerCommand = {
   ledgerId,
   itemId,
   status: "closed",
+  // The agent's close: the judge gate applies to it, while a user's close is final.
+  createdBy: "agent",
 };
 
 describe("planLedgerCommand judge gate", () => {
@@ -259,6 +261,55 @@ describe("planLedgerCommand ledger-level judge requirement", () => {
       "fail",
     );
     assert.equal(second?.judgements, 2);
+  });
+
+  it("restarts the failure baseline when an item is reopened or passes", () => {
+    const updated = (command: LedgerCommand, ledger: Ledger) => {
+      const planned = planLedgerCommand({ command, ledger, now });
+      return Result.isSuccess(planned) && planned.success[0]?.type === "ledger.item.updated"
+        ? planned.success[0].payload.item
+        : undefined;
+    };
+    const reopened = updated(
+      {
+        type: "ledger.item.update",
+        commandId: CommandId.make("command:plan:reopen"),
+        threadId,
+        ledgerId,
+        itemId,
+        status: "open",
+      },
+      ledgerWith({ status: "closed", closedAt: earlier, verdict: verdict("fail"), judgements: 3 }),
+    );
+    assert.equal(reopened?.judgements, 3);
+    assert.equal(reopened?.judgementsAtReopen, 3);
+
+    const passed = updated(
+      {
+        type: "ledger.item.verdict.record",
+        commandId: CommandId.make("command:plan:baseline-pass"),
+        threadId,
+        ledgerId,
+        itemId,
+        verdict: verdict("pass"),
+      },
+      ledgerWith({ verdict: verdict("fail"), judgements: 2 }),
+    );
+    assert.equal(passed?.judgementsAtReopen, 3);
+
+    const failed = updated(
+      {
+        type: "ledger.item.verdict.record",
+        commandId: CommandId.make("command:plan:baseline-fail"),
+        threadId,
+        ledgerId,
+        itemId,
+        verdict: verdict("fail"),
+      },
+      ledgerWith({ judgements: 3, judgementsAtReopen: 3 }),
+    );
+    assert.equal(failed?.judgements, 4);
+    assert.equal(failed?.judgementsAtReopen, 3);
   });
 
   it("refuses a verdict for evidence that changed while the judge was working", () => {
