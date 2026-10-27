@@ -9421,6 +9421,147 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       session_id: WAKE_NATIVE_SESSION,
     });
 
+  const makeStopHookFeedbackFrame = (uuid: string) =>
+    claudeSdkFrame({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "Stop hook feedback:\nLedger has 7 open items." }],
+      },
+      parent_tool_use_id: null,
+      isSynthetic: true,
+      uuid,
+      session_id: WAKE_NATIVE_SESSION,
+    });
+
+  // Background shells that keep running through the wakes, as the incident's two runners and its
+  // Monitor did. Each serves as one barrier below.
+  const LIVE_WAKE_RUNNERS = ["b10bxawc9", "b10bxawd0", "b42czqe76"] as const;
+  const liveWakeRunnerStarts = LIVE_WAKE_RUNNERS.map((taskId, index) =>
+    makeBackgroundShellStarted({
+      taskId,
+      toolUseId: `toolu_live_runner_${index}`,
+      description: `Role runner ${index}`,
+      uuid: `00000000-0000-4000-8000-00000000175${index}`,
+    }),
+  );
+
+  // awaitBackgroundTasks emits the roster under the SDK message lock, behind every event emitted
+  // before the call, the drain's included. Marking a different running task each time identifies
+  // that call's event, so the run's state read up to it is settled rather than raced.
+  const wakeRunStateAtBarrier = Effect.fnUntraced(function* (input: {
+    readonly harness: Effect.Success<typeof makeWakeHarness>;
+    readonly attemptId: string;
+    readonly barrierTaskId: string;
+  }) {
+    const { harness } = input;
+    const awaitBackgroundTasks = harness.runtime.awaitBackgroundTasks;
+    if (awaitBackgroundTasks === undefined) {
+      throw new Error("Claude adapter runtime must expose awaitBackgroundTasks.");
+    }
+    const providerTurnId = (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+      driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+      nativeTurnId: `turn:${input.attemptId}`,
+    });
+    const marked = yield* awaitBackgroundTasks({
+      providerThread: harness.providerThread,
+      taskIds: [input.barrierTaskId],
+      awaited: true,
+    });
+    assert.deepEqual(marked.matched, [input.barrierTaskId]);
+    const barrierIndex = () =>
+      harness.events.findIndex(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          (event.providerThread.pendingBackgroundTasks ?? []).some(
+            (task) => task.taskId === input.barrierTaskId && task.awaited === true,
+          ),
+      );
+    yield* harness.until(() => barrierIndex() !== -1);
+    const before = harness.events.slice(0, barrierIndex());
+    return {
+      turnStatus: before
+        .flatMap((event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.id === providerTurnId
+            ? [event.providerTurn.status]
+            : [],
+        )
+        .at(-1),
+      terminals: before.filter(
+        (event) => event.type === "turn.terminal" && event.providerTurnId === providerTurnId,
+      ).length,
+    };
+  });
+
+  // Attaches the continuation that the buffered wakes asked for while Claude still runs the newest
+  // one, then finishes that turn live. The run must stay open through the drain and settle once,
+  // on the live turn's own result.
+  const attachAndFinishLiveWakeTurn = Effect.fnUntraced(function* (input: {
+    readonly harness: Effect.Success<typeof makeWakeHarness>;
+    readonly attemptId: string;
+    readonly liveToolUseId: string;
+  }) {
+    const { harness, attemptId } = input;
+    const [afterDrain, beforeResult, afterResult] = LIVE_WAKE_RUNNERS;
+    yield* harness.runtime.startTurn(
+      makeClaudeTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make(attemptId),
+        text: "Background task completed.",
+        attachments: [],
+        providerTurnOrdinal: 2,
+        messageCreatedBy: "agent",
+        messageCreationSource: "provider",
+      }),
+    );
+    assert.deepEqual(
+      yield* wakeRunStateAtBarrier({ harness, attemptId, barrierTaskId: afterDrain }),
+      { turnStatus: "running", terminals: 0 },
+    );
+
+    yield* harness.offerAndWait(
+      makeRootToolResultFrame({
+        uuid: "00000000-0000-4000-8000-000000001760",
+        toolUseId: input.liveToolUseId,
+      }),
+    );
+    yield* harness.offerAndWait(
+      makeAssistantTextFrame({
+        uuid: "00000000-0000-4000-8000-000000001761",
+        text: "Scored every layout.",
+      }),
+    );
+    assert.deepEqual(
+      yield* wakeRunStateAtBarrier({ harness, attemptId, barrierTaskId: beforeResult }),
+      { turnStatus: "running", terminals: 0 },
+    );
+
+    yield* harness.offerAndWait(
+      makeResultFrame({
+        uuid: "00000000-0000-4000-8000-000000001762",
+        result: "Scored every layout.",
+      }),
+    );
+    assert.deepEqual(
+      yield* wakeRunStateAtBarrier({ harness, attemptId, barrierTaskId: afterResult }),
+      { turnStatus: "completed", terminals: 1 },
+    );
+    assert.lengthOf(harness.terminalEvents(), 2);
+    assert.equal(harness.terminalEvents()[1]?.status, "completed");
+    // A result reaching no attached run would ask for another continuation.
+    assert.lengthOf(harness.continuationRequests, 1);
+    const liveToolStatuses = harness.events.flatMap((event) =>
+      event.type === "turn_item.updated" &&
+      event.turnItem.nativeItemRef?.nativeId === input.liveToolUseId
+        ? [event.turnItem.status]
+        : [],
+    );
+    assert.notInclude(liveToolStatuses, "failed");
+    assert.equal(liveToolStatuses.at(-1), "completed");
+  });
+
   // Fork: while no run is attached the CLI can finish one wake turn and start the next, here refused
   // a Stop and then running a tool. Settling on the finished turn's result would mark that tool
   // failed and leave the live turn's T3 tool calls with no run (parent_not_active).
@@ -9443,6 +9584,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               attachments: [],
             }),
           );
+          for (const frame of liveWakeRunnerStarts) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
           yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
           yield* Queue.offer(
             harness.sdkMessages,
@@ -9490,17 +9634,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               uuid: "00000000-0000-4000-8000-000000001706",
               text: "Both builds are done.",
             }),
-            claudeSdkFrame({
-              type: "user",
-              message: {
-                role: "user",
-                content: [{ type: "text", text: "Stop hook feedback:\nLedger has 7 open items." }],
-              },
-              parent_tool_use_id: null,
-              isSynthetic: true,
-              uuid: "00000000-0000-4000-8000-000000001707",
-              session_id: WAKE_NATIVE_SESSION,
-            }),
+            makeStopHookFeedbackFrame("00000000-0000-4000-8000-000000001707"),
             makeRootToolUseFrame({
               uuid: "00000000-0000-4000-8000-000000001708",
               toolUseId: LIVE_TOOL_USE_ID,
@@ -9512,50 +9646,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }
           assert.lengthOf(harness.continuationRequests, 1);
 
-          yield* harness.runtime.startTurn(
-            makeClaudeTestTurnInput({
-              threadId: harness.threadId,
-              providerThread: harness.providerThread,
-              now,
-              attemptId: RunAttemptId.make("attempt-claude-wake-live-2"),
-              text: "Background task completed.",
-              attachments: [],
-              providerTurnOrdinal: 2,
-              messageCreatedBy: "agent",
-              messageCreationSource: "provider",
-            }),
-          );
-
-          // The tool call and the turn finish live, after the drain.
-          for (const frame of [
-            makeRootToolResultFrame({
-              uuid: "00000000-0000-4000-8000-000000001709",
-              toolUseId: LIVE_TOOL_USE_ID,
-            }),
-            makeAssistantTextFrame({
-              uuid: "00000000-0000-4000-8000-000000001710",
-              text: "Scored both builds.",
-            }),
-            makeResultFrame({
-              uuid: "00000000-0000-4000-8000-000000001711",
-              result: "Scored both builds.",
-            }),
-          ]) {
-            yield* harness.offerAndWait(frame);
-          }
-          // A result reaching no attached run would ask for another continuation.
-          assert.lengthOf(harness.continuationRequests, 1);
-          yield* harness.awaitTerminal(2);
-          assert.lengthOf(harness.terminalEvents(), 2);
-          assert.equal(harness.terminalEvents()[1]?.status, "completed");
-          const liveToolStatuses = harness.events.flatMap((event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.nativeItemRef?.nativeId === LIVE_TOOL_USE_ID
-              ? [event.turnItem.status]
-              : [],
-          );
-          assert.notInclude(liveToolStatuses, "failed");
-          assert.equal(liveToolStatuses.at(-1), "completed");
+          yield* attachAndFinishLiveWakeTurn({
+            harness,
+            attemptId: "attempt-claude-wake-live-2",
+            liveToolUseId: LIVE_TOOL_USE_ID,
+          });
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
@@ -10239,6 +10334,109 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 event.message.text === WAKE_RESULT_TEXT,
             ),
           );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  // Fork: the subagent form of the run-stays-open case. A finished subagent's notification asks
+  // for the continuation itself, before its wake turn opens; here two wake turns finish and a
+  // third is refused a Stop and starts a tool, all before the run attaches.
+  it.effect(
+    "keeps the wake run open through two finished subagent wakes and a third still running",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const LIVE_TOOL_USE_ID = "toolu_wake_agents_scoring";
+          const subagent = (index: number) => ({
+            taskId: `task-frontier-layout-${index}`,
+            toolUseId: `toolu_frontier_layout_${index}`,
+          });
+          const subagents = [subagent(0), subagent(1), subagent(2)] as const;
+          const notification = (index: 0 | 1 | 2) =>
+            makeSubagentNotificationFrame({
+              ...subagents[index],
+              summary: `Layout ${index} written.`,
+              uuid: `00000000-0000-4000-8000-00000000178${index}`,
+            });
+          const wakeTurn = (index: number, text: string) => [
+            claudeSdkFrame({
+              type: "system",
+              subtype: "init",
+              uuid: `00000000-0000-4000-8000-00000000179${index}`,
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            makeAssistantTextFrame({ uuid: `00000000-0000-4000-8000-00000000180${index}`, text }),
+          ];
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-wake-agents-1"),
+              text: "Write three frontier layouts with background agents.",
+              attachments: [],
+            }),
+          );
+          for (const frame of liveWakeRunnerStarts) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
+          for (const [index, subagent] of subagents.entries()) {
+            yield* Queue.offer(
+              harness.sdkMessages,
+              makeSubagentTaskStartedFrame({
+                ...subagent,
+                uuid: `00000000-0000-4000-8000-00000000177${index}`,
+              }),
+            );
+          }
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({ uuid: "00000000-0000-4000-8000-000000001776", result: "Launched." }),
+          );
+          yield* harness.awaitTerminal(1);
+
+          yield* harness.offerAndWait(notification(0));
+          assert.lengthOf(harness.continuationRequests, 1);
+          for (const frame of [
+            ...wakeTurn(0, "One layout is in."),
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001810",
+              result: "One layout is in.",
+              origin: { kind: "task-notification" },
+            }),
+            notification(1),
+            ...wakeTurn(1, "Two layouts are in."),
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001811",
+              result: "Two layouts are in.",
+              origin: { kind: "task-notification" },
+            }),
+            notification(2),
+            ...wakeTurn(2, "All three layouts are in."),
+            makeStopHookFeedbackFrame("00000000-0000-4000-8000-000000001812"),
+            makeRootToolUseFrame({
+              uuid: "00000000-0000-4000-8000-000000001813",
+              toolUseId: LIVE_TOOL_USE_ID,
+              name: "Bash",
+              input: { command: "python score_slots.py runs/frontier" },
+            }),
+          ]) {
+            yield* harness.offerAndWait(frame);
+          }
+          assert.lengthOf(harness.continuationRequests, 1);
+
+          yield* attachAndFinishLiveWakeTurn({
+            harness,
+            attemptId: "attempt-claude-wake-agents-2",
+            liveToolUseId: LIVE_TOOL_USE_ID,
+          });
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
