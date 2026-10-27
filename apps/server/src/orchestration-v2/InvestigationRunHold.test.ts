@@ -277,4 +277,70 @@ describe("Investigate mode's run hold", () => {
       }),
     ),
   );
+
+  /**
+   * A person's turn is running, a wake queues behind it, and the investigation ends before the
+   * turn does. Returns the queued run's id once the active run has ended and the queue resumed.
+   */
+  const queueBehindActiveThenEnd = (
+    planner: ThreadId,
+    queued: Pick<MessageDispatch, "createdBy" | "creationSource" | "notification">,
+  ) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      yield* send(planner, { createdBy: "user", creationSource: "web" });
+      yield* send(planner, queued);
+      const { runs } = yield* projections.getThreadRecords(planner, ["runs"]);
+      const active = runs.find((run) => run.status !== "queued")!;
+      const waiting = runs.find((run) => run.status === "queued");
+      assert.isDefined(waiting, "the wake waits behind the running turn");
+      yield* endInvestigation(planner);
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make(nextId("event:run-ended")),
+            type: "run.updated",
+            threadId: planner,
+            runId: active.id,
+            occurredAt: now,
+            payload: { ...active, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      yield* orchestrator.resumeQueuedRuns;
+      const after = (yield* projections.getThreadRecords(planner, ["runs"])).runs;
+      return after.find((run) => run.id === waiting!.id)!;
+    });
+
+  it.effect("a wake queued before the end does not start once it ends", () =>
+    withRuntime(
+      Effect.gen(function* () {
+        const planner = yield* createThread("planner");
+        const queued = yield* queueBehindActiveThenEnd(planner, autoContinue);
+        assert.strictEqual(queued.status, "cancelled");
+        assert.lengthOf(yield* noticesOf(planner), 1);
+      }),
+    ),
+  );
+
+  it.effect("a report turn queued behind the last turn still starts after the end", () =>
+    withRuntime(
+      Effect.gen(function* () {
+        const planner = yield* createThread("planner");
+        const queued = yield* queueBehindActiveThenEnd(planner, {
+          createdBy: "agent",
+          creationSource: "server",
+          notification: {
+            source: { kind: "investigation_report" },
+            outcome: "completed",
+            summary: "Investigation solved: writing the report",
+          },
+        });
+        assert.notInclude(["queued", "cancelled"], queued.status);
+      }),
+    ),
+  );
 });

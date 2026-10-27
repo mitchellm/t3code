@@ -105,6 +105,7 @@ import {
 } from "./TaskLedger.ts";
 import {
   findInvestigationLock,
+  type InvestigationCallerLock,
   investigationEffects,
   investigationRunHold,
   isInvestigationReport,
@@ -1501,12 +1502,48 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return;
       }
 
-      const storedQueuedRun =
+      const queuedCandidates =
         options?.queuedRunId === undefined
-          ? nextQueuedRun(projection)
-          : projection.runs.find(
+          ? queuedRunsInDeliveryOrder(projection)
+          : projection.runs.filter(
               (run) => run.id === options.queuedRunId && run.status === "queued",
             );
+      // Fork: a wake queued before its investigation ended is cancelled with the hold's notice, and
+      // the queue moves on, so a person's message behind it still starts. The lock is read once.
+      let storedQueuedRun: OrchestrationV2Run | undefined;
+      let investigationLock: InvestigationCallerLock | undefined;
+      const heldEvents: Array<Omit<OrchestrationV2DomainEvent, "id">> = [];
+      const heldAt = yield* DateTime.now;
+      for (const candidate of queuedCandidates) {
+        const message = projection.messages.find(({ id }) => id === candidate.userMessageId);
+        if (message === undefined || exemptFromInvestigationHold(message)) {
+          storedQueuedRun = candidate;
+          break;
+        }
+        investigationLock ??= yield* investigationLockAt(threadId);
+        const notice = investigationHoldNotice(threadId, investigationLock, heldAt);
+        if (notice === undefined) {
+          storedQueuedRun = candidate;
+          break;
+        }
+        heldEvents.push(
+          {
+            type: "run.updated",
+            threadId,
+            runId: candidate.id,
+            providerInstanceId: candidate.providerInstanceId,
+            occurredAt: heldAt,
+            payload: {
+              ...candidate,
+              status: "cancelled",
+              queuePosition: null,
+              completedAt: heldAt,
+            },
+          },
+          notice,
+        );
+      }
+      if (heldEvents.length > 0) yield* writeSystemEvents(heldEvents);
       if (storedQueuedRun === undefined) {
         return;
       }
@@ -5107,64 +5144,72 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    * scheduled runs), except the investigation's own report turn. The message is dropped with one
    * visible notice per ended investigation. A person's message skips every read here.
    */
-  const holdForEndedInvestigation = Effect.fn("Orchestrator.holdForEndedInvestigation")(function* (
-    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
-    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
-  ) {
-    if (isTypedByPerson(command) || isInvestigationReport(command)) return false;
-    const projectionError = (threadId: ThreadId) =>
+  const investigationLockAt = (threadId: ThreadId) => {
+    const projectionError = (id: ThreadId) =>
       Effect.mapError(
-        (cause: ProjectionStoreV2Error) => new OrchestratorProjectionError({ threadId, cause }),
+        (cause: ProjectionStoreV2Error) => new OrchestratorProjectionError({ threadId: id, cause }),
       );
-    const found = yield* findInvestigationLock(
-      command.threadId,
-      (threadId) =>
-        projectionStore.getThreadRecords(threadId, ["ledger"]).pipe(
+    return findInvestigationLock(
+      threadId,
+      (id) =>
+        projectionStore.getThreadRecords(id, ["ledger"]).pipe(
           Effect.map(({ thread, ledger }) => ({ thread, ledger, subagents: [] })),
-          projectionError(threadId),
+          projectionError(id),
         ),
-      (threadId, since) =>
+      (id, since) =>
         latestPersonMessageAt(
           {
-            runs: (id) =>
-              projectionStore.getThreadRecords(id, ["runs"]).pipe(
+            runs: (runsOf) =>
+              projectionStore.getThreadRecords(runsOf, ["runs"]).pipe(
                 Effect.map(({ runs }) => runs),
-                projectionError(id),
+                projectionError(runsOf),
               ),
-            userMessages: (id, runIds) =>
+            userMessages: (messagesOf, runIds) =>
               projectionStore
-                .getThreadRecords(id, ["messages"], {
+                .getThreadRecords(messagesOf, ["messages"], {
                   messageRoles: ["user"],
                   messageRunIds: runIds,
                 })
                 .pipe(
                   Effect.map(({ messages }) => messages),
-                  projectionError(id),
+                  projectionError(messagesOf),
                 ),
           },
-          threadId,
+          id,
           since,
         ),
     );
+  };
+
+  const exemptFromInvestigationHold = (
+    message: Pick<
+      OrchestrationV2ConversationMessage,
+      "createdBy" | "creationSource" | "scheduledTaskId" | "notification"
+    >,
+  ) => isTypedByPerson(message) || isInvestigationReport(message);
+
+  /**
+   * The notice for a held message, or undefined when the lock holds nothing. One per ended
+   * investigation per thread, rewritten in place, so repeated wakes (every CI result on a watched
+   * pull request) do not pile up rows.
+   */
+  const investigationHoldNotice = (
+    threadId: ThreadId,
+    found: InvestigationCallerLock,
+    now: DateTime.Utc,
+  ) => {
     const reason = investigationRunHold(found);
-    if (reason === undefined || found.lock.state !== "ended") return false;
-    const now = yield* DateTime.now;
+    if (reason === undefined || found.lock.state !== "ended") return undefined;
     const endedAt = found.lock.investigation.endedAt ?? now;
-    // One notice per ended investigation per thread, rewritten in place, so repeated wakes
-    // (every CI result on a watched pull request) do not pile up rows.
-    const noticeId = TurnItemId.make(
-      `turn-item:investigation-held:${command.threadId}:${DateTime.formatIso(endedAt)}`,
-    );
-    yield* emit(
-      events,
-      command,
-    )({
-      type: "turn-item.updated",
-      threadId: command.threadId,
+    return {
+      type: "turn-item.updated" as const,
+      threadId,
       occurredAt: now,
       payload: {
-        id: noticeId,
-        threadId: command.threadId,
+        id: TurnItemId.make(
+          `turn-item:investigation-held:${threadId}:${DateTime.formatIso(endedAt)}`,
+        ),
+        threadId,
         runId: null,
         nodeId: null,
         providerThreadId: null,
@@ -5173,15 +5218,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         parentItemId: null,
         // Placeholder: EventSink assigns turn item positions when it commits.
         ordinal: 0,
-        status: "completed",
+        status: "completed" as const,
         title: "Investigation ended",
         startedAt: now,
         completedAt: now,
         updatedAt: now,
-        type: "system_notice",
+        type: "system_notice" as const,
         message: reason,
       },
-    });
+    };
+  };
+
+  const holdForEndedInvestigation = Effect.fn("Orchestrator.holdForEndedInvestigation")(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    if (exemptFromInvestigationHold(command)) return false;
+    const notice = investigationHoldNotice(
+      command.threadId,
+      yield* investigationLockAt(command.threadId),
+      yield* DateTime.now,
+    );
+    if (notice === undefined) return false;
+    yield* emit(events, command)(notice);
     return true;
   });
 
