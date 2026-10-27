@@ -168,6 +168,8 @@ interface StartThreadBootstrap {
     readonly branch: string | null;
     readonly worktreePath: string | null;
     readonly createdAt: string;
+    /** Fork: on the thread before its first message, so the first turn already runs under it. */
+    readonly loadout?: import("@t3tools/contracts").ThreadLoadout;
   };
   readonly prepareWorktree?: {
     readonly requireWorktree?: boolean;
@@ -766,11 +768,22 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
                 ? {}
                 : { branch: bootstrap.branch }),
             };
+    if (bootstrap?.loadout !== undefined) {
+      yield* createThreadUnderLoadout(
+        commandId,
+        input,
+        bootstrap,
+        bootstrap.loadout,
+        workspaceStrategy,
+      );
+    }
     return yield* request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
       commandId,
       creationSource: input.creationSource ?? "web",
       threadId: input.threadId,
-      ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
+      ...(bootstrap === undefined || bootstrap.loadout !== undefined
+        ? { reuseExistingThread: true }
+        : {}),
       projectId: thread.projectId,
       title: input.titleSeed ?? thread.title,
       generateTitle: input.titleSeed !== undefined,
@@ -878,6 +891,40 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     dispatchMode,
   });
 });
+
+/**
+ * Fork: launch creates a thread and queues its first message in one request, leaving no point to
+ * set a loadout in between. So a draft with a loadout creates its thread here first, and the launch
+ * then claims it as an empty existing thread. Branch and path are what the launch would create it
+ * with; a new worktree records its own once it exists.
+ */
+const createThreadUnderLoadout = Effect.fn("EnvironmentCommands.createThreadUnderLoadout")(
+  function* (
+    commandId: CommandId,
+    input: StartThreadTurnInput,
+    thread: NonNullable<StartThreadBootstrap["createThread"]>,
+    loadout: import("@t3tools/contracts").ThreadLoadout,
+    workspaceStrategy: { readonly branch?: string; readonly worktreePath?: string },
+  ) {
+    yield* createThread({
+      commandId: CommandId.make(`${commandId}:draft-create`),
+      creationSource: input.creationSource ?? "web",
+      threadId: input.threadId,
+      projectId: thread.projectId,
+      title: input.titleSeed ?? thread.title,
+      modelSelection: input.modelSelection ?? thread.modelSelection,
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
+      branch: workspaceStrategy.branch ?? null,
+      worktreePath: workspaceStrategy.worktreePath ?? null,
+    });
+    yield* updateThreadMetadata({
+      commandId: CommandId.make(`${commandId}:draft-loadout`),
+      threadId: input.threadId,
+      loadout,
+    });
+  },
+);
 
 export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThreadTurn")(function* (
   input: InterruptThreadTurnInput,

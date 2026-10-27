@@ -3749,12 +3749,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   />
                 )}
 
-              {routeKind === "server" ? (
-                <ComposerInvestigateFields
-                  environmentId={environmentId}
-                  threadId={routeThreadRef.threadId}
-                />
-              ) : null}
+              <ComposerInvestigateFields
+                environmentId={environmentId}
+                threadId={routeThreadRef.threadId}
+                interactionMode={interactionMode}
+              />
 
               {composerAttachmentMediaRow}
 

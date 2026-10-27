@@ -44,7 +44,7 @@ export function BuildModeBar({
     useServerConfigs().get(environmentId)?.environment.capabilities.buildModes === true;
   const shell = useThreadShell(threadRef);
   const ledger = useThreadLedgerIfSupported(threadRef);
-  const loadout = useComposerLoadout(environmentId, threadRef);
+  const loadout = useComposerLoadout(environmentId, threadRef, null);
   const providers = useEnvironmentProviders().get(environmentId);
   const runBuildMode = useAtomCommand(orchestrationEnvironment.runBuildMode, {
     reportFailure: false,

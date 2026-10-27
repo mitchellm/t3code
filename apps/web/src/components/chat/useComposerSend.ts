@@ -97,6 +97,7 @@ import {
 } from "./composerSend.logic";
 import { usePlanFollowUpSend } from "./useProposedPlanSend";
 import { useComposerInvestigateSend } from "./ComposerInvestigate";
+import { useDraftLaunchLoadout } from "./useComposerLoadout";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import {
@@ -375,7 +376,8 @@ export function useComposerSend(input: ComposerSendInput) {
     anchorNewTurn,
     persistThreadSettingsForNextTurn,
   });
-  const startComposerInvestigation = useComposerInvestigateSend();
+  const startComposerInvestigation = useComposerInvestigateSend(input);
+  const draftLoadout = useDraftLaunchLoadout(environmentId, isLocalDraftThread ? draftId : null);
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
@@ -563,12 +565,10 @@ export function useComposerSend(input: ComposerSendInput) {
     // Fork: in Investigate mode the message is the goal of an investigation, not a turn.
     if (
       !queuedRunEdit.isEditing &&
-      isServerThread &&
       (await startComposerInvestigation({
-        environmentId,
-        threadId: activeThread.id,
         prompt: promptForSend,
         modelSelection: ctxSelectedModelSelection,
+        interactionMode: sendInteractionMode,
         hasAttachments:
           composerImages.length +
             composerFiles.length +
@@ -577,11 +577,6 @@ export function useComposerSend(input: ComposerSendInput) {
             composerReviewComments.length +
             composerThreadContexts.length >
           0,
-        clearPrompt: () => {
-          promptRef.current = "";
-          clearComposerDraftContent(composerDraftTarget);
-          composerRef.current?.resetCursorState();
-        },
       }))
     ) {
       return;
@@ -1276,6 +1271,10 @@ export function useComposerSend(input: ComposerSendInput) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      // Fork: the loadout picked on the draft, set before the first turn runs.
+                      ...(draftLoadout.threadLoadout === null
+                        ? {}
+                        : { loadout: draftLoadout.threadLoadout }),
                     },
                   }
                 : {}),

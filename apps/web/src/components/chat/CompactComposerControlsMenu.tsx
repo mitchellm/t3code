@@ -11,6 +11,7 @@ import {
 } from "../ui/menu";
 import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
+import { type ComposerModeControl, ComposerModeMenuGroup } from "./ComposerModePicker";
 import type { ComposerLoadout } from "./useComposerLoadout";
 import { useComposerMenuState } from "./useComposerMenuState";
 
@@ -30,6 +31,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   /** Set while the loadout picker is among the blocks that spilled into this menu. */
   loadout?: ComposerLoadout | null;
+  /** Fork: the Mode picker, standing in for the plan toggle, while its block spilled in here. */
+  mode?: ComposerModeControl | null;
 }) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
@@ -58,7 +61,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             <MenuDivider />
           </>
         ) : null}
-        {props.showInteractionModeToggle ? (
+        {props.mode ? (
+          <ComposerModeMenuGroup mode={props.mode} />
+        ) : props.showInteractionModeToggle ? (
           <>
             <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Mode</div>
             <MenuRadioGroup
