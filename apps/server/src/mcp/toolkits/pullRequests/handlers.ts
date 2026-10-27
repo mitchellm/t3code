@@ -27,6 +27,7 @@ import {
 } from "../../../sourceControl/threadPullRequests.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { guardInvestigationSpawn } from "../../InvestigationSpawnGuard.ts";
 import {
   type ListThreadPullRequestsResult,
   PullRequestLinkFailedError,
@@ -426,7 +427,10 @@ const make = Effect.gen(function* () {
         Effect.map(listThreadPullRequests),
       ),
     ),
-    watch_pull_request: writesThread((input) => setWatching(input, true)),
+    watch_pull_request: writesThread((input) =>
+      // Fork: a watch wakes the agent later, so Investigate mode's lock covers it.
+      guardInvestigationSpawn("watch_pull_request").pipe(Effect.andThen(setWatching(input, true))),
+    ),
     unwatch_pull_request: writesThread((input) => setWatching(input, false)),
     write_pull_request_guides: McpToolAccess.writesWithCapability((input) =>
       Effect.gen(function* () {

@@ -103,7 +103,14 @@ import {
   ledgerJudgeEffects,
   planLedgerCommand,
 } from "./TaskLedger.ts";
-import { investigationEffects } from "./Investigation.ts";
+import {
+  findInvestigationLock,
+  investigationEffects,
+  investigationRunHold,
+  isInvestigationReport,
+  isTypedByPerson,
+  latestPersonMessageAt,
+} from "./Investigation.ts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -155,6 +162,7 @@ import {
   type OlderSettledThreadsListing,
   type OlderSettledThreadsQuery,
   type ShellSnapshotOptions,
+  type ProjectionStoreV2Error,
 } from "./ProjectionStore.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -2730,22 +2738,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       yield* dispatchThreadMutation(command, events, effects);
       if (command.wake === undefined) return;
-      yield* dispatchMessage(
-        {
-          type: "message.dispatch",
-          commandId: command.commandId,
-          threadId: command.threadId,
-          messageId: command.wake.messageId,
-          text: command.wake.text,
-          notification: command.wake.notification,
-          attachments: [],
-          dispatchMode: { type: "queue_after_active" },
-          createdBy: "agent",
-          creationSource: "server",
-        },
-        events,
-        effects,
-      );
+      const wake = {
+        type: "message.dispatch",
+        commandId: command.commandId,
+        threadId: command.threadId,
+        messageId: command.wake.messageId,
+        text: command.wake.text,
+        notification: command.wake.notification,
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+      } satisfies Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>;
+      // Fork: the watch's state still updates; only the wake is held after an investigation.
+      if (yield* holdForEndedInvestigation(wake, events)) return;
+      yield* dispatchMessage(wake, events, effects);
     },
   );
 
@@ -5092,6 +5099,90 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       } satisfies PendingOrchestrationEffectV2,
     ]);
+  });
+
+  /**
+   * Fork: Investigate mode's run chokepoint. Once an investigation has ended, a message that no
+   * person typed starts no run anywhere in its thread tree (wakes, auto-continue, recovery,
+   * scheduled runs), except the investigation's own report turn. The message is dropped with one
+   * visible notice per ended investigation. A person's message skips every read here.
+   */
+  const holdForEndedInvestigation = Effect.fn("Orchestrator.holdForEndedInvestigation")(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    if (isTypedByPerson(command) || isInvestigationReport(command)) return false;
+    const projectionError = (threadId: ThreadId) =>
+      Effect.mapError(
+        (cause: ProjectionStoreV2Error) => new OrchestratorProjectionError({ threadId, cause }),
+      );
+    const found = yield* findInvestigationLock(
+      command.threadId,
+      (threadId) =>
+        projectionStore.getThreadRecords(threadId, ["ledger"]).pipe(
+          Effect.map(({ thread, ledger }) => ({ thread, ledger, subagents: [] })),
+          projectionError(threadId),
+        ),
+      (threadId, since) =>
+        latestPersonMessageAt(
+          {
+            runs: (id) =>
+              projectionStore.getThreadRecords(id, ["runs"]).pipe(
+                Effect.map(({ runs }) => runs),
+                projectionError(id),
+              ),
+            userMessages: (id, runIds) =>
+              projectionStore
+                .getThreadRecords(id, ["messages"], {
+                  messageRoles: ["user"],
+                  messageRunIds: runIds,
+                })
+                .pipe(
+                  Effect.map(({ messages }) => messages),
+                  projectionError(id),
+                ),
+          },
+          threadId,
+          since,
+        ),
+    );
+    const reason = investigationRunHold(found);
+    if (reason === undefined || found.lock.state !== "ended") return false;
+    const now = yield* DateTime.now;
+    const endedAt = found.lock.investigation.endedAt ?? now;
+    // One notice per ended investigation per thread, rewritten in place, so repeated wakes
+    // (every CI result on a watched pull request) do not pile up rows.
+    const noticeId = TurnItemId.make(
+      `turn-item:investigation-held:${command.threadId}:${DateTime.formatIso(endedAt)}`,
+    );
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "turn-item.updated",
+      threadId: command.threadId,
+      occurredAt: now,
+      payload: {
+        id: noticeId,
+        threadId: command.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        // Placeholder: EventSink assigns turn item positions when it commits.
+        ordinal: 0,
+        status: "completed",
+        title: "Investigation ended",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "system_notice",
+        message: reason,
+      },
+    });
+    return true;
   });
 
   const dispatchMessage = Effect.fn("Orchestrator.dispatchMessage")(function* (
@@ -11919,6 +12010,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             threadId: command.threadId,
           });
         }
+        if (yield* holdForEndedInvestigation(command, events)) break;
         const guestSend =
           command.guestMessageId === undefined
             ? undefined

@@ -1258,6 +1258,11 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
       ),
     }),
     Schema.Struct({ kind: Schema.Literal("system") }),
+    /**
+     * Fork: the server asking an ended investigation's planner for its report, the one automatic
+     * turn an ended investigation still starts.
+     */
+    Schema.Struct({ kind: Schema.Literal("investigation_report") }),
   ],
   (kind) => Schema.Struct({ kind }),
   () => ({ kind: "background_task" }),

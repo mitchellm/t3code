@@ -6,7 +6,10 @@ import {
   type LedgerItem,
   LedgerItemId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2Run,
   type OrchestrationV2Subagent,
+  type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
 import { isApproachItem, isLiveApproach } from "@t3tools/shared/investigation";
@@ -400,9 +403,9 @@ export type InvestigationSpawnLock =
   | { readonly state: "ended"; readonly investigation: LedgerInvestigation };
 
 /**
- * The one rule. A thread is locked while an investigation runs on it, and after its latest ledger's
- * investigation ended until a user-authored message arrives. Report and wake turns are the
- * server's, not the user's, so they never unlock it; a reopened ledger does not either.
+ * The one rule. Locked while an investigation runs, and after it ends until a person types a
+ * message in a client (`isTypedByPerson`). Report, wake and scheduled turns never unlock it, and
+ * neither does a reopened ledger.
  */
 export function investigationSpawnGuard(
   ledger: Ledger | undefined,
@@ -422,13 +425,88 @@ export function investigationSpawnGuard(
   return { state: "ended", investigation };
 }
 
+/**
+ * A message a person typed in a client. A scheduled task or webhook run is stamped with its
+ * `scheduledTaskId` but copies the task's own author and source, and a usage-limit resume is the
+ * user's from the server, so only a client source without that stamp counts.
+ */
+export const isTypedByPerson = (
+  message: Pick<
+    OrchestrationV2ConversationMessage,
+    "createdBy" | "creationSource" | "scheduledTaskId"
+  >,
+) =>
+  message.createdBy === "user" &&
+  (message.creationSource === "web" || message.creationSource === "mobile") &&
+  message.scheduledTaskId === undefined;
+
+/** The report turn InvestigationService asks for, the one automatic turn an ended one allows. */
+export const isInvestigationReport = (message: {
+  readonly notification?: { readonly source: { readonly kind: string } } | undefined;
+}) => message.notification?.source.kind === "investigation_report";
+
+/** The reads `latestPersonMessageAt` needs; the server's two thread readers both provide them. */
+export interface PersonMessageReader<E> {
+  readonly runs: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<Pick<OrchestrationV2Run, "id" | "completedAt">>, E>;
+  readonly userMessages: (
+    threadId: ThreadId,
+    runIds: ReadonlyArray<RunId>,
+  ) => Effect.Effect<
+    ReadonlyArray<
+      Pick<
+        OrchestrationV2ConversationMessage,
+        "createdBy" | "creationSource" | "scheduledTaskId" | "createdAt"
+      >
+    >,
+    E
+  >;
+}
+
+/**
+ * When a person last typed on the thread after `since`. Only runs still live at `since` or later
+ * can hold a newer message, so just those runs' user messages are read.
+ */
+export const latestPersonMessageAt = Effect.fn("Investigation.latestPersonMessageAt")(function* <E>(
+  reader: PersonMessageReader<E>,
+  threadId: ThreadId,
+  since: DateTime.Utc,
+): Effect.fn.Return<DateTime.Utc | null, E> {
+  const sinceMs = DateTime.toEpochMillis(since);
+  const runIds = (yield* reader.runs(threadId))
+    .filter((run) => run.completedAt === null || DateTime.toEpochMillis(run.completedAt) >= sinceMs)
+    .map(({ id }) => id);
+  if (runIds.length === 0) return null;
+  let latest: DateTime.Utc | null = null;
+  for (const message of yield* reader.userMessages(threadId, runIds)) {
+    if (!isTypedByPerson(message)) continue;
+    if (
+      latest === null ||
+      DateTime.toEpochMillis(message.createdAt) > DateTime.toEpochMillis(latest)
+    ) {
+      latest = message.createdAt;
+    }
+  }
+  return latest;
+});
+
+/**
+ * The run chokepoint's decision: why a message must not start a run. Only an ended investigation
+ * holds anything; a person's message and the report turn always pass.
+ */
+export function investigationRunHold(found: InvestigationCallerLock): string | undefined {
+  if (found.lock.state !== "ended") return undefined;
+  return `Automatic work was not started: ${endedText(found.lock.investigation)} Send a message to start new work here.`;
+}
+
 const endedText = (investigation: LedgerInvestigation) =>
   `This thread's investigation has ended (${investigation.status}${investigation.endReason === undefined ? "" : `: ${investigation.endReason}`}) and its workers were stopped.`;
 
 /**
- * Why a work-starting tool other than `delegate_task` is refused. While running, approach work
- * goes through `delegate_task`, which the cap counts; after the end, nothing starts until the user
- * speaks. `ledger_create` is refused only after the end: while running the planner refuses it.
+ * Why a work-starting tool other than `delegate_task` is refused anywhere in a locked tree. While
+ * running, new work goes through `delegate_task`; after the end, nothing starts until a person
+ * types. `ledger_create` is refused here only after the end: while running the planner refuses it.
  */
 export function investigationSpawnRefusal(
   lock: InvestigationSpawnLock,

@@ -765,6 +765,7 @@ const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
   // Fork: both start work later or elsewhere, so Investigate mode's spawn guard covers them too.
   "update_scheduled_task",
   "t3_worktree_handoff",
+  "watch_pull_request",
 ]);
 
 /** Handoff tools whose result is only `{ sequence }`; their input names the receiving thread. */

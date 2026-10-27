@@ -280,6 +280,15 @@ export const requestInvestigationReport = Effect.fn("InvestigationService.reques
       messageId,
       threadId,
       text: reportText(investigation),
+      // The marker the orchestrator's run hold lets through after the end; nothing else is.
+      notification: {
+        source: { kind: "investigation_report" },
+        outcome: investigation.status === "solved" ? "completed" : "failed",
+        summary:
+          investigation.status === "solved"
+            ? "Investigation solved: writing the report"
+            : "Investigation out of budget: writing a best-so-far report",
+      },
       attachments: [],
       dispatchMode: { type: "queue_after_active" },
       createdBy: "agent",

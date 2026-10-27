@@ -1,14 +1,11 @@
-import {
-  type OrchestrationV2ConversationMessage,
-  OrchestratorMcpFailure,
-  type ThreadId,
-} from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
+import { OrchestratorMcpFailure, type ThreadId } from "@t3tools/contracts";
+import type * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
 import {
   findInvestigationLock,
   type InvestigationCallerLock,
+  latestPersonMessageAt,
   spawnRefusalFor,
 } from "../orchestration-v2/Investigation.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -16,60 +13,25 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { unavailable } from "./threadAccess.ts";
 
 /**
- * Fork: Investigate mode's one spawn rule, applied to every agent tool that can start or wake
- * work or replace the ledger (see `investigationSpawnGuard`). This module reads what the pure
- * guard needs; the handlers call `guardInvestigationSpawn` before doing anything.
+ * Fork: Investigate mode's tool guard, the agent's early and clear refusal. The orchestrator's
+ * run hold is the backstop that also catches server wakes; both read the same lock.
  */
 
 type Threads = ThreadManagement.ThreadManagementService["Service"];
 
-/**
- * Only a message a person typed in a client unlocks an ended investigation. A scheduled task or
- * webhook run is stamped with its `scheduledTaskId` but copies the task's own author and source,
- * so it can read as the user's from the web; the stamp is what tells it apart.
- */
-const isTypedByPerson = (
-  message: Pick<
-    OrchestrationV2ConversationMessage,
-    "createdBy" | "creationSource" | "scheduledTaskId"
-  >,
-) =>
-  message.createdBy === "user" &&
-  (message.creationSource === "web" || message.creationSource === "mobile") &&
-  message.scheduledTaskId === undefined;
-
-/**
- * When the user last wrote on the thread after `since`. Only runs still live at `since` or later
- * can hold a newer message, so just those runs' user messages are read. The server's report and
- * wake turns are authored by the agent from the server, so they never count.
- */
-export const latestUserMessageAt = Effect.fn("InvestigationSpawnGuard.latestUserMessageAt")(
-  function* (threads: Threads, threadId: ThreadId, since: DateTime.Utc) {
-    const sinceMs = DateTime.toEpochMillis(since);
-    const { runs } = yield* threads.getThreadRecords(threadId, ["runs"]);
-    const runIds = runs
-      .filter(
-        (run) => run.completedAt === null || DateTime.toEpochMillis(run.completedAt) >= sinceMs,
-      )
-      .map(({ id }) => id);
-    if (runIds.length === 0) return null;
-    const { messages } = yield* threads.getThreadRecords(threadId, ["messages"], {
-      messageRoles: ["user"],
-      messageRunIds: runIds,
-    });
-    let latest: DateTime.Utc | null = null;
-    for (const message of messages) {
-      if (!isTypedByPerson(message)) continue;
-      if (
-        latest === null ||
-        DateTime.toEpochMillis(message.createdAt) > DateTime.toEpochMillis(latest)
-      ) {
-        latest = message.createdAt;
-      }
-    }
-    return latest;
-  },
-);
+/** When a person last typed on the thread after `since`, read through thread management. */
+export const latestUserMessageAt = (threads: Threads, threadId: ThreadId, since: DateTime.Utc) =>
+  latestPersonMessageAt(
+    {
+      runs: (id) => threads.getThreadRecords(id, ["runs"]).pipe(Effect.map(({ runs }) => runs)),
+      userMessages: (id, runIds) =>
+        threads
+          .getThreadRecords(id, ["messages"], { messageRoles: ["user"], messageRunIds: runIds })
+          .pipe(Effect.map(({ messages }) => messages)),
+    },
+    threadId,
+    since,
+  );
 
 /** The lock that applies to an agent calling from `threadId`, walking up its subagent chain. */
 export const investigationLockFor = Effect.fn("InvestigationSpawnGuard.lockFor")(function* (
