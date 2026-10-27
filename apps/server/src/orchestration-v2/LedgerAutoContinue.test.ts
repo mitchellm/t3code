@@ -966,22 +966,16 @@ const runOnSessionThatBlocksStops = (
     yield* afterRun(event);
   });
 
-it.effect.each([
-  { blocksStops: true, followUps: 0, notices: 1 },
-  { blocksStops: false, followUps: 1, notices: 0 },
-])(
-  "leaves the ledger to a provider that blocks its own stop (blocks: $blocksStops)",
-  ({ blocksStops, followUps, notices }) =>
+it.effect.each([true, false])(
+  "follows up whether or not the provider blocks its own stop (blocks: %s)",
+  (blocksStops) =>
     Effect.gen(function* () {
       const threadId = yield* setup(`provider-blocks-stop-${blocksStops}`);
       yield* sendUserMessage(threadId);
       yield* runOnSessionThatBlocksStops(threadId, blocksStops);
-      assert.equal((yield* autoContinues(threadId)).length, followUps);
-      // The run ending with items open means the provider's own stop gate gave up.
-      const stopped = yield* stopNotices(threadId);
-      assert.equal(stopped.length, notices);
-      assert.equal(yield* isMarkedStuck(threadId), notices === 1);
-      if (notices === 1) assert.include(stopped[0], "2 items still open");
+      assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), [1]);
+      assert.deepEqual(yield* stopNotices(threadId), []);
+      assert.isFalse(yield* isMarkedStuck(threadId));
     }).pipe(Effect.provide(layerTest)),
 );
 
@@ -1068,9 +1062,83 @@ it.effect.each([
       yield* serverWake(threadId);
       if (source === "turn item") yield* setNativeSubagentItem(threadId, launchRun.id, "completed");
       yield* runOnSessionThatBlocksStops(threadId, blocksStops);
-      assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), blocksStops ? [] : [1]);
-      assert.equal((yield* stopNotices(threadId)).length, blocksStops ? 1 : 0);
+      assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), [1]);
+      assert.deepEqual(yield* stopNotices(threadId), []);
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  { name: "command", task: { taskId: "map-runner", kind: "command", awaited: true } },
+  { name: "Monitor", task: { taskId: "build-log", kind: "monitor", awaited: true } },
+] as const)("waits, with no notice, while the agent waits on a background $name", ({ task }) =>
+  Effect.gen(function* () {
+    const threadId = yield* setup(`awaited-${task.kind}`);
+    yield* sendUserMessage(threadId);
+    yield* runOnSessionThatBlocksStops(threadId, true, [task]);
+    // The CLI wakes the agent when the task ends; that run's end decides again as usual.
+    assert.equal((yield* autoContinues(threadId)).length, 0);
+    assert.deepEqual(yield* stopNotices(threadId), []);
+    assert.isFalse(yield* isMarkedStuck(threadId));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("follows up past work nobody waits on, saying how to wait on it", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("unawaited-command");
+    yield* sendUserMessage(threadId);
+    // A dev server left running looks the same as a wait nobody marked.
+    yield* runOnSessionThatBlocksStops(threadId, true, [
+      { taskId: "dev-server", kind: "command", description: "vp run dev" },
+    ]);
+    const followUps = yield* autoContinues(threadId);
+    assert.deepEqual(followUps.map(roundOf), [1]);
+    assert.include(followUps[0]!.text, "dev-server");
+    assert.include(
+      followUps[0]!.text,
+      "call t3_background_wait with its task id and end your turn",
+    );
+    assert.deepEqual(yield* stopNotices(threadId), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("after the in-run gate gives up, follows up and replans before any notice", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("in-run-gate-gave-up");
+    yield* sendUserMessage(threadId);
+    yield* runOnSessionThatBlocksStops(threadId, true);
+    assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), [1]);
+    assert.deepEqual(yield* stopNotices(threadId), []);
+
+    yield* runOnSessionThatBlocksStops(threadId, true);
+    assert.equal(replanOf((yield* autoContinues(threadId)).at(-1))?.reason, "stalled");
+    assert.deepEqual(yield* stopNotices(threadId), []);
+    assert.isFalse(yield* isMarkedStuck(threadId));
+
+    // Only a replan that moved nothing hands the ledger back.
+    yield* runOnSessionThatBlocksStops(threadId, true);
+    assert.equal((yield* autoContinues(threadId)).length, 2);
+    const notices = yield* stopNotices(threadId);
+    assert.equal(notices.length, 1);
+    assert.include(notices[0], "no progress after a replan");
+    assert.isTrue(yield* isMarkedStuck(threadId));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("does nothing after the user stops a run on a provider that blocks its own stop", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = yield* setup("user-stop-blocking-provider");
+    yield* sendUserMessage(threadId);
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make(nextId("interrupt")),
+      threadId,
+      runId: (yield* latestRun(threadId)).id,
+    });
+    yield* runOnSessionThatBlocksStops(threadId, true);
+    assert.equal((yield* autoContinues(threadId)).length, 0);
+    assert.deepEqual(yield* stopNotices(threadId), []);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("truncates a long item title in the stop notice", () =>

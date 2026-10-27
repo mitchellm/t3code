@@ -4,8 +4,7 @@ import {
   type Ledger,
   MessageId,
   type OrchestrationV2ConversationMessage,
-  type OrchestrationV2ProviderSession,
-  type OrchestrationV2ProviderThread,
+  type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2Run,
   type RunId,
   type ThreadId,
@@ -15,7 +14,11 @@ import {
   type LedgerAutoContinueDecision,
   partitionLedgerFollowUp,
 } from "@t3tools/shared/taskLedger";
-import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  BACKGROUND_TURN_ITEM_TYPES,
+  backgroundWorkHoldsCompletion,
+  derivePendingBackgroundWork,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -75,20 +78,19 @@ function continuationText(
   ].join("\n\n");
 }
 
-function providerBlocksStopWithOpenLedger(
-  records: {
-    readonly providerThreads: ReadonlyArray<OrchestrationV2ProviderThread>;
-    readonly providerSessions: ReadonlyArray<OrchestrationV2ProviderSession>;
-  },
-  run: OrchestrationV2Run,
-): boolean {
-  const sessionId = records.providerThreads.find(
-    ({ id }) => id === run.providerThreadId,
-  )?.providerSessionId;
-  return (
-    records.providerSessions.find(({ id }) => id === sessionId)?.capabilities.context
-      .blocksStopWithOpenLedger === true
-  );
+const WAIT_HINT_IDS_SHOWN = 5;
+
+/**
+ * Fork: work nobody marked awaited may be a real wait, such as a long build, so the follow-up
+ * says how to mark it; the next run's end then stands aside instead of nudging again.
+ */
+function backgroundWaitHint(
+  unawaited: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+): string | undefined {
+  if (unawaited.length === 0) return undefined;
+  const ids = unawaited.slice(0, WAIT_HINT_IDS_SHOWN).map(({ taskId }) => taskId);
+  const hidden = unawaited.length - ids.length;
+  return `Still running in the background: ${ids.join(", ")}${hidden > 0 ? ` and ${hidden} more` : ""}. If you are waiting on any of it, call t3_background_wait with its task id and end your turn. Leave work you keep running on purpose, such as a dev server, unmarked.`;
 }
 
 const NOTICE_TITLES_SHOWN = 3;
@@ -122,20 +124,12 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   input: { readonly threadId: ThreadId; readonly runId: RunId },
 ) {
   const { orchestrator } = deps;
-  const records = yield* orchestrator.getThreadRecords(
-    input.threadId,
-    [
-      "runs",
-      "runtimeRequests",
-      "ledger",
-      "turnItems",
-      "providerThreads",
-      "providerSessions",
-      "subagents",
-    ],
-    { turnItemTypes: ["run_interrupt_request"] },
-  );
-  const { thread, runs, runtimeRequests, ledger, turnItems, providerThreads, subagents } = records;
+  const { thread, runs, runtimeRequests, ledger, turnItems, providerThreads, subagents } =
+    yield* orchestrator.getThreadRecords(
+      input.threadId,
+      ["runs", "runtimeRequests", "ledger", "turnItems", "providerThreads", "subagents"],
+      { turnItemTypes: ["run_interrupt_request"] },
+    );
   const run = runs.find((candidate) => candidate.id === input.runId);
   // Failed runs never reach checkpoint capture and a usage limit is a failure, so only a normal
   // completion gets here; a stopped or cancelled run must not be restarted behind the user.
@@ -158,25 +152,28 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   // A delegated task still working wakes this thread when it ends; nudging the agent before then
   // only gets "still waiting" back and soon reads as a stall.
   if (subagents.some((subagent) => isOrchestrationV2WorkActive(subagent.status))) return;
-  // The same holds for the provider's own background subagent: the provider wakes the agent when
-  // it reports. This reads what the composer shows as "Waiting on subagent", the roster and the
-  // timeline row, since a provider may record it without a subagent record here.
-  const { turnItems: liveSubagentItems } = yield* orchestrator.getThreadRecords(
+  // Fork: the same holds for background work the agent waits on: a provider's own subagent, a
+  // command or Monitor marked with t3_background_wait, a watched pull request. Its wake continues
+  // the work, so there is no notice either. This is what the composer shows as waiting, read from
+  // the roster and the live timeline rows, since a provider may record work in only one.
+  const { turnItems: liveBackgroundItems } = yield* orchestrator.getThreadRecords(
     input.threadId,
     ["turnItems"],
-    { turnItemTypes: ["subagent"], turnItemStatuses: ["pending", "running", "waiting"] },
+    {
+      turnItemTypes: [...BACKGROUND_TURN_ITEM_TYPES],
+      turnItemStatuses: ["pending", "running", "waiting"],
+    },
   );
-  if (
-    derivePendingBackgroundWork({
-      latestRun: run,
-      runs,
-      providerThreads,
-      turnItems: liveSubagentItems,
-      activeProviderThreadId: thread.activeProviderThreadId,
-    }).some((task) => task.kind === "subagent")
-  ) {
-    return;
-  }
+  const pendingWork = derivePendingBackgroundWork({
+    latestRun: run,
+    runs,
+    providerThreads,
+    turnItems: liveBackgroundItems,
+    activeProviderThreadId: thread.activeProviderThreadId,
+    pullRequests: thread.pullRequests,
+  });
+  // Unmarked work may be a dev server left running, so it does not hold the follow-up off.
+  if (backgroundWorkHoldsCompletion(pendingWork)) return;
   // Agents and the server stop runs too; only a person's Stop says the user wants the work off.
   const userStoppedRunIds = new Set(
     turnItems.flatMap((item) =>
@@ -190,20 +187,6 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   // A stop that raced the provider's own completion still means the user wants this to end.
   if (userStoppedRunIds.has(run.id)) return;
   if (runtimeRequests.some((request) => request.status === "pending")) return;
-  // Fork: a provider that blocks its own stop kept the agent going inside the run, so a run that
-  // still completed with items open means that gate gave up. No follow-up; say so instead.
-  if (providerBlocksStopWithOpenLedger(records, run)) {
-    const openIds = ledger.items
-      .filter((item) => item.status === "open" || item.status === "in_progress")
-      .map(({ id }) => id);
-    yield* postStopNotice(
-      deps,
-      input.threadId,
-      run,
-      stopNoticeText(openIds, "the agent stopped after repeated in-run nudges", ledger),
-    );
-    return;
-  }
 
   const ordinalByRun = new Map(runs.map((candidate) => [candidate.id, candidate.ordinal]));
   const newestFirst = runs.toSorted((a, b) => b.ordinal - a.ordinal);
@@ -217,6 +200,10 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
     if (batch.some(isClientUserMessage)) break;
   }
 
+  // Fork: Claude's Stop hook gave up if its run gets here; it is decided like any other, so a
+  // fresh-turn replan comes before the user is asked. No turn is nudged twice: the hook acts inside
+  // a run, this once per completed run. Each follow-up is a new prompt with a fresh, capped in-run
+  // allowance, so this streak cap bounds both.
   const decision = decideLedgerFollowUp({
     ledger,
     // Run ordinals order messages exactly; timestamps tie within a millisecond.
@@ -246,20 +233,22 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
     );
     return;
   }
+  const waitHint = backgroundWaitHint(pendingWork);
+  const text =
+    decision.type === "replan"
+      ? ledgerReplanText({
+          ledger,
+          reason: decision.reason,
+          items: decision.replanItems,
+          round: decision.round,
+        })
+      : continuationText(ledger, decision.open, decision.round);
   yield* orchestrator.dispatch({
     type: "message.dispatch",
     commandId: CommandId.make(`server:ledger-continue:${run.id}`),
     messageId: MessageId.make(`message:ledger-continue:${run.id}`),
     threadId: input.threadId,
-    text:
-      decision.type === "replan"
-        ? ledgerReplanText({
-            ledger,
-            reason: decision.reason,
-            items: decision.replanItems,
-            round: decision.round,
-          })
-        : continuationText(ledger, decision.open, decision.round),
+    text: waitHint === undefined ? text : `${text}\n\n${waitHint}`,
     notification: {
       source: {
         kind: "ledger_continue",
