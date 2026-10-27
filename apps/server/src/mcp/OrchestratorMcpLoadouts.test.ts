@@ -132,6 +132,10 @@ it.effect("an agent proposal is recorded with its reason and reported by capabil
       "solo",
       "planner-workers-judge",
       "read-only-sweep",
+      "opus-blowout",
+      "blitz",
+      "napalm",
+      "haiku-workers",
     ]);
 
     const proposed = yield* service.proposeLoadout(scope, {

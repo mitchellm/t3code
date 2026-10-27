@@ -370,7 +370,10 @@ export const layer = Layer.effect(
     const eventSink = yield* EventSink.EventSinkV2;
     const ids = yield* IdAllocator.IdAllocatorV2;
     return {
-      afterRun: (input) => continueLedgerAfterRunSafely({ orchestrator, eventSink, ids }, input),
+      // Untraced: continueLedgerAfterRunSafely already opens the span.
+      afterRun: Effect.fnUntraced(function* (input) {
+        return yield* continueLedgerAfterRunSafely({ orchestrator, eventSink, ids }, input);
+      }),
     };
   }),
 );
