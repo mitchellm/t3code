@@ -138,12 +138,14 @@ export function ComposerControlsBar(props: {
     routeThreadRef,
     routeKind === "draft" && draftId ? { draftId, sending: isSendBusy } : null,
     {
-      providers: providerInstanceEntries.map(({ snapshot }) => snapshot),
-      lock: {
+      picker: {
+        entries: providerInstanceEntries,
+        modelOptionsByInstance,
         lockedProvider,
         lockedContinuationGroupKey,
         modelDisabledReason: getModelDisabledReason,
       },
+      actual: selectedModelSelection,
       onProviderModelSelect,
     },
   );

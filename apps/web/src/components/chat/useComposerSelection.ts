@@ -145,8 +145,8 @@ export function useComposerSelection(input: ComposerSelectionInput) {
     instanceId: ProviderInstanceId,
     model: string,
     options?: { focusComposer?: boolean; optionOverrides?: ModelSelection["options"] },
-  ) => {
-    if (!activeThread) return;
+  ): ModelSelection | null => {
+    if (!activeThread) return null;
     const entry = providerStatuses.find((snapshot) => snapshot.instanceId === instanceId);
     const resolvedDriverKind = entry?.driver ?? null;
     if (
@@ -156,7 +156,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
       resolvedDriverKind !== lockedProvider
     ) {
       if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
+      return null;
     }
     if (
       !supportsProviderSwitchingViaHandoff &&
@@ -172,7 +172,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
         currentEntry.continuation.groupKey !== entry.continuation.groupKey
       ) {
         if (options?.focusComposer !== false) scheduleComposerFocus();
-        return;
+        return null;
       }
     }
     const resolvedModel = resolveAppModelSelectionForInstance(
@@ -183,7 +183,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
     );
     if (!resolvedModel) {
       if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
+      return null;
     }
     // Fork: a loadout pick passes its planner's effort, which wins over what this model remembers.
     const rememberedOptions = withOptionOverrides(
@@ -209,7 +209,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
         description: modelChangeBlockReason.description,
       });
       if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
+      return null;
     }
     setComposerDraftModelSelection(
       scopeThreadRef(activeThread.environmentId, activeThread.id),
@@ -218,6 +218,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
     );
     setStickyComposerModelSelection(nextModelSelection);
     if (options?.focusComposer !== false) scheduleComposerFocus();
+    return nextModelSelection;
   };
   const onProviderModelSelectStable = useStableCallback(onProviderModelSelect);
   const onEnvModeChange = (mode: DraftThreadEnvMode) => {

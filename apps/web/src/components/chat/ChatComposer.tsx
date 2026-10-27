@@ -520,7 +520,7 @@ export interface ChatComposerProps {
     instanceId: ProviderInstanceId,
     model: string,
     options?: { focusComposer?: boolean; optionOverrides?: ModelSelection["options"] },
-  ) => void;
+  ) => ModelSelection | null;
   onOpenProviderSetup: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
   toggleInteractionMode: () => void;

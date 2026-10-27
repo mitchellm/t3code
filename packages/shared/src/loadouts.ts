@@ -200,21 +200,28 @@ function modelTarget(
   const model = provider.models.find(({ slug }) => slug === role.model);
   // An empty list means the provider cannot enumerate models, so the role's model is trusted.
   if (model === undefined && provider.models.length > 0) return undefined;
-  const effortOption = model?.capabilities?.optionDescriptors?.find(
-    (descriptor) =>
-      EFFORT_OPTION_IDS.has(descriptor.id) &&
-      descriptor.type === "select" &&
-      descriptor.options?.some(({ id }) => id === role.effort) === true,
-  );
-  const options: ReadonlyArray<ProviderOptionSelection> =
-    effortOption === undefined || role.effort === undefined
-      ? []
-      : [{ id: effortOption.id, value: role.effort }];
+  const options = roleEffortOptions(model, role.effort);
   return {
     providerInstanceId: role.instanceId,
     model: role.model,
     ...(options.length === 0 ? {} : { options }),
   };
+}
+
+/** The model's own effort option set to `effort`; none when the model does not offer that level. */
+export function roleEffortOptions(
+  model: LoadoutProviderView["models"][number] | undefined,
+  effort: string | undefined,
+): ReadonlyArray<ProviderOptionSelection> {
+  const effortOption = model?.capabilities?.optionDescriptors?.find(
+    (descriptor) =>
+      EFFORT_OPTION_IDS.has(descriptor.id) &&
+      descriptor.type === "select" &&
+      descriptor.options?.some(({ id }) => id === effort) === true,
+  );
+  return effortOption === undefined || effort === undefined
+    ? []
+    : [{ id: effortOption.id, value: effort }];
 }
 
 export interface JudgeVerdictText {

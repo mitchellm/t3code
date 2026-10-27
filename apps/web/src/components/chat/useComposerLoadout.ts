@@ -2,6 +2,7 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
   type EnvironmentId,
   type Loadout,
+  type ModelSelection,
   type ProjectId,
   type ScopedThreadRef,
   type ThreadLoadout,
@@ -15,7 +16,6 @@ import { useProject, useThreadShell } from "../../state/entities";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { toastManager } from "../ui/toast";
-import type { ChatComposerProps } from "./ChatComposer";
 import {
   draftLaunchLoadout,
   pickLoadout,
@@ -24,10 +24,11 @@ import {
   useDraftLoadoutChoice,
 } from "./draftLoadout";
 import {
-  type PlannerLock,
-  type PlannerModelSwitch,
-  type PlannerProviderView,
+  applyPlannerModelSwitch,
+  type PlannerPicker,
   plannerModelSwitch,
+  plannerNotRunning,
+  type SelectModel,
 } from "./loadoutPlanner";
 
 /**
@@ -35,17 +36,18 @@ import {
  * the top-level thread itself. Without it a pick changes the loadout only.
  */
 export interface ComposerLoadoutPlanner {
-  readonly providers: ReadonlyArray<PlannerProviderView>;
-  readonly lock: PlannerLock;
-  readonly onProviderModelSelect: ChatComposerProps["onProviderModelSelect"];
+  readonly picker: PlannerPicker;
+  /** The selection the next turn sends, which is what says whether the planner runs. */
+  readonly actual: ModelSelection;
+  readonly onProviderModelSelect: SelectModel;
 }
 
 export interface ComposerLoadout {
   readonly loadouts: ReadonlyArray<Loadout>;
   /** The loadout the thread runs under; solo when none was chosen or it was since deleted. */
   readonly active: Loadout;
-  /** Why the thread is not on the active loadout's planner, when the model picker's locks forbid it. */
-  readonly plannerKept: string | null;
+  /** Why the composer is not on the active loadout's planner; null when it is or there is none. */
+  readonly plannerNotRunning: string | null;
   readonly choice: ThreadLoadout | null;
   /** Which settings scope defines the list: the project's own override, else the environment's. */
   readonly settingsScope: {
@@ -73,22 +75,6 @@ const useDraftProjectId = (draftId: DraftId | null) =>
   useComposerDraftStore((store) =>
     draftId === null ? null : (store.getDraftSession(draftId)?.projectId ?? null),
   );
-
-function applyPlanner(planner: ComposerLoadoutPlanner, decision: PlannerModelSwitch) {
-  if (decision._tag === "switch") {
-    const { instanceId, model, options } = decision.selection;
-    planner.onProviderModelSelect(instanceId, model, {
-      focusComposer: false,
-      optionOverrides: options,
-    });
-  } else if (decision._tag === "kept") {
-    toastManager.add({
-      type: "warning",
-      title: "Planner not applied",
-      description: decision.reason,
-    });
-  }
-}
 
 /**
  * A thread's loadout and the list its project resolves to. A draft has no thread yet, so it holds
@@ -120,16 +106,14 @@ export function useComposerLoadout(
       setDraftLoadoutChoice(draftId, next);
     }
   };
-  const decidePlanner = (pick: ThreadLoadout | null, loadout: Loadout): PlannerModelSwitch =>
-    planner === undefined
-      ? { _tag: "none" }
-      : plannerModelSwitch({ pick, loadout, providers: planner.providers, lock: planner.lock });
   const active = resolveLoadout(scope.loadouts, choice?.id);
-  const shownPlanner = decidePlanner(choice, active);
   return {
     loadouts: scope.loadouts,
     active,
-    plannerKept: shownPlanner._tag === "kept" ? shownPlanner.reason : null,
+    plannerNotRunning:
+      planner === undefined
+        ? null
+        : plannerNotRunning({ loadout: active, picker: planner.picker, actual: planner.actual }),
     choice,
     settingsScope: { environmentId, projectId, projectOverridden: scope.projectOverridden },
     // Hands the slot back so the agent may propose again; a user pick otherwise stands for good.
@@ -140,8 +124,19 @@ export function useComposerLoadout(
       const next = pickLoadout(choice, loadoutId);
       if (next !== choice) setChoice(next);
       // Re-picking what already runs applies too, so a pick brings back a model changed since.
-      if (planner !== undefined) {
-        applyPlanner(planner, decidePlanner(next, resolveLoadout(scope.loadouts, loadoutId)));
+      if (planner === undefined) return;
+      const decision = plannerModelSwitch({
+        pick: next,
+        loadout: resolveLoadout(scope.loadouts, loadoutId),
+        picker: planner.picker,
+      });
+      const notApplied = applyPlannerModelSwitch(decision, planner.onProviderModelSelect);
+      if (notApplied !== null) {
+        toastManager.add({
+          type: "warning",
+          title: "Planner not applied",
+          description: notApplied,
+        });
       }
     },
   };

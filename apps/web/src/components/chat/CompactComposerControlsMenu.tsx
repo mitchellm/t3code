@@ -11,6 +11,7 @@ import {
 } from "../ui/menu";
 import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
+import { LoadoutPlannerNote } from "./ComposerLoadoutPicker";
 import { type ComposerModeControl, ComposerModeMenuGroup } from "./ComposerModePicker";
 import type { ComposerLoadout } from "./useComposerLoadout";
 import { useComposerMenuState } from "./useComposerMenuState";
@@ -106,7 +107,12 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             >
               {props.loadout.loadouts.map((option) => (
                 <MenuRadioItem key={option.id} value={option.id}>
-                  {option.name}
+                  <span className="grid min-w-0 gap-0.5">
+                    {option.name}
+                    {option.id === props.loadout?.active.id ? (
+                      <LoadoutPlannerNote reason={props.loadout.plannerNotRunning} />
+                    ) : null}
+                  </span>
                 </MenuRadioItem>
               ))}
               {props.loadout.choice?.setBy === "user" ? (
