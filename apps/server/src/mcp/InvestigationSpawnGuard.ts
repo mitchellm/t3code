@@ -1,4 +1,8 @@
-import { OrchestratorMcpFailure, type ThreadId } from "@t3tools/contracts";
+import {
+  type OrchestrationV2ConversationMessage,
+  OrchestratorMcpFailure,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
@@ -18,6 +22,21 @@ import { unavailable } from "./threadAccess.ts";
  */
 
 type Threads = ThreadManagement.ThreadManagementService["Service"];
+
+/**
+ * Only a message a person typed in a client unlocks an ended investigation. A scheduled task or
+ * webhook run is stamped with its `scheduledTaskId` but copies the task's own author and source,
+ * so it can read as the user's from the web; the stamp is what tells it apart.
+ */
+const isTypedByPerson = (
+  message: Pick<
+    OrchestrationV2ConversationMessage,
+    "createdBy" | "creationSource" | "scheduledTaskId"
+  >,
+) =>
+  message.createdBy === "user" &&
+  (message.creationSource === "web" || message.creationSource === "mobile") &&
+  message.scheduledTaskId === undefined;
 
 /**
  * When the user last wrote on the thread after `since`. Only runs still live at `since` or later
@@ -40,7 +59,7 @@ export const latestUserMessageAt = Effect.fn("InvestigationSpawnGuard.latestUser
     });
     let latest: DateTime.Utc | null = null;
     for (const message of messages) {
-      if (message.createdBy !== "user" || message.creationSource === "server") continue;
+      if (!isTypedByPerson(message)) continue;
       if (
         latest === null ||
         DateTime.toEpochMillis(message.createdAt) > DateTime.toEpochMillis(latest)

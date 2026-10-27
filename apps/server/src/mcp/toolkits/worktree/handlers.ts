@@ -9,6 +9,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as WorktreeMcpService from "../../WorktreeMcpService.ts";
 import { WorktreeToolkit } from "./tools.ts";
+import { guardInvestigationSpawn } from "../../InvestigationSpawnGuard.ts";
 
 const handlers = {
   t3_worktree_list: McpToolAccess.reads((input) =>
@@ -38,6 +39,8 @@ const handlers = {
   ),
   t3_worktree_handoff: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
+      // Fork: Investigate mode locks work-starting tools.
+      yield* guardInvestigationSpawn("t3_worktree_handoff");
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* WorktreeMcpService.WorktreeMcpService;
       return yield* service.handoff(scope, input);

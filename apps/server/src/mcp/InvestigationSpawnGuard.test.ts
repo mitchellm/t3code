@@ -10,16 +10,29 @@ import {
   type OrchestrationV2Run,
   ProviderInstanceId,
   RunId,
+  ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import { McpSchema, McpServer } from "effect/ai";
 
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as Project from "../project/ProjectService.ts";
 import { guardInvestigationSpawn } from "./InvestigationSpawnGuard.ts";
+import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { liveThreadShell } from "./McpToolAccess.testkit.ts";
+import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
+import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
+import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
+import * as WorktreeHandlers from "./toolkits/worktree/handlers.ts";
+import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
+import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 
 const planner = ThreadId.make("thread:planner");
 const worker = ThreadId.make("thread:worker");
@@ -71,29 +84,31 @@ interface FakeThread {
   readonly messages?: ReadonlyArray<OrchestrationV2ConversationMessage>;
 }
 
+const threadsLayer = (threads: Readonly<Record<string, FakeThread>>) =>
+  Layer.mock(ThreadManagement.ThreadManagementService)({
+    getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+    getThreadRecords: ((threadId: ThreadId) => {
+      const fake = threads[threadId]!;
+      return Effect.succeed({
+        thread: {
+          lineage: {
+            parentThreadId: fake.parent,
+            relationshipToParent: fake.parent === null ? null : "subagent",
+            rootThreadId: planner,
+          },
+        },
+        subagents: [],
+        runs: fake.runs ?? [],
+        messages: fake.messages ?? [],
+        ...(fake.ledger === undefined ? {} : { ledger: fake.ledger }),
+      });
+    }) as unknown as ThreadManagement.ThreadManagementService["Service"]["getThreadRecords"],
+  });
+
 const guard = (tool: string, caller: ThreadId, threads: Readonly<Record<string, FakeThread>>) =>
   guardInvestigationSpawn(tool).pipe(
     Effect.provideService(McpInvocationContext.McpInvocationContext, scopeFor(caller)),
-    Effect.provide(
-      Layer.mock(ThreadManagement.ThreadManagementService)({
-        getThreadRecords: ((threadId: ThreadId) => {
-          const fake = threads[threadId]!;
-          return Effect.succeed({
-            thread: {
-              lineage: {
-                parentThreadId: fake.parent,
-                relationshipToParent: fake.parent === null ? null : "subagent",
-                rootThreadId: planner,
-              },
-            },
-            subagents: [],
-            runs: fake.runs ?? [],
-            messages: fake.messages ?? [],
-            ...(fake.ledger === undefined ? {} : { ledger: fake.ledger }),
-          });
-        }) as unknown as ThreadManagement.ThreadManagementService["Service"]["getThreadRecords"],
-      }),
-    ),
+    Effect.provide(threadsLayer(threads)),
     Effect.exit,
   );
 
@@ -186,4 +201,126 @@ it.effect("a user-authored message after the end unlocks the thread", () =>
     });
     expect(Exit.isSuccess(exit)).toBe(true);
   }),
+);
+
+it.effect("a worker under a running investigation cannot start threads or schedule work", () =>
+  Effect.gen(function* () {
+    // Threads a worker creates are not subagents, so nothing would count, stop or lock them.
+    const tree = {
+      [planner]: { parent: null, ledger: ledgerWith({}) },
+      [worker]: { parent: planner },
+    };
+    for (const tool of ["create_threads", "schedule_task", "t3_thread_launch"]) {
+      expect(refusalOf(yield* guard(tool, worker, tree))).toContain("delegate_task");
+    }
+  }),
+);
+
+it.effect("a scheduled task's message after the end does not unlock the thread", () =>
+  Effect.gen(function* () {
+    const firedAt = DateTime.add(endedAt, { minutes: 5 });
+    const exit = yield* guard("t3_thread_send", planner, {
+      [planner]: {
+        parent: null,
+        ledger: ledgerWith({ status: "solved", endedAt }),
+        runs: [
+          {
+            id: RunId.make("run:scheduled"),
+            ordinal: 3,
+            status: "running",
+            requestedAt: firedAt,
+            startedAt: firedAt,
+            completedAt: null,
+          } as unknown as OrchestrationV2Run,
+        ],
+        messages: [
+          {
+            id: MessageId.make("message:scheduled"),
+            runId: RunId.make("run:scheduled"),
+            role: "user",
+            // The scheduler stamps the task's own author and source, which a person set up.
+            createdBy: "user",
+            creationSource: "web",
+            scheduledTaskId: ScheduledTaskId.make("task:nightly"),
+            createdAt: firedAt,
+          } as unknown as OrchestrationV2ConversationMessage,
+        ],
+      },
+    });
+    expect(refusalOf(exit)).toContain("has ended (solved");
+  }),
+);
+
+const client = McpSchema.McpServerClient.of({
+  clientId: 1,
+  protocolVersion: "2025-06-18",
+  clientCapabilities: {},
+  clientInfo: { name: "investigate-test", version: "1" },
+  initializePayload: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "investigate-test", version: "1" },
+  },
+  getClient: Effect.die("unused"),
+});
+
+const endedTree = {
+  [planner]: { parent: null, ledger: ledgerWith({ status: "solved", endedAt }), ...reportTurn() },
+} as const;
+
+/** Calls a tool through its production registration, as the agent's MCP client would. */
+const callRegistered = (name: string, args: Record<string, unknown>) =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    return yield* server
+      .callTool({ name, arguments: args })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scopeFor(planner)),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+  });
+
+const toolRefusal = (result: McpSchema.CallToolResult) => {
+  const text = result.content[0];
+  return result.isError === true && text?.type === "text"
+    ? String(JSON.parse(text.text).message)
+    : undefined;
+};
+
+it.effect("update_scheduled_task is refused after the end, before the service runs", () =>
+  callRegistered("update_scheduled_task", { scheduledTaskId: "task:nightly", enabled: true }).pipe(
+    Effect.map((result) => expect(toolRefusal(result)).toContain("has ended (solved")),
+    Effect.provide(
+      McpHttpServer.toolkitRegistration(OrchestratorToolkit, OrchestratorHandlers.layer).pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(
+          Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+            updateScheduledTask: () => Effect.die("an ended investigation must not reschedule"),
+          }),
+        ),
+        Layer.provide(Layer.mock(ThreadMetadataMcpService.ThreadMetadataMcpService)({})),
+        Layer.provide(threadsLayer(endedTree)),
+      ),
+    ),
+  ),
+);
+
+it.effect("t3_worktree_handoff is refused after the end, before the service runs", () =>
+  callRegistered("t3_worktree_handoff", { branch: "agent/escape" }).pipe(
+    Effect.map((result) => expect(toolRefusal(result)).toContain("has ended (solved")),
+    Effect.provide(
+      McpHttpServer.toolkitRegistration(WorktreeToolkit, WorktreeHandlers.layer).pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(
+          Layer.mock(WorktreeMcpService.WorktreeMcpService)({
+            handoff: () => Effect.die("an ended investigation must not hand off"),
+          }),
+        ),
+        // The toolkit's other tools need these; the refused call never reaches them.
+        Layer.provide(Layer.mock(GitWorkflow.GitWorkflowService)({})),
+        Layer.provide(Layer.mock(Project.ProjectService)({})),
+        Layer.provide(threadsLayer(endedTree)),
+      ),
+    ),
+  ),
 );

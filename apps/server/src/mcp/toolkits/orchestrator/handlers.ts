@@ -113,6 +113,8 @@ const handlers = {
   ),
   update_scheduled_task: McpToolAccess.writes((input) =>
     Effect.gen(function* () {
+      // Fork: Investigate mode locks work-starting tools.
+      yield* guardInvestigationSpawn("update_scheduled_task");
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.updateScheduledTask(scope, input);

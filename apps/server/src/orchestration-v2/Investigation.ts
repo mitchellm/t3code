@@ -438,7 +438,7 @@ export function investigationSpawnRefusal(
   if (lock.state === "running") {
     return tool === "ledger_create"
       ? undefined
-      : `An investigation is running on this thread. Start approach work with delegate_task under the worker role, which the investigation counts; ${tool} is refused until it ends.`;
+      : `An investigation is running on this thread or the one that delegated to it. Start work with delegate_task, which the investigation counts and stops; ${tool} is refused until it ends.`;
   }
   return `${endedText(lock.investigation)} ${tool} is refused until the user sends a new message; write the report.`;
 }
@@ -491,10 +491,9 @@ export interface InvestigationCallerLock {
 }
 
 /**
- * The caller's own lock, or else the first ended investigation up its subagent chain, so a
- * worker's workers stop when the root's investigation does. Accepted for v1: under a running
- * investigation its workers' own helpers are not locked or capped; the budget bounds that spend.
- * `latestUserMessageAt` is read only for an ended investigation, the one case that needs it.
+ * The first investigation lock up the caller's subagent chain: it locks the whole tree, so no
+ * worker starts threads its stop, spend and lock would miss. Accepted for v1: a worker's own
+ * `delegate_task` helpers are uncapped while it runs; as subagents they are still stopped and locked.
  */
 export const findInvestigationLock = Effect.fn("Investigation.findLock")(function* <E>(
   callerThreadId: ThreadId,
@@ -527,9 +526,7 @@ export const findInvestigationLock = Effect.fn("Investigation.findLock")(functio
       records.ledger,
       endedAt === null ? null : yield* latestUserMessageAt(threadId, endedAt),
     );
-    if (lock.state === "ended" || (lock.state === "running" && atCaller)) {
-      return { lock, atCaller, activeWorkers };
-    }
+    if (lock.state !== "open") return { lock, atCaller, activeWorkers };
     threadId =
       records.thread.lineage.relationshipToParent === "subagent"
         ? records.thread.lineage.parentThreadId
@@ -538,13 +535,14 @@ export const findInvestigationLock = Effect.fn("Investigation.findLock")(functio
   return { lock: { state: "open" }, atCaller: true, activeWorkers };
 });
 
-/** A spawn tool's refusal for the caller: its own lock, or an ended one up its chain. */
+/** A spawn tool's refusal for the caller: any lock in its tree applies, its own or an ancestor's. */
 export const spawnRefusalFor = (found: InvestigationCallerLock, tool: string) =>
-  found.lock.state === "running" && !found.atCaller
-    ? undefined
-    : investigationSpawnRefusal(found.lock, tool);
+  investigationSpawnRefusal(found.lock, tool);
 
-/** `delegate_task`'s refusal for the caller; only the caller's own investigation caps it. */
+/**
+ * `delegate_task`'s refusal for the caller. Only the investigation thread itself is capped; a
+ * worker may start helpers while it runs, but nobody in the tree may once it has ended.
+ */
 export const delegationRefusalFor = (
   found: InvestigationCallerLock,
   requestedRole: string | undefined,
