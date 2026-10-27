@@ -32,6 +32,8 @@ import {
   CheckpointId,
   ClaudeSettings,
   EnvironmentId,
+  LedgerId,
+  LedgerItemId,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -8043,6 +8045,111 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             [WAKE_TASK_ID, false],
           ],
         );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("lets the Stop hook skip ambient tasks and lists the crons it reports as waits", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const openItem = {
+          id: LedgerItemId.make("L1"),
+          title: "Build the map",
+          acceptance: "The map renders",
+          status: "open" as const,
+          evidence: null,
+          dropReason: null,
+          verdict: null,
+          createdAt: now,
+          updatedAt: now,
+          closedAt: null,
+        };
+        yield* harness.runtime.startTurn({
+          ...makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-session-waits"),
+            text: "Build the map and check back later.",
+            attachments: [],
+          }),
+          harness: {
+            readLedgerState: Effect.succeed({
+              ledger: {
+                id: LedgerId.make("ledger:waits"),
+                threadId: harness.threadId,
+                title: "Ship the map",
+                startState: "",
+                checkpoints: [],
+                winConditions: [],
+                items: [openItem],
+                createdAt: now,
+                updatedAt: now,
+                closedAt: null,
+              },
+              userInterrupted: false,
+              delegatedWorkActive: false,
+              pullRequestWatched: false,
+            }),
+            readThreadPolicy: Effect.die("not read by a stop"),
+            readLoadout: Effect.succeed(null),
+          },
+        });
+        // Only the CLI's task frames flag a task ambient; its stop list never does.
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "background_tasks_changed",
+            tasks: [
+              { task_id: "dream-1", task_type: "dream", description: "Memory", ambient: true },
+            ],
+            uuid: "00000000-0000-4000-8000-000000000351",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        const stopHook = harness.getOpenedOptions()?.hooks?.Stop?.[0]?.hooks[0];
+        if (stopHook === undefined) throw new Error("The harness must register a Stop hook.");
+        const dream = { id: "dream-1", type: "dream", status: "running", description: "Memory" };
+        const cron = { id: "c1", schedule: "30 14 27 10 *", recurring: false, prompt: "Check it" };
+        const stop = (sessionCrons: ReadonlyArray<typeof cron>) =>
+          Effect.promise(() =>
+            stopHook(
+              {
+                session_id: WAKE_NATIVE_SESSION,
+                transcript_path: "transcript",
+                cwd: "/workspace",
+                hook_event_name: "Stop",
+                stop_hook_active: false,
+                background_tasks: [dream],
+                session_crons: [...sessionCrons],
+              },
+              undefined,
+              { signal: new AbortController().signal },
+            ),
+          );
+        assert.strictEqual(Reflect.get(yield* stop([]), "decision"), "block");
+        assert.deepStrictEqual(yield* stop([cron]), {});
+
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        while (true) {
+          const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+          const tasks = providerThread.pendingBackgroundTasks ?? [];
+          if (tasks.length === 0) continue;
+          assert.deepStrictEqual(tasks, [
+            {
+              taskId: "cron:c1",
+              kind: "background_task",
+              description: "Scheduled wakeup: Check it",
+            },
+          ]);
+          break;
+        }
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

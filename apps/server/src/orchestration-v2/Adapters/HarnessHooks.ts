@@ -4,11 +4,11 @@
  * agent's own tool call or stop, and every read honours the hook's abort signal.
  */
 import type {
-  BackgroundTaskSummary,
   HookCallbackMatcher,
   HookInput,
   HookJSONOutput,
   Options as ClaudeQueryOptions,
+  SessionCronSummary,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   LOADOUT_ROLE_NAMES,
@@ -89,6 +89,10 @@ export interface HarnessHookPort {
    * managers rule and plan before editing bind only the top level.
    */
   readonly delegatedChild: boolean;
+  /** The Stop hook's task list omits the CLI's ambient flag, which only its task frames carry. */
+  readonly isAmbientTask?: (taskId: string) => boolean;
+  /** Each stop's crons, so the between-turn follow-up waits on them too. */
+  readonly onSessionCrons?: (crons: ReadonlyArray<SessionCronSummary>) => void;
   readonly onHookError: (cause: unknown) => void;
 }
 
@@ -270,17 +274,16 @@ function isInsideDirectory(filePath: string, directory: string): boolean {
   );
 }
 
-// Declared on task_started and background_tasks_changed but not on this summary, so it is read
-// as an undeclared field; a CLI that omits it reports nothing ambient.
-const isAmbient = (task: BackgroundTaskSummary) => Reflect.get(task, "ambient") === true;
-
-// Fork: each task the SDK lists here wakes the session when it ends, and a cron fires a prompt, so
-// blocking the stop only burns blocks to the ceiling. T3's awaited mark is not required: the CLI
-// wakes either way. A dev server left running lets the agent stop too; the between-turn follow-up
-// applies the awaited rule and covers it.
-const waitsOnBackgroundWork = (input: Extract<HookInput, { hook_event_name: "Stop" }>) =>
+// Fork: each non-ambient task the SDK lists here wakes the session when it ends, and a cron fires a
+// prompt, so blocking the stop only burns blocks to the ceiling. T3's awaited mark is not required:
+// the CLI wakes either way. A dev server left running lets the agent stop too; the between-turn
+// follow-up applies the awaited rule and covers it.
+const waitsOnBackgroundWork = (
+  input: Extract<HookInput, { hook_event_name: "Stop" }>,
+  isAmbientTask: ((taskId: string) => boolean) | undefined,
+) =>
   (input.session_crons ?? []).length > 0 ||
-  (input.background_tasks ?? []).some((task) => !isAmbient(task));
+  (input.background_tasks ?? []).some((task) => isAmbientTask?.(task.id) !== true);
 
 export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | undefined {
   const { readPinnedRules, readLedgerState, readThreadPolicy } = port;
@@ -402,9 +405,19 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           promptBlocks = 0;
           judgeReplanned.clear();
         }
-        if (waitsOnBackgroundWork(input)) return {};
+        // First, so every stop's report replaces the last, whatever this hook decides.
+        port.onSessionCrons?.(input.session_crons ?? []);
+        if (waitsOnBackgroundWork(input, port.isAmbientTask)) return {};
         const state = await readLedgerState(signal);
-        if (state === undefined || state.userInterrupted || state.delegatedWorkActive) return {};
+        // A watched pull request wakes the thread when checks or reviews land.
+        if (
+          state === undefined ||
+          state.userInterrupted ||
+          state.delegatedWorkActive ||
+          state.pullRequestWatched
+        ) {
+          return {};
+        }
         const ledger = activeLedger(state);
         if (ledger === undefined) return {};
         const open = openItems(ledger);

@@ -2141,6 +2141,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 ledger: ledgerReads++ === 0 ? ledger : closedLedger,
                 userInterrupted: false,
                 delegatedWorkActive: false,
+                pullRequestWatched: false,
               })),
               readThreadPolicy: Effect.succeed({ structure: "solo", planBeforeEditing: true }),
               // This session has no T3 tools, so the loadout stays out of its context.
@@ -2268,6 +2269,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 ledger: null,
                 userInterrupted: false,
                 delegatedWorkActive: false,
+                pullRequestWatched: false,
               }),
               readThreadPolicy: Effect.die("not read for the turn context"),
               readLoadout: Effect.sync(() => (loadoutReads++ === 0 ? proposed : null)),

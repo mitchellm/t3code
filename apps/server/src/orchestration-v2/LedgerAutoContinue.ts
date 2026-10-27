@@ -82,14 +82,18 @@ const WAIT_HINT_IDS_SHOWN = 5;
 
 /**
  * Fork: work nobody marked awaited may be a real wait, such as a long build, so the follow-up
- * says how to mark it; the next run's end then stands aside instead of nudging again.
+ * says how to mark it; the next run's end then stands aside. It names only roster ids, the only
+ * ones t3_background_wait matches; a timeline row is named by its tool call.
  */
 function backgroundWaitHint(
   unawaited: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+  roster: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
 ): string | undefined {
-  if (unawaited.length === 0) return undefined;
-  const ids = unawaited.slice(0, WAIT_HINT_IDS_SHOWN).map(({ taskId }) => taskId);
-  const hidden = unawaited.length - ids.length;
+  const rosterIds = new Set(roster.map(({ taskId }) => taskId));
+  const markable = unawaited.filter(({ taskId }) => rosterIds.has(taskId));
+  if (markable.length === 0) return undefined;
+  const ids = markable.slice(0, WAIT_HINT_IDS_SHOWN).map(({ taskId }) => taskId);
+  const hidden = markable.length - ids.length;
   return `Still running in the background: ${ids.join(", ")}${hidden > 0 ? ` and ${hidden} more` : ""}. If you are waiting on any of it, call t3_background_wait with its task id and end your turn. Leave work you keep running on purpose, such as a dev server, unmarked.`;
 }
 
@@ -152,10 +156,10 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   // A delegated task still working wakes this thread when it ends; nudging the agent before then
   // only gets "still waiting" back and soon reads as a stall.
   if (subagents.some((subagent) => isOrchestrationV2WorkActive(subagent.status))) return;
-  // Fork: the same holds for background work the agent waits on: a provider's own subagent, a
-  // command or Monitor marked with t3_background_wait, a watched pull request. Its wake continues
-  // the work, so there is no notice either. This is what the composer shows as waiting, read from
-  // the roster and the live timeline rows, since a provider may record work in only one.
+  // Fork: the same holds for work the agent waits on: a provider's own subagent, a command or
+  // Monitor marked with t3_background_wait, a Claude cron, a watched pull request. Its wake goes on
+  // with the work, so there is no notice either. This is what the composer shows as waiting, read
+  // from the roster and the live timeline rows, since a provider may record work in only one.
   const { turnItems: liveBackgroundItems } = yield* orchestrator.getThreadRecords(
     input.threadId,
     ["turnItems"],
@@ -202,8 +206,8 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
 
   // Fork: Claude's Stop hook gave up if its run gets here; it is decided like any other, so a
   // fresh-turn replan comes before the user is asked. No turn is nudged twice: the hook acts inside
-  // a run, this once per completed run. Each follow-up is a new prompt with a fresh, capped in-run
-  // allowance, so this streak cap bounds both.
+  // a run, this once per completed run. Every prompt has a capped in-run allowance; follow-ups stop
+  // at the streak cap, and a wake, which it does not count, comes only from work the agent started.
   const decision = decideLedgerFollowUp({
     ledger,
     // Run ordinals order messages exactly; timestamps tie within a millisecond.
@@ -233,7 +237,14 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
     );
     return;
   }
-  const waitHint = backgroundWaitHint(pendingWork);
+  const waitHint = backgroundWaitHint(
+    pendingWork,
+    providerThreads
+      .filter(
+        ({ id }) => thread.activeProviderThreadId === null || id === thread.activeProviderThreadId,
+      )
+      .flatMap(({ pendingBackgroundTasks }) => pendingBackgroundTasks ?? []),
+  );
   const text =
     decision.type === "replan"
       ? ledgerReplanText({
