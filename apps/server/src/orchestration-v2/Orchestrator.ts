@@ -7307,6 +7307,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         model: command.modelSelection.model,
         ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
         ...(command.role === undefined ? {} : { role: command.role }),
+        ...(command.serverJudge === true ? { serverJudge: true as const } : {}),
         status: "running",
         result: null,
         startedAt: now,

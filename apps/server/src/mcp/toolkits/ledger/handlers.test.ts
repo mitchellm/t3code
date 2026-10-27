@@ -4,6 +4,9 @@ import {
   EnvironmentId,
   EventId,
   type Ledger,
+  LedgerId,
+  LedgerItemId,
+  type OrchestrationV2Run,
   ProviderInstanceId,
   ThreadId,
   type CommandId,
@@ -81,8 +84,14 @@ const makeFakeThreads = () => {
   >();
   let sequence = 0;
   let planned = 0;
+  /** The thread's runs, for the one tool that reads them (create after an investigation). */
+  const runs = new Map<ThreadId, ReadonlyArray<OrchestrationV2Run>>();
   const layer = Layer.mock(ThreadManagement.ThreadManagementService)({
     getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+    getThreadRecords: ((threadId: ThreadId) =>
+      Effect.succeed({
+        runs: runs.get(threadId) ?? [],
+      })) as unknown as ThreadManagement.ThreadManagementService["Service"]["getThreadRecords"],
     getProjectThreadRecords: ({ threadId }) => {
       const ledger = ledgers.get(threadId);
       return Effect.succeed({
@@ -131,7 +140,7 @@ const makeFakeThreads = () => {
         return { sequence, storedEvents: [] };
       }),
   });
-  return { layer, ledgers, planned: () => planned };
+  return { layer, ledgers, runs, planned: () => planned };
 };
 
 const withServer = <A, E>(
@@ -210,6 +219,62 @@ it.effect("creates a ledger and reads it back compactly", () => {
     }),
   );
 });
+
+it.effect(
+  "refuses an agent create in the turn its investigation ended, and allows it in a later turn",
+  () => {
+    const endedAt = DateTime.add(NOW, { minutes: 10 });
+    const investigationLedger: Ledger = {
+      id: LedgerId.make("ledger:investigation:req"),
+      threadId: ownThread,
+      title: "Why does sync drop rows",
+      startState: "",
+      checkpoints: [],
+      winConditions: ["A failing test passes with the fix."],
+      items: [],
+      requiresJudge: true,
+      investigation: {
+        goal: "Why does sync drop rows",
+        solvedWhen: "A failing test passes with the fix.",
+        budget: { minutes: 30 },
+        parallelApproaches: 2,
+        status: "solved",
+        approachesItemId: LedgerItemId.make("approaches"),
+        startedAt: NOW,
+        endedAt,
+      },
+      createdAt: NOW,
+      updatedAt: endedAt,
+      closedAt: endedAt,
+    };
+    const runStartedAt = (at: DateTime.Utc) =>
+      [
+        {
+          id: "run:planner",
+          ordinal: 1,
+          status: "running",
+          requestedAt: at,
+          startedAt: at,
+        } as unknown as OrchestrationV2Run,
+      ] as const;
+    const fake = makeFakeThreads();
+    fake.ledgers.set(ownThread, investigationLedger);
+    return withServer(fake, (call) =>
+      Effect.gen(function* () {
+        // The planner's turn began before the investigation ended: refused.
+        fake.runs.set(ownThread, runStartedAt(NOW));
+        const escape = yield* call("ledger_create", { title: "Something else", items: twoItems });
+        expect(failureOf(escape)?.message).toContain("during this turn");
+        expect(fake.ledgers.get(ownThread)?.id).toBe(investigationLedger.id);
+        // The user's /ledger request runs as a new turn, after the end: allowed.
+        fake.runs.set(ownThread, runStartedAt(DateTime.add(endedAt, { minutes: 1 })));
+        const asked = yield* call("ledger_create", { title: "Follow-up", items: twoItems });
+        expect(failureOf(asked)).toBeUndefined();
+        expect(fake.ledgers.get(ownThread)?.id).not.toBe(investigationLedger.id);
+      }),
+    );
+  },
+);
 
 it.effect("reads a thread with no ledger as null", () =>
   withServer(makeFakeThreads(), (call) =>

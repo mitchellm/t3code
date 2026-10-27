@@ -12,13 +12,19 @@ import {
 import { investigationBudgetUse, investigationLanes } from "@t3tools/shared/investigation";
 import { applyLedgerEvent } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Ref from "effect/Ref";
+import * as TestClock from "effect/testing/TestClock";
 import * as Result from "effect/Result";
 
 import {
   APPROACHES_ITEM_ID,
   findInvestigationDelegationRefusal,
   type InvestigationChainRecords,
+  investigationCreateProblem,
+  withInvestigationDelegationLease,
   investigationDelegationProblem,
   investigationEffects,
 } from "./Investigation.ts";
@@ -523,7 +529,12 @@ describe("investigation state machine", () => {
   it.effect("the investigation thread's cap counts running workers and exempts judges", () =>
     Effect.gen(function* () {
       const worker = { origin: "app_owned", role: "worker", status: "running" } as const;
-      const judge = { origin: "app_owned", role: "judge", status: "running" } as const;
+      const judge = {
+        origin: "app_owned",
+        role: "judge",
+        status: "running",
+        serverJudge: true,
+      } as const;
       const withChildren = (subagents: InvestigationChainRecords["subagents"]) =>
         findInvestigationDelegationRefusal(threadId, () =>
           Effect.succeed(chainLink(running(), null, subagents)),
@@ -532,4 +543,77 @@ describe("investigation state machine", () => {
       assert.include((yield* withChildren([worker, worker, worker, judge])) ?? "", "at most 3");
     }),
   );
+
+  it.effect("an agent naming the judge role neither dodges the cap nor starts while it runs", () =>
+    Effect.gen(function* () {
+      const worker = { origin: "app_owned", role: "worker", status: "running" } as const;
+      const agentJudge = { origin: "app_owned", role: "judge", status: "running" } as const;
+      const serverJudge = { ...agentJudge, serverJudge: true } as const;
+      const refusal = (subagents: InvestigationChainRecords["subagents"], requestedRole?: string) =>
+        findInvestigationDelegationRefusal(
+          threadId,
+          () => Effect.succeed(chainLink(running(), null, subagents)),
+          requestedRole,
+        );
+      // A child the agent started as "judge" is a worker to the cap; the server's judge is not.
+      assert.include((yield* refusal([worker, worker, agentJudge])) ?? "", "at most 3");
+      assert.strictEqual(yield* refusal([worker, worker, serverJudge, serverJudge]), undefined);
+      assert.include((yield* refusal([], "judge")) ?? "", "runs its judge itself");
+    }),
+  );
+
+  it.effect("two concurrent delegations cannot both pass the cap", () =>
+    Effect.gen(function* () {
+      // One slot left: two workers already run against a limit of three.
+      const recorded = yield* Ref.make(2);
+      const firstChecked = yield* Deferred.make<void>();
+      const delegate = (isFirst: boolean) =>
+        withInvestigationDelegationLease(
+          threadId,
+          Effect.gen(function* () {
+            const refused = investigationDelegationProblem({
+              ledger: running(),
+              activeWorkers: yield* Ref.get(recorded),
+            });
+            if (refused !== undefined) return "refused" as const;
+            if (isFirst) {
+              // The first sits between its check and its dispatch, where the race lives, until
+              // the test clock moves.
+              yield* Deferred.succeed(firstChecked, undefined);
+              yield* Effect.sleep("1 second");
+            }
+            yield* Ref.update(recorded, (count) => count + 1);
+            return "started" as const;
+          }),
+        );
+      const first = yield* Effect.forkChild(delegate(true));
+      yield* Deferred.await(firstChecked);
+      // Needs no time: without the lease it checks and dispatches at once.
+      const second = yield* Effect.forkChild(delegate(false));
+      yield* TestClock.adjust("1 second");
+      assert.deepStrictEqual(
+        [yield* Fiber.join(first), yield* Fiber.join(second)],
+        ["started", "refused"],
+      );
+      assert.strictEqual(yield* Ref.get(recorded), 3);
+    }),
+  );
+
+  it("the agent cannot create a ledger in the turn its investigation ended; a new turn can", () => {
+    const solved = step(running(), recordVerdict("a", "pass"), at(4)).ledger;
+    // The planner's turn began before the end: an unprompted escape.
+    assert.include(
+      investigationCreateProblem({ ledger: solved, runStartedAt: at(1) }) ?? "",
+      "ended (solved) during this turn",
+    );
+    // The user's /ledger request starts a new turn after the end.
+    assert.strictEqual(
+      investigationCreateProblem({ ledger: solved, runStartedAt: at(10) }),
+      undefined,
+    );
+    assert.strictEqual(
+      investigationCreateProblem({ ledger: running(), runStartedAt: at(1) }),
+      undefined,
+    );
+  });
 });

@@ -19,6 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import { investigationCreateProblem } from "../orchestration-v2/Investigation.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
@@ -253,19 +254,37 @@ const make = Effect.gen(function* () {
       // closed ledger being replaced joins the hash, or an identical replacement would replay the
       // first ledger's receipt and never be created.
       (ledger) => [ledger !== undefined && ledger.closedAt !== null ? ledger.id : "new", args],
-      ({ commandId, threadId, requestKey }) =>
-        Effect.succeed({
-          type: "ledger.create" as const,
-          commandId,
-          threadId,
-          // Derived from the request key, so a replayed create names the same ledger.
-          ledgerId: ledgerIdFor(threadId, requestKey),
-          title: input.title,
-          startState: input.startState ?? "",
-          checkpoints: input.checkpoints ?? [],
-          winConditions: input.winConditions ?? [],
-          items: input.items,
-          createdBy: "agent",
+      ({ commandId, threadId, requestKey, ledger }) =>
+        Effect.gen(function* () {
+          // Fork: replacing an investigation that ended during this very turn would only lift the
+          // stop on its workers; the user's own /ledger request arrives as a later turn.
+          if (ledger?.investigation?.endedAt != null) {
+            const { runs } = yield* threads
+              .getThreadRecords(threadId, ["runs"])
+              .pipe(Effect.mapError(unavailable));
+            const current = runs
+              .filter(ThreadManagementService.isActiveRun)
+              .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+            const problem = investigationCreateProblem({
+              ledger,
+              runStartedAt:
+                current === undefined ? null : (current.startedAt ?? current.requestedAt),
+            });
+            if (problem !== undefined) return yield* failure("invalid_request", problem);
+          }
+          return {
+            type: "ledger.create" as const,
+            commandId,
+            threadId,
+            // Derived from the request key, so a replayed create names the same ledger.
+            ledgerId: ledgerIdFor(threadId, requestKey),
+            title: input.title,
+            startState: input.startState ?? "",
+            checkpoints: input.checkpoints ?? [],
+            winConditions: input.winConditions ?? [],
+            items: input.items,
+            createdBy: "agent" as const,
+          };
         }),
       (ledger) => ledger !== undefined && ledger.closedAt === null,
     );

@@ -10,9 +10,10 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { isApproachItem, isLiveApproach } from "@t3tools/shared/investigation";
-import type * as DateTime from "effect/DateTime";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
+import * as Semaphore from "effect/Semaphore";
 
 import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import type { LedgerCommand, LedgerRejection, PlannedLedgerEvent } from "./TaskLedger.ts";
@@ -420,18 +421,24 @@ const MAX_INVESTIGATION_DEPTH = 8;
 export interface InvestigationChainRecords {
   readonly thread: Pick<OrchestrationV2AppThread, "lineage">;
   readonly ledger?: Ledger | undefined;
-  readonly subagents: ReadonlyArray<Pick<OrchestrationV2Subagent, "origin" | "role" | "status">>;
+  readonly subagents: ReadonlyArray<
+    Pick<OrchestrationV2Subagent, "origin" | "role" | "status"> & {
+      readonly serverJudge?: true | undefined;
+    }
+  >;
 }
 
 /**
- * Why `delegate_task` refuses the caller a new worker: its own investigation caps its running
- * workers, and walking up the subagent chain, an ended investigation refuses its workers' workers
- * too, so stopping the run cannot be outlived by a grandchild.
+ * Why `delegate_task` refuses a new worker: the caller's own investigation caps its workers, and an
+ * ended one anywhere up the subagent chain refuses its workers' workers too. Accepted for v1: a
+ * running investigation's workers may start uncapped helpers; the budget bounds that spend.
  */
 export const findInvestigationDelegationRefusal = Effect.fn("Investigation.findDelegationRefusal")(
   function* <E>(
     callerThreadId: ThreadId,
     read: (threadId: ThreadId) => Effect.Effect<InvestigationChainRecords, E>,
+    /** The role the agent asked for; absent for the server's own judge delegation. */
+    requestedRole?: string,
   ): Effect.fn.Return<string | undefined, E> {
     let threadId: ThreadId | null = callerThreadId;
     const visited = new Set<ThreadId>();
@@ -439,12 +446,20 @@ export const findInvestigationDelegationRefusal = Effect.fn("Investigation.findD
       visited.add(threadId);
       const records: InvestigationChainRecords = yield* read(threadId);
       const { thread, ledger, subagents } = records;
+      if (threadId === callerThreadId) {
+        // The server judges theses itself; an agent naming the judge role would only be a worker
+        // that the cap does not see.
+        if (requestedRole === "judge" && ledger?.investigation?.status === "running") {
+          return "An investigation is running on this thread, and the server runs its judge itself. Delegate approach work under the worker role.";
+        }
+      }
       const activeWorkers =
         threadId === callerThreadId
           ? subagents.filter(
               (task) =>
                 task.origin === "app_owned" &&
-                task.role !== "judge" &&
+                // Only the server's own judge is exempt; a role the agent named is not.
+                task.serverJudge !== true &&
                 isOrchestrationV2WorkActive(task.status),
             ).length
           : 0;
@@ -456,6 +471,50 @@ export const findInvestigationDelegationRefusal = Effect.fn("Investigation.findD
     return undefined;
   },
 );
+
+const delegationLeases = new Map<string, { semaphore: Semaphore.Semaphore; users: number }>();
+
+/**
+ * Runs one delegation's cap check and dispatch alone per parent thread, so two concurrent
+ * `delegate_task` calls cannot both pass the cap before either task is recorded. Keyed like
+ * `withWorkspaceLease`, and dropped once nobody holds or waits for it.
+ */
+export const withInvestigationDelegationLease = <A, E, R>(
+  threadId: ThreadId,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.suspend(() => {
+    const lease = delegationLeases.get(threadId) ?? {
+      semaphore: Semaphore.makeUnsafe(1),
+      users: 0,
+    };
+    delegationLeases.set(threadId, lease);
+    lease.users++;
+    return lease.semaphore.withPermit(effect).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          lease.users--;
+          if (lease.users === 0) delegationLeases.delete(threadId);
+        }),
+      ),
+    );
+  });
+
+/**
+ * Why the agent may not create a ledger: the thread's investigation ended during this run, so a
+ * new ledger here would only lift the stop on its workers. A user's /ledger request arrives as a
+ * new turn, which starts after the end, so it still goes through.
+ */
+export function investigationCreateProblem(input: {
+  readonly ledger: Ledger | undefined;
+  readonly runStartedAt: DateTime.Utc | null;
+}): string | undefined {
+  const investigation = input.ledger?.investigation;
+  if (investigation?.endedAt == null || input.runStartedAt === null) return undefined;
+  return DateTime.toEpochMillis(investigation.endedAt) > DateTime.toEpochMillis(input.runStartedAt)
+    ? `This thread's investigation ended (${investigation.status}) during this turn. Write the report; start new work only when the user asks for it in a new message.`
+    : undefined;
+}
 
 /** Ending an investigation stops every delegated task under the thread, committed with the end. */
 export function investigationEffects(

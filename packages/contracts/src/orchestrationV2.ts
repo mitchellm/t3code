@@ -867,6 +867,11 @@ export const OrchestrationV2Subagent = Schema.Struct({
    * the judge's carries none, so timing reads it from here. Absent when the delegation named none.
    */
   role: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Fork: started by the server's own ledger judge, not by an agent naming the judge role. Only
+   * these are exempt from an investigation's worker cap. Absent means an agent's delegation.
+   */
+  serverJudge: Schema.optionalKey(Schema.Literal(true)),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   status: Schema.Literals([
     "idle",
@@ -3385,6 +3390,8 @@ export const OrchestrationV2Command = Schema.Union([
     // Defaults to settled_only; fire-and-forget wakes require always.
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
     role: Schema.optional(TrimmedNonEmptyString),
+    /** Fork: set only by the server's ledger judge delegation; see the subagent field. */
+    serverJudge: Schema.optional(Schema.Literal(true)),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
