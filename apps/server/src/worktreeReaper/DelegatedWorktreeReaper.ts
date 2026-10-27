@@ -317,8 +317,9 @@ const make = Effect.gen(function* () {
   });
 
   return DelegatedWorktreeReaper.of({
-    reap: (options) =>
-      reap(options).pipe(
+    // Untraced: the inner reap already opens the "DelegatedWorktreeReaper.reap" span.
+    reap: Effect.fnUntraced(function* (options) {
+      return yield* reap(options).pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
         Effect.catchCause((cause) =>
@@ -326,7 +327,8 @@ const make = Effect.gen(function* () {
             Effect.as([] as ReapReport),
           ),
         ),
-      ),
+      );
+    }),
   });
 });
 

@@ -1,4 +1,5 @@
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import { queuedRunEditBlockedReason } from "@t3tools/client-runtime/queued-run-edit";
 import { ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
 import { usePasteToFocusComposer } from "./chat/usePasteToFocusComposer";
 import { announcedRun, isDetailBehindShell } from "./chat/threadActivityAnnouncement";
@@ -269,6 +270,7 @@ import {
   RevertConfirmHost,
 } from "./chat/ChatOverlayHosts";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
+import { useCitedHistory } from "./chat/citationProcedure";
 import type { MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ThreadTimeline } from "./chat/ThreadTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
@@ -597,6 +599,7 @@ export default function ChatView(props: ChatViewProps) {
       ? { citation, key: citationLocation.key ?? citationLocation.href }
       : null;
   })() as AssistantCitationRequest | null;
+  const citationHistory = useCitedHistory(citationRequest);
   const { resolvedTheme } = useTheme();
   const composerRuntimeMode = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.runtimeMode ?? null,
@@ -1301,7 +1304,6 @@ export default function ChatView(props: ChatViewProps) {
   } = usePendingThreadRequests({
     environmentId,
     activeThreadId,
-    activeThread,
     serverProjection,
     supportsQuestionAttachments,
     composerDraftTarget,
@@ -2031,9 +2033,7 @@ export default function ChatView(props: ChatViewProps) {
   const {
     showScrollToBottom,
     timelineLiveFollowEnabled,
-    cancelPositionRestoreRef,
     isTimelineAtLogicalEndStable,
-    cancelTimelineLiveFollowForUserNavigationStable,
     onComposerPageScrollKeyDownStable,
     onComposerPageScrollKeyUpStable,
     onComposerPageScrollReleaseStable,
@@ -2043,14 +2043,14 @@ export default function ChatView(props: ChatViewProps) {
     onToolOutputCollapsedAtEndStable,
     onIsAtEndChangeStable,
     anchorNewTurn,
+    attachTimelineViewport,
+    attachComposerOverlay: attachFollowComposerOverlay,
   } = useTimelineFollow({
     legendListRef,
     composerRef,
-    composerOverlayElement,
     composerTimelineInset,
     routeThreadKey,
     activeThreadKey,
-    activeThreadId: activeThread?.id,
     isServerThread,
     serverProjection,
     threadStatus,
@@ -2989,6 +2989,9 @@ export default function ChatView(props: ChatViewProps) {
           threadId={activeThread.id}
           optimisticMessages={optimisticUserMessages}
           editingRunId={queuedRunEdit.editingRunId}
+          editBlockedReason={queuedRunEditBlockedReason({
+            openQuestionCount: pendingUserInputs.length,
+          })}
           onEditQueuedRun={queuedRunEdit.beginEdit}
           onCancelEdit={queuedRunEdit.cancelEdit}
         />
@@ -3306,7 +3309,7 @@ export default function ChatView(props: ChatViewProps) {
                 readyMarkdownCwd={gitCwd}
                 readyWorkspaceRoot={activeWorkspaceRoot ?? null}
                 citationRequest={paintOnlyDisplayedTimeline ? null : citationRequest}
-                citationHistoryLoading={threadDetailLoading}
+                citationHistory={citationHistory}
                 {...(!paintOnlyDisplayedTimeline
                   ? {
                       onCiteAssistantText: citeAssistantTextStable,
@@ -3453,8 +3456,7 @@ export default function ChatView(props: ChatViewProps) {
                 onIsAtEndChange={onIsAtEndChangeStable}
                 onContentOverflowChange={setTimelineOverflows}
                 onToolOutputCollapsedAtEnd={onToolOutputCollapsedAtEndStable}
-                onManualNavigation={cancelTimelineLiveFollowForUserNavigationStable}
-                cancelPositionRestoreRef={cancelPositionRestoreRef}
+                onViewportAttach={attachTimelineViewport}
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 emptyPlaceholderInset={composerReservedHeight}
                 topFadeEnabled={!hasTimelineTopBanner}
@@ -3483,7 +3485,10 @@ export default function ChatView(props: ChatViewProps) {
             />
 
             <div
-              ref={setComposerOverlayElement}
+              ref={(overlay: HTMLDivElement | null) => {
+                setComposerOverlayElement(overlay);
+                attachFollowComposerOverlay(overlay);
+              }}
               inert={isRevertingCheckpoint}
               data-chat-composer-overlay="true"
               className={

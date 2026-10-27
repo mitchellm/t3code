@@ -998,8 +998,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   // The fast path's own git checks (repository verdicts, outer config) start on the
   // same workers, so they never stall the event loop either.
   if (workerSpawner !== undefined) {
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
     GitMetadataFastPath.setGitProcessRunner((args, options) =>
-      Effect.runPromise(
+      runPromise(
         runProcessWithSpawner(workerSpawner, {
           command: "git",
           args,
@@ -3882,7 +3883,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           operation: "GitVcsDriver.createWorktree",
           command: "git worktree add",
           cwd: input.cwd,
-          detail: `The worktree location "${options?.worktreesDirectory}" must be an absolute folder on this machine, not a drive root. Change it in Settings → Storage.`,
+          detail: `The worktree location "${options?.worktreesDirectory}" must be an absolute folder on this machine, not a drive root. Change it in Settings → Worktrees.`,
         });
       }
       worktreePath = path.join(parentDir, repoName, sanitizedBranch);
@@ -4148,8 +4149,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         },
       );
       return run.pipe(
-        Effect.flatMap((result) =>
-          result.exitCode !== 0 && isRefLockFailure(result.stderr) ? run : Effect.succeed(result),
+        Effect.filterOrElse(
+          (result) => !(result.exitCode !== 0 && isRefLockFailure(result.stderr)),
+          (_result) => run,
         ),
       );
     };
@@ -4571,7 +4573,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       "branch",
       "--list",
       "--no-column",
-      "--format=%(refname:short)",
+      "--format=%(refname:lstrip=2)",
     ]).pipe(
       Effect.map((stdout) => {
         const branchNames: Array<string> = [];
@@ -4625,6 +4627,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ),
     );
 
+  // Forwarders retain the underlying Git operation spans.
   return GitVcsDriver.GitVcsDriver.of({
     execute,
     status,
@@ -4632,14 +4635,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     statusDetailsLocal,
     statusDetailsRemote,
     prepareCommitContext,
-    commit: (cwd, subject, body, options) =>
-      withListRefsInvalidation(cwd, commit(cwd, subject, body, options)),
+    commit: Effect.fnUntraced(function* (cwd, subject, body, options) {
+      return yield* withListRefsInvalidation(cwd, commit(cwd, subject, body, options));
+    }),
     workingChanges,
     stagePaths,
     unstagePaths,
-    pushCurrentBranch: (cwd, fallbackBranch, options) =>
-      withListRefsInvalidation(cwd, pushCurrentBranch(cwd, fallbackBranch, options)),
-    pullCurrentBranch: (cwd) => withListRefsInvalidation(cwd, pullCurrentBranch(cwd)),
+    pushCurrentBranch: Effect.fnUntraced(function* (cwd, fallbackBranch, options) {
+      return yield* withListRefsInvalidation(cwd, pushCurrentBranch(cwd, fallbackBranch, options));
+    }),
+    pullCurrentBranch: Effect.fnUntraced(function* (cwd) {
+      return yield* withListRefsInvalidation(cwd, pullCurrentBranch(cwd));
+    }),
     readRangeContext,
     getReviewDiffPreview,
     getReviewDiffFileContents,
@@ -4647,18 +4654,24 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     readBranchBase,
     resolveBranchName,
     listRefs,
-    createWorktree: (input, options) =>
-      withListRefsInvalidation(input.cwd, createWorktree(input, options)),
-    fetchRefIntoBranch: (input) => withListRefsInvalidation(input.cwd, fetchRefIntoBranch(input)),
+    createWorktree: Effect.fnUntraced(function* (input, options) {
+      return yield* withListRefsInvalidation(input.cwd, createWorktree(input, options));
+    }),
+    fetchRefIntoBranch: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, fetchRefIntoBranch(input));
+    }),
     fetchRefCommit,
     resolveCommit,
-    refreshCheckedOutBranch: (input) =>
-      withListRefsInvalidation(input.cwd, refreshCheckedOutBranch(input)),
-    ensureRemote: (input) => withListRefsInvalidation(input.cwd, ensureRemote(input)),
+    refreshCheckedOutBranch: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, refreshCheckedOutBranch(input));
+    }),
+    ensureRemote: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, ensureRemote(input));
+    }),
     resolvePrimaryRemoteName,
     resolveDefaultBranchName,
-    fetchRemote: (input) =>
-      withListRefsInvalidation(
+    fetchRemote: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(
         input.cwd,
         fetchRemote(input).pipe(
           Effect.flatMap((fetched) =>
@@ -4667,23 +4680,42 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               : fetchRemote({ cwd: input.cwd, remoteName: input.remoteName }).pipe(Effect.asVoid),
           ),
         ),
-      ),
+      );
+    }),
     remoteExists,
     remoteBranchExists,
     resolveRemoteTrackingCommit,
     resolveWorktreeBaseRemote,
-    fetchWorktreeBaseCommit: (input) =>
-      withListRefsInvalidation(input.cwd, fetchWorktreeBaseCommit(input)),
-    fetchRemoteBranch: (input) => withListRefsInvalidation(input.cwd, fetchRemoteBranch(input)),
-    fetchRemoteTrackingBranch: (input) =>
-      withListRefsInvalidation(input.cwd, fetchRemoteTrackingBranch(input)),
-    setBranchUpstream: (input) => withListRefsInvalidation(input.cwd, setBranchUpstream(input)),
-    removeWorktree: (input) => withListRefsInvalidation(input.cwd, removeWorktree(input)),
-    pruneWorktrees: (input) => withListRefsInvalidation(input.cwd, pruneWorktrees(input)),
-    deleteLocalBranch: (input) => withListRefsInvalidation(input.cwd, deleteLocalBranch(input)),
-    renameBranch: (input) => withListRefsInvalidation(input.cwd, renameBranch(input)),
-    createRef: (input) => withListRefsInvalidation(input.cwd, createRef(input)),
-    switchRef: (input) => withListRefsInvalidation(input.cwd, switchRef(input)),
+    fetchWorktreeBaseCommit: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, fetchWorktreeBaseCommit(input));
+    }),
+    fetchRemoteBranch: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, fetchRemoteBranch(input));
+    }),
+    fetchRemoteTrackingBranch: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, fetchRemoteTrackingBranch(input));
+    }),
+    setBranchUpstream: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, setBranchUpstream(input));
+    }),
+    removeWorktree: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, removeWorktree(input));
+    }),
+    pruneWorktrees: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, pruneWorktrees(input));
+    }),
+    deleteLocalBranch: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, deleteLocalBranch(input));
+    }),
+    renameBranch: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, renameBranch(input));
+    }),
+    createRef: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, createRef(input));
+    }),
+    switchRef: Effect.fnUntraced(function* (input) {
+      return yield* withListRefsInvalidation(input.cwd, switchRef(input));
+    }),
     initRepo: initRepoWithListRefsInvalidation,
     listLocalBranchNames,
     listWorktreePaths,
