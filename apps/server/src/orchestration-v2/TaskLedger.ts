@@ -685,6 +685,8 @@ function planCoreLedgerCommand(input: {
         updatedAt: now,
       };
       next = withOptional(next, "deferReason", target === "deferred" ? deferReason : undefined);
+      if (target === "in_progress" && next.startedAt === undefined)
+        next = { ...next, startedAt: now };
       // A drop, or the user's close, ends any judgement; its late verdict is then ignored.
       if (target === "dropped" || target === "closed") next = endJudging(next);
       if (changesStatus || evidence !== item.evidence) {

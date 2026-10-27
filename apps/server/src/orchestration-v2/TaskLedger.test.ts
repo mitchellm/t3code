@@ -330,6 +330,7 @@ it.effect("walks an item through its legal transitions and stamps times", () =>
     yield* updateItem(threadId, "a", { status: "in_progress" });
     assert.equal(itemOf(yield* ledgerOf(threadId), "a")?.status, "in_progress");
     assert.deepEqual(itemOf(yield* ledgerOf(threadId), "a")?.updatedAt, started);
+    assert.deepEqual(itemOf(yield* ledgerOf(threadId), "a")?.startedAt, started);
 
     yield* TestClock.adjust("1 second");
     const closedAt = yield* DateTime.now;
@@ -346,7 +347,9 @@ it.effect("walks an item through its legal transitions and stamps times", () =>
     assert.isNull(reopened?.closedAt);
     assert.isNull(reopened?.evidence);
 
+    // The judge diffs from the first start, so starting again keeps it.
     yield* updateItem(threadId, "a", { status: "in_progress" });
+    assert.deepEqual(itemOf(yield* ledgerOf(threadId), "a")?.startedAt, started);
     yield* updateItem(threadId, "a", { status: "dropped", dropReason: "out of scope" });
     const dropped = itemOf(yield* ledgerOf(threadId), "a");
     assert.equal(dropped?.status, "dropped");

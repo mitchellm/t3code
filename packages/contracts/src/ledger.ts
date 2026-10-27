@@ -80,6 +80,8 @@ export const LedgerItem = Schema.Struct({
    * not finish). Not a failing verdict: the work was never judged.
    */
   judgeError: Schema.optionalKey(Schema.String),
+  /** First time the item went in progress, kept across reopening; the judge diffs from here. */
+  startedAt: Schema.optionalKey(Schema.DateTimeUtc),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   closedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -135,6 +137,7 @@ export const LedgerItemVerdictJson = LedgerItemVerdict.mapFields((fields) => ({
 export const LedgerItemJson = LedgerItem.mapFields((fields) => ({
   ...fields,
   verdict: Schema.NullOr(LedgerItemVerdictJson),
+  startedAt: Schema.optionalKey(Schema.DateTimeUtcFromString),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   closedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
