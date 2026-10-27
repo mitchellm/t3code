@@ -9365,6 +9365,275 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  const makeBackgroundShellStarted = (input: {
+    readonly taskId: string;
+    readonly toolUseId: string;
+    readonly description: string;
+    readonly uuid: string;
+  }) =>
+    claudeSdkFrame({
+      type: "system",
+      subtype: "task_started",
+      task_id: input.taskId,
+      tool_use_id: input.toolUseId,
+      description: input.description,
+      is_backgrounded: true,
+      task_type: "local_bash",
+      uuid: input.uuid,
+      session_id: WAKE_NATIVE_SESSION,
+    });
+  const makeRootToolUseFrame = (input: {
+    readonly uuid: string;
+    readonly toolUseId: string;
+    readonly name: string;
+    readonly input: Record<string, string>;
+  }) =>
+    claudeSdkFrame({
+      type: "assistant",
+      message: {
+        model: "claude-sonnet-4-6",
+        id: `msg_${input.uuid}`,
+        type: "message",
+        role: "assistant",
+        content: [{ type: "tool_use", id: input.toolUseId, name: input.name, input: input.input }],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+      parent_tool_use_id: null,
+      uuid: input.uuid,
+      session_id: WAKE_NATIVE_SESSION,
+    });
+  const makeRootToolResultFrame = (input: { readonly uuid: string; readonly toolUseId: string }) =>
+    claudeSdkFrame({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: input.toolUseId, content: "ok" }],
+      },
+      parent_tool_use_id: null,
+      uuid: input.uuid,
+      session_id: WAKE_NATIVE_SESSION,
+    });
+
+  // Fork: while no run is attached the CLI can finish one wake turn and start the next, here refused
+  // a Stop and then running a tool. Settling on the finished turn's result would mark that tool
+  // failed and leave the live turn's T3 tool calls with no run (parent_not_active).
+  it.effect(
+    "keeps the wake run open while Claude runs a turn that began after the last result",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const LIVE_TOOL_USE_ID = "toolu_wake_live_scoring";
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-wake-live-1"),
+              text: "Run both builds in the background.",
+              attachments: [],
+            }),
+          );
+          yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeBackgroundShellStarted({
+              taskId: "b2secondbuild",
+              toolUseId: "toolu_second_build",
+              description: "Second build",
+              uuid: "00000000-0000-4000-8000-000000001701",
+            }),
+          );
+          yield* Queue.offer(harness.sdkMessages, turnOneResult);
+          yield* harness.awaitTerminal(1);
+
+          // Both wake turns stream before T3 attaches the continuation run.
+          for (const frame of [
+            wakeNotification,
+            wakeTurnInit,
+            makeAssistantTextFrame({
+              uuid: "00000000-0000-4000-8000-000000001702",
+              text: "One build is done.",
+            }),
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001703",
+              result: "One build is done.",
+              origin: { kind: "task-notification" },
+            }),
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_notification",
+              task_id: "b2secondbuild",
+              tool_use_id: "toolu_second_build",
+              status: "completed",
+              output_file: "/tmp/claude-replay/tasks/b2secondbuild.output",
+              summary: 'Background command "Second build" completed (exit code 0)',
+              uuid: "00000000-0000-4000-8000-000000001704",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            claudeSdkFrame({
+              type: "system",
+              subtype: "init",
+              uuid: "00000000-0000-4000-8000-000000001705",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            makeAssistantTextFrame({
+              uuid: "00000000-0000-4000-8000-000000001706",
+              text: "Both builds are done.",
+            }),
+            claudeSdkFrame({
+              type: "user",
+              message: {
+                role: "user",
+                content: [{ type: "text", text: "Stop hook feedback:\nLedger has 7 open items." }],
+              },
+              parent_tool_use_id: null,
+              isSynthetic: true,
+              uuid: "00000000-0000-4000-8000-000000001707",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            makeRootToolUseFrame({
+              uuid: "00000000-0000-4000-8000-000000001708",
+              toolUseId: LIVE_TOOL_USE_ID,
+              name: "Bash",
+              input: { command: "python score.py" },
+            }),
+          ]) {
+            yield* harness.offerAndWait(frame);
+          }
+          assert.lengthOf(harness.continuationRequests, 1);
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-wake-live-2"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+
+          // The tool call and the turn finish live, after the drain.
+          for (const frame of [
+            makeRootToolResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001709",
+              toolUseId: LIVE_TOOL_USE_ID,
+            }),
+            makeAssistantTextFrame({
+              uuid: "00000000-0000-4000-8000-000000001710",
+              text: "Scored both builds.",
+            }),
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001711",
+              result: "Scored both builds.",
+            }),
+          ]) {
+            yield* harness.offerAndWait(frame);
+          }
+          // A result reaching no attached run would ask for another continuation.
+          assert.lengthOf(harness.continuationRequests, 1);
+          yield* harness.awaitTerminal(2);
+          assert.lengthOf(harness.terminalEvents(), 2);
+          assert.equal(harness.terminalEvents()[1]?.status, "completed");
+          const liveToolStatuses = harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === LIVE_TOOL_USE_ID
+              ? [event.turnItem.status]
+              : [],
+          );
+          assert.notInclude(liveToolStatuses, "failed");
+          assert.equal(liveToolStatuses.at(-1), "completed");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  // Fork: the CLI queues no wake for a shell or monitor the agent stops itself, so that stop must
+  // not turn the next wake's finished work into "were stopped".
+  it.effect("leaves a shell the agent stopped out of the next wake's report", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const RUNNER_TASK_ID = "b9sfl60r8";
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-agent-stop-1"),
+            text: "Stop the old runner and start the build.",
+            attachments: [],
+          }),
+        );
+        for (const frame of [
+          wakeTaskStarted,
+          makeBackgroundShellStarted({
+            taskId: RUNNER_TASK_ID,
+            toolUseId: "toolu_old_runner",
+            description: "Role batch runner",
+            uuid: "00000000-0000-4000-8000-000000001721",
+          }),
+          makeRootToolUseFrame({
+            uuid: "00000000-0000-4000-8000-000000001722",
+            toolUseId: "toolu_stop_old_runner",
+            name: "TaskStop",
+            input: { task_id: RUNNER_TASK_ID },
+          }),
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: RUNNER_TASK_ID,
+            tool_use_id: "toolu_old_runner",
+            status: "stopped",
+            output_file: `/tmp/claude-replay/tasks/${RUNNER_TASK_ID}.output`,
+            summary: "Role batch runner",
+            uuid: "00000000-0000-4000-8000-000000001723",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+          makeRootToolResultFrame({
+            uuid: "00000000-0000-4000-8000-000000001724",
+            toolUseId: "toolu_stop_old_runner",
+          }),
+          turnOneResult,
+        ]) {
+          yield* Queue.offer(harness.sdkMessages, frame);
+        }
+        yield* harness.awaitTerminal(1);
+
+        yield* harness.offerAndWait(wakeNotification);
+        yield* harness.offerAndWait(wakeTurnInit);
+        assert.lengthOf(harness.continuationRequests, 1);
+        assert.deepEqual(harness.continuationRequests[0]?.notification, {
+          source: { kind: "command" },
+          outcome: "completed",
+          summary: `Command "${WAKE_TASK_DESCRIPTION}" finished`,
+        });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect.each([true, false])(
     "carries a rejected wake rate limit into the continuation failure (event=%s)",
     (standaloneEvent) =>
