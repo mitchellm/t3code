@@ -8,7 +8,7 @@ import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import { ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Deferred from "effect/Deferred";
@@ -30,6 +30,7 @@ import {
   layerQueryRunner,
   spawnClaudeProcessGroup,
 } from "./ClaudeAdapterV2.ts";
+import { recordClaudeAgentSdkReplayTranscript } from "./ClaudeAdapterV2.testkit.ts";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
 
@@ -379,6 +380,133 @@ it.effect("does not reuse a fresh session ID after MCP registration times out", 
       assert.equal(disposed.mock.calls.length, 1);
     }).pipe(Effect.provide(realQueryRunner)),
   ),
+);
+
+const openInterruptibleSession = Effect.fnUntraced(function* (
+  interrupt: (options?: { readonly cancelQueued?: boolean }) => Promise<unknown>,
+) {
+  const querySpy = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+    () =>
+      ({
+        interrupt,
+        close: vi.fn(),
+        [Symbol.asyncDispose]: vi.fn(async () => {}),
+      }) as unknown as ClaudeSdk.Query,
+  );
+  yield* Effect.addFinalizer(() => Effect.sync(() => querySpy.mockRestore()));
+  const runner = yield* ClaudeAgentSdkQueryRunner;
+  const session = yield* runner.open({
+    threadId: ThreadId.make("thread-interrupt-cancels-queued"),
+    providerSessionId: ProviderSessionId.make("session-interrupt-cancels-queued"),
+    options: {
+      sessionId: "native-session-interrupt-cancels-queued",
+      model: "claude-sonnet-4-6",
+      tools: [],
+      permissionMode: "default",
+    },
+  });
+  yield* Effect.addFinalizer(() => session.close.pipe(Effect.orDie));
+  return session;
+});
+
+// Fork: a plain interrupt leaves a waiting "next" steer queued, and the CLI runs it after Stop.
+it.effect("cancels queued messages when it interrupts the turn", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const interrupt = vi.fn(async (_options?: { readonly cancelQueued?: boolean }) => ({
+        still_queued: [],
+        cancelled: [],
+      }));
+      const session = yield* openInterruptibleSession(interrupt);
+      yield* session.interrupt;
+      assert.deepEqual(interrupt.mock.calls, [[{ cancelQueued: true }]]);
+    }).pipe(Effect.provide(realQueryRunner)),
+  ),
+);
+
+it.effect("falls back to a plain interrupt when the CLI rejects cancelling queued messages", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const interrupt = vi.fn(async (options?: { readonly cancelQueued?: boolean }) => {
+        if (options?.cancelQueued === true) throw new Error("Unknown field: cancel_queued");
+        return { still_queued: [] };
+      });
+      const session = yield* openInterruptibleSession(interrupt);
+      yield* session.interrupt;
+      assert.deepEqual(interrupt.mock.calls, [[{ cancelQueued: true }], []]);
+    }).pipe(Effect.provide(realQueryRunner)),
+  ),
+);
+
+// Fork: a re-recorded steering fixture must carry what the adapter sends and stop where the
+// adapter ends the turn; a steer taken in at a tool boundary leaves a single result.
+it.effect("records a steer the way the adapter sends it", () =>
+  Effect.gen(function* () {
+    const frame = (value: unknown) => value as ClaudeSdk.SDKMessage;
+    const querySpy = vi.spyOn(ClaudeSdk, "query").mockImplementation(({ prompt }) => {
+      if (typeof prompt === "string") throw new Error("Expected streaming input");
+      const prompts = prompt[Symbol.asyncIterator]();
+      async function* run() {
+        await prompts.next();
+        const steer = (await prompts.next()).value;
+        const commandUuid = steer?.uuid ?? "steer-without-uuid";
+        for (const state of ["queued", "started", "completed"]) {
+          yield frame({
+            type: "command_lifecycle",
+            command_uuid: commandUuid,
+            state,
+            uuid: `lifecycle-${state}`,
+            session_id: FORK_SESSION_ID,
+          });
+        }
+        yield frame({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          num_turns: 2,
+          result: "steered",
+          stop_reason: "end_turn",
+          duration_ms: 1,
+          duration_api_ms: 1,
+          total_cost_usd: 0,
+          usage: { input_tokens: 1, output_tokens: 1 },
+          modelUsage: {},
+          permission_denials: [],
+          uuid: "result-steered",
+          session_id: FORK_SESSION_ID,
+        });
+      }
+      return Object.assign(run(), { close: vi.fn() }) as unknown as ClaudeSdk.Query;
+    });
+    yield* Effect.addFinalizer(() => Effect.sync(() => querySpy.mockRestore()));
+    const transcript = yield* Effect.promise(() =>
+      recordClaudeAgentSdkReplayTranscript({
+        scenario: "message_steering",
+        prompts: ["Run the three checks.", "Also run the fourth check."],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet-4-6",
+        },
+        cwd: "/repo",
+        sessionId: FORK_SESSION_ID,
+        queryMode: "active_steering",
+      }),
+    );
+    const offer = transcript.entries.find(
+      (entry) => entry.type === "expect_outbound" && entry.label === "prompt.offer:2",
+    );
+    const steer: unknown =
+      offer?.type === "expect_outbound" ? Reflect.get(Object(offer.frame), "message") : undefined;
+    assert.equal(Reflect.get(Object(steer), "priority"), "next");
+    assert.isString(Reflect.get(Object(steer), "uuid"));
+    assert.lengthOf(
+      transcript.entries.filter(
+        (entry) => entry.type === "emit_inbound" && entry.label === "result",
+      ),
+      1,
+    );
+    assert.deepEqual(transcript.entries.at(-1), { type: "runtime_exit", status: "success" });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 function fakeClaudeCli(script: string): string {

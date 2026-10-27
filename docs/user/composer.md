@@ -52,7 +52,9 @@ See [images and videos](#images-and-videos-in-messages) for previewing and savin
 ## Send while the agent is working
 
 On web and desktop, choose **Settings → Chat → Follow-up behavior** to queue
-new messages for a later turn or steer the running turn immediately. The setting
+new messages for a later turn or steer the running turn. Claude and Codex take a
+steer after their current step without cancelling it, while agents that cannot
+steer in place, such as Cursor, stop and restart with it. The setting
 applies to this client; already queued messages keep their place. Queued messages
 are saved on the server and can be edited, reordered, or removed above the composer.
 When Enter sends, `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux uses

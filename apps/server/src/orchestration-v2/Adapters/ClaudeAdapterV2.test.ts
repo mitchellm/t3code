@@ -2084,7 +2084,7 @@ describe("ClaudeAdapterV2 attachments", () => {
             },
           });
 
-          assert.equal(offeredMessages[1]?.priority, "now");
+          assert.equal(offeredMessages[1]?.priority, "next");
           assert.deepEqual(offeredMessages[1]?.message.content, expectedContent);
           const documentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
           for (const scenario of [
@@ -2843,7 +2843,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
   const makeWakeHarnessWithOptions = (options?: {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
-    readonly interrupt?: Effect.Effect<void>;
+    readonly interrupt?: Effect.Effect<void, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
     readonly setPermissionMode?: ClaudeAdapterV2.ClaudeAgentSdkQuerySession["setPermissionMode"];
     readonly stopTask?: (
       taskId: string,
@@ -4311,7 +4311,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           },
         });
         const attachmentNote = `\n\n[Attached file "requirements.pdf" is saved at: ${path.join(harness.attachmentsDir, attachmentRelativePath(attachment)!)}]`;
-        assert.equal(harness.offeredMessages[1]?.priority, "now");
+        assert.equal(harness.offeredMessages[1]?.priority, "next");
         assert.deepEqual(harness.offeredMessages[1]?.message.content, [
           { type: "text", text: `${leadingText}${attachmentNote}` },
           { type: "text", text: `/implement the fixes${attachmentNote}` },
@@ -4727,104 +4727,415 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     (["aborted_tools", "aborted_streaming"] as const).flatMap((terminalReason) =>
       [true, false].map((steered) => ({ terminalReason, steered })),
     ),
-  )("handles $terminalReason with active steering=$steered", ({ terminalReason, steered }) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const harness = yield* makeWakeHarness;
-        const idAllocator = yield* IdAllocator.IdAllocatorV2;
-        const attemptId = RunAttemptId.make("attempt-steering-abort");
-        const input = makeClaudeTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId,
-          text: "Audit the settings pages.",
-          attachments: [],
-        });
-        yield* harness.runtime.startTurn(input);
-        if (steered) {
-          yield* harness.runtime.steerTurn({
+  )(
+    "ends the turn on $terminalReason with active steering=$steered",
+    ({ terminalReason, steered }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const idAllocator = yield* IdAllocator.IdAllocatorV2;
+          const attemptId = RunAttemptId.make("attempt-steering-abort");
+          const input = makeClaudeTestTurnInput({
             threadId: harness.threadId,
-            runId: input.runId,
             providerThread: harness.providerThread,
-            providerTurnId: idAllocator.derive.providerTurn({
-              driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
-              nativeTurnId: `turn:${attemptId}`,
-            }),
-            message: {
-              createdBy: "user",
-              creationSource: "web",
-              messageId: MessageId.make("message-steering-abort"),
-              text: "Include the hierarchy mock.",
-              attachments: [],
-            },
+            now: yield* DateTime.now,
+            attemptId,
+            text: "Audit the settings pages.",
+            attachments: [],
           });
-          assert.equal(harness.offeredMessages[1]?.priority, "now");
-        }
-        yield* Queue.offer(
-          harness.sdkMessages,
-          makeResultFrame({
-            uuid: "00000000-0000-4000-8000-000000000901",
-            result: "",
-            terminalReason,
-            usage: {
-              input_tokens: 600,
-              output_tokens: 40,
-              cache_creation_input_tokens: 500,
-              cache_read_input_tokens: 2000,
-            },
-          }),
-        );
-        if (steered) {
-          yield* Queue.offer(harness.sdkMessages, wakeAssistant);
+          yield* harness.runtime.startTurn(input);
+          if (steered) {
+            yield* harness.runtime.steerTurn({
+              threadId: harness.threadId,
+              runId: input.runId,
+              providerThread: harness.providerThread,
+              providerTurnId: idAllocator.derive.providerTurn({
+                driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                nativeTurnId: `turn:${attemptId}`,
+              }),
+              message: {
+                createdBy: "user",
+                creationSource: "web",
+                messageId: MessageId.make("message-steering-abort"),
+                text: "Include the hierarchy mock.",
+                attachments: [],
+              },
+            });
+            assert.equal(harness.offeredMessages[1]?.priority, "next");
+          }
           yield* Queue.offer(
             harness.sdkMessages,
             makeResultFrame({
-              uuid: "00000000-0000-4000-8000-000000000902",
-              result: "Audit finished after the steer.",
-              usage: {
-                input_tokens: 3,
-                output_tokens: 6,
-                cache_creation_input_tokens: 2347,
-                cache_read_input_tokens: 9455,
-              },
+              uuid: "00000000-0000-4000-8000-000000000901",
+              result: "",
+              terminalReason,
             }),
           );
+          const terminal = yield* Queue.take(harness.terminalReceipts);
+          // A "next" steer cancels nothing, so an aborted result is a real stop either way.
+          assert.equal(terminal.status, "interrupted");
+          assert.lengthOf(harness.terminalEvents(), 1);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  // Fork: a steer is offered with priority "next" and its own uuid, so it lands after the
+  // running tool call. Its command_lifecycle frames say whether a result ends the turn.
+  const steerLifecycle = (
+    commandUuid: string,
+    state: "queued" | "started" | "completed" | "cancelled",
+    uuid: string,
+  ) =>
+    claudeSdkFrame({
+      type: "command_lifecycle",
+      command_uuid: commandUuid,
+      state,
+      uuid,
+      session_id: WAKE_NATIVE_SESSION,
+    });
+  const answerUsage = {
+    input_tokens: 600,
+    output_tokens: 40,
+    cache_creation_input_tokens: 500,
+    cache_read_input_tokens: 2000,
+  };
+  const steeredAnswerUsage = {
+    input_tokens: 3,
+    output_tokens: 6,
+    cache_creation_input_tokens: 2347,
+    cache_read_input_tokens: 9455,
+  };
+  const turnUsage = (harness: Effect.Success<typeof makeWakeHarness>) => {
+    const settled = harness.events.findLast((event) => event.type === "provider_turn.updated");
+    return settled?.type === "provider_turn.updated"
+      ? settled.providerTurn.turnTokenUsage
+      : undefined;
+  };
+  const startSteeredTurn = Effect.fnUntraced(function* (
+    harness: Effect.Success<typeof makeWakeHarness>,
+    name: string,
+  ) {
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const input = makeClaudeTestTurnInput({
+      threadId: harness.threadId,
+      providerThread: harness.providerThread,
+      now: yield* DateTime.now,
+      attemptId: RunAttemptId.make(`attempt-${name}`),
+      text: "Run the three checks.",
+      attachments: [],
+    });
+    yield* harness.runtime.startTurn(input);
+    const promptUuid = harness.promptUuid(0);
+    yield* harness.offerAndWait(
+      steerLifecycle(promptUuid, "queued", "00000000-0000-4000-8000-000000000a01"),
+    );
+    yield* harness.offerAndWait(
+      steerLifecycle(promptUuid, "started", "00000000-0000-4000-8000-000000000a02"),
+    );
+    const providerTurnId = idAllocator.derive.providerTurn({
+      driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+      nativeTurnId: `turn:${input.attemptId}`,
+    });
+    yield* harness.runtime.steerTurn({
+      threadId: harness.threadId,
+      runId: input.runId,
+      providerThread: harness.providerThread,
+      providerTurnId,
+      message: {
+        createdBy: "user",
+        creationSource: "web",
+        messageId: MessageId.make(`message-${name}`),
+        text: "Also run the fourth check.",
+        attachments: [],
+      },
+    });
+    assert.equal(harness.offeredMessages[1]?.priority, "next");
+    const steerUuid = harness.promptUuid(1);
+    assert.notEqual(steerUuid, promptUuid);
+    return { providerTurnId, steerUuid };
+  });
+
+  it.effect("keeps the turn open when its answer ends before the steer starts", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const { providerTurnId, steerUuid } = yield* startSteeredTurn(harness, "steer-after-answer");
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "queued", "00000000-0000-4000-8000-000000000a11"),
+      );
+      yield* harness.offerAndWait(
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000a12",
+          result: "Ran the three checks.",
+          usage: answerUsage,
+        }),
+      );
+      assert.lengthOf(harness.terminalEvents(), 0);
+      // With no tool boundary left, the CLI runs the steer as a second segment of the turn.
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "started", "00000000-0000-4000-8000-000000000a13"),
+      );
+      yield* harness.offerAndWait(wakeTurnInit);
+      yield* harness.offerAndWait(wakeAssistant);
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000a14",
+          result: WAKE_ASSISTANT_TEXT,
+          usage: steeredAnswerUsage,
+        }),
+      );
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.providerTurnId, providerTurnId);
+      assert.equal(terminal.status, "completed");
+      assert.lengthOf(harness.terminalEvents(), 1);
+      assert.isTrue(
+        harness.events.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.text === WAKE_ASSISTANT_TEXT &&
+            event.turnItem.providerTurnId === providerTurnId,
+        ),
+      );
+      assert.deepEqual(turnUsage(harness), {
+        usageScope: "main_agent",
+        usageStatus: "complete",
+        hasSubagents: false,
+        inputTokens: 603 + 2847 + 11455,
+        outputTokens: 46,
+        cachedInputTokens: 11455,
+        cacheCreationTokens: 2847,
+      });
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("completes on the one result when the steer starts at a tool boundary", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const { providerTurnId, steerUuid } = yield* startSteeredTurn(harness, "steer-mid-turn");
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "queued", "00000000-0000-4000-8000-000000000a21"),
+      );
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "started", "00000000-0000-4000-8000-000000000a22"),
+      );
+      yield* harness.offerAndWait(wakeAssistant);
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "completed", "00000000-0000-4000-8000-000000000a23"),
+      );
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000a24",
+          result: WAKE_ASSISTANT_TEXT,
+          usage: steeredAnswerUsage,
+        }),
+      );
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.providerTurnId, providerTurnId);
+      assert.equal(terminal.status, "completed");
+      assert.lengthOf(harness.terminalEvents(), 1);
+      assert.deepEqual(turnUsage(harness), {
+        usageScope: "main_agent",
+        usageStatus: "complete",
+        hasSubagents: false,
+        inputTokens: 3 + 2347 + 9455,
+        outputTokens: 6,
+        cachedInputTokens: 9455,
+        cacheCreationTokens: 2347,
+      });
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect.each([
+    { ending: "cancelled", status: "completed" },
+    { ending: "query_exit", status: "failed" },
+  ] as const)(
+    "settles a held answer when the waiting steer ends by $ending",
+    ({ ending, status }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const { providerTurnId, steerUuid } = yield* startSteeredTurn(harness, `steer-${ending}`);
+        yield* harness.offerAndWait(
+          steerLifecycle(steerUuid, "queued", "00000000-0000-4000-8000-000000000a31"),
+        );
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000a32",
+            result: "Ran the three checks.",
+            usage: answerUsage,
+          }),
+        );
+        if (ending === "cancelled") {
+          yield* Queue.offer(
+            harness.sdkMessages,
+            steerLifecycle(steerUuid, "cancelled", "00000000-0000-4000-8000-000000000a33"),
+          );
+        } else {
+          yield* Queue.shutdown(harness.sdkMessages);
         }
         const terminal = yield* Queue.take(harness.terminalReceipts);
-        assert.equal(terminal.status, steered ? "completed" : "interrupted");
-        if (steered) {
-          assert.isTrue(
-            harness.events.some(
-              (event) =>
-                event.type === "turn_item.updated" &&
-                event.turnItem.type === "assistant_message" &&
-                event.turnItem.text === WAKE_ASSISTANT_TEXT,
-            ),
-          );
-          const completed = harness.events.findLast(
-            (event) => event.type === "provider_turn.updated",
-          );
-          assert.deepEqual(
-            completed?.type === "provider_turn.updated"
-              ? completed.providerTurn.turnTokenUsage
-              : undefined,
-            {
-              usageScope: "main_agent",
-              usageStatus: "complete",
-              hasSubagents: false,
-              inputTokens: 603 + 2847 + 11455,
-              outputTokens: 46,
-              cachedInputTokens: 11455,
-              cacheCreationTokens: 2847,
-            },
-          );
-        }
+        assert.equal(terminal.providerTurnId, providerTurnId);
+        assert.equal(terminal.status, status);
         assert.lengthOf(harness.terminalEvents(), 1);
+        if (ending === "cancelled") {
+          // The held answer settles the turn once, so its usage is not counted twice.
+          assert.deepEqual(turnUsage(harness), {
+            usageScope: "main_agent",
+            usageStatus: "complete",
+            hasSubagents: false,
+            inputTokens: 600 + 500 + 2000,
+            outputTokens: 40,
+            cachedInputTokens: 2000,
+            cacheCreationTokens: 500,
+          });
+        }
       }).pipe(
+        Effect.scoped,
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
         ),
+      ),
+  );
+
+  it.effect("stops a turn whose steer still waits", () =>
+    Effect.gen(function* () {
+      const interruptRequested = yield* Deferred.make<void>();
+      const interruptAnswered = yield* Deferred.make<void>();
+      const harness = yield* makeWakeHarnessWithOptions({
+        interrupt: Deferred.succeed(interruptRequested, undefined).pipe(
+          Effect.andThen(Deferred.await(interruptAnswered)),
+        ),
+        close: (sdkMessages) => Queue.shutdown(sdkMessages),
+      });
+      const { providerTurnId, steerUuid } = yield* startSteeredTurn(harness, "steer-stop");
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "queued", "00000000-0000-4000-8000-000000000a41"),
+      );
+      const stop = yield* harness.runtime
+        .interruptTurn({ providerThread: harness.providerThread, providerTurnId })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(interruptRequested);
+      // What the CLI answers to an interrupt that cancels queued commands.
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "cancelled", "00000000-0000-4000-8000-000000000a42"),
+      );
+      yield* harness.offerAndWait(
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000a43",
+          result: "",
+          subtype: "error_during_execution",
+          isError: true,
+          errors: [],
+          terminalReason: "aborted_tools",
+        }),
+      );
+      yield* Deferred.succeed(interruptAnswered, undefined);
+      yield* Fiber.join(stop);
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.providerTurnId, providerTurnId);
+      assert.equal(terminal.status, "interrupted");
+      assert.lengthOf(harness.terminalEvents(), 1);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  // An unwatched run (a scheduled task, a delegated wake) must not stay open on a steer the
+  // CLI never takes in.
+  it.effect.each(["never acknowledged", "queued"] as const)(
+    "settles a held answer when a %s steer never starts",
+    (acknowledgement) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const { providerTurnId, steerUuid } = yield* startSteeredTurn(
+          harness,
+          `steer-never-starts-${acknowledgement.replaceAll(" ", "-")}`,
+        );
+        if (acknowledgement === "queued") {
+          yield* harness.offerAndWait(
+            steerLifecycle(steerUuid, "queued", "00000000-0000-4000-8000-000000000a51"),
+          );
+        }
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000a52",
+            result: "Ran the three checks.",
+            usage: answerUsage,
+          }),
+        );
+        assert.lengthOf(harness.terminalEvents(), 0);
+        yield* TestClock.adjust("2 minutes");
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.providerTurnId, providerTurnId);
+        assert.equal(terminal.status, "completed");
+        assert.lengthOf(harness.terminalEvents(), 1);
+        assert.deepEqual(turnUsage(harness), {
+          usageScope: "main_agent",
+          usageStatus: "complete",
+          hasSubagents: false,
+          inputTokens: 600 + 500 + 2000,
+          outputTokens: 40,
+          cachedInputTokens: 2000,
+          cacheCreationTokens: 500,
+        });
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect("still closes the query when the CLI rejects the interrupt", () =>
+    Effect.gen(function* () {
+      const closed = yield* Deferred.make<void>();
+      const harness = yield* makeWakeHarnessWithOptions({
+        interrupt: Effect.fail(
+          new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+            method: "interrupt",
+            cause: new Error("Unknown field: cancel_queued"),
+          }),
+        ),
+        close: (sdkMessages) =>
+          Deferred.succeed(closed, undefined).pipe(Effect.andThen(Queue.shutdown(sdkMessages))),
+      });
+      const { providerTurnId, steerUuid } = yield* startSteeredTurn(
+        harness,
+        "steer-interrupt-rejected",
+      );
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "queued", "00000000-0000-4000-8000-000000000a61"),
+      );
+      yield* harness.runtime.interruptTurn({
+        providerThread: harness.providerThread,
+        providerTurnId,
+      });
+      assert.isTrue(yield* Deferred.isDone(closed));
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.providerTurnId, providerTurnId);
+      assert.equal(terminal.status, "interrupted");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
   );

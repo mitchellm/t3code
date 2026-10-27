@@ -33,6 +33,12 @@ import {
   resolveClaudeSdkExecutablePath,
 } from "../../provider/Drivers/ClaudeExecutable.ts";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
+import {
+  holdClaudeSegmentResult,
+  makeClaudeTurnSteers,
+  observeClaudeSteerLifecycle,
+  recordClaudeSteer,
+} from "./ClaudeSteering.ts";
 import { claudeTaskOutputRoot } from "./ClaudeTaskOutputTail.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ProviderAdapterDriverCreateError } from "@t3tools/provider-core/server/adapterDriver";
@@ -1352,13 +1358,13 @@ function requireAssistantCursor(input: {
   );
 }
 
-async function recordMessagesUntilTurnResults(input: {
+// Fork: a "next" steer ends the turn on one result or two, as the adapter decides.
+async function recordMessagesUntilTurnEnds(input: {
   readonly iterator: AsyncIterator<SDKMessage>;
   readonly entries: Array<ProviderReplayEntry>;
   readonly scenario: string;
-  readonly resultCount: number;
+  readonly turn: Parameters<typeof holdClaudeSegmentResult>[0];
 }): Promise<boolean> {
-  let seenResults = 0;
   while (true) {
     const next = await input.iterator.next();
     if (next.done === true) {
@@ -1373,11 +1379,12 @@ async function recordMessagesUntilTurnResults(input: {
       label: replayMessage.type,
       frame: replayMessage,
     });
-    if (replayMessage.type === "result") {
-      seenResults += 1;
-      if (seenResults >= input.resultCount) {
-        return true;
-      }
+    // A steer cancelled before it starts leaves its held answer as the turn's last result.
+    if (observeClaudeSteerLifecycle(input.turn, next.value) !== null) {
+      return true;
+    }
+    if (next.value.type === "result" && !holdClaudeSegmentResult(input.turn, next.value)) {
+      return true;
     }
   }
 }
@@ -1671,23 +1678,34 @@ async function recordClaudeActiveSteeringQuery(input: {
 
   const promptQueue = new RecordingPromptQueue();
   const offeredPrompts = new Set<number>();
-  const offerPrompt = (index: number, priority?: SDKUserMessage["priority"]) => {
+  // Fork: steer as ClaudeAdapterV2.steerTurn does, and stop where the adapter ends the turn.
+  const turn: Parameters<typeof holdClaudeSegmentResult>[0] = {
+    steers: makeClaudeTurnSteers(),
+    steeredSegmentUsage: [],
+  };
+  const offerPrompt = (index: number, steerUuid?: NonNullable<SDKUserMessage["uuid"]>) => {
+    const label = `prompt.offer:${index + 1}`;
     const message = ClaudeAdapterV2.makeClaudeUserMessage({
       text: input.prompts[index]!,
-      ...(priority === undefined ? {} : { priority }),
+      ...(steerUuid === undefined ? {} : { priority: "next", uuid: steerUuid }),
     });
+    if (steerUuid !== undefined) recordClaudeSteer(turn.steers, steerUuid, label);
     input.entries.push({
       type: "expect_outbound",
-      label: `prompt.offer:${index + 1}`,
+      label,
       frame: makeClaudePromptOfferFrame(message),
     });
     promptQueue.offer(message);
     offeredPrompts.add(index);
   };
-  const offerSteeringPrompts = () => {
+  const offerSteeringPrompts = async () => {
     for (let index = 1; index < input.prompts.length; index += 1) {
       if (!offeredPrompts.has(index)) {
-        offerPrompt(index, "now");
+        const uuid = await Effect.runPromise(randomUuidV4);
+        if (!ClaudeAdapterV2.isClaudePromptUuid(uuid)) {
+          throw new Error(`Generated steer uuid ${uuid} is not a uuid.`);
+        }
+        offerPrompt(index, uuid);
       }
     }
   };
@@ -1753,12 +1771,12 @@ async function recordClaudeActiveSteeringQuery(input: {
   const iterator = queryRuntime[Symbol.asyncIterator]();
   try {
     offerPrompt(0);
-    offerSteeringPrompts();
-    const completed = await recordMessagesUntilTurnResults({
+    await offerSteeringPrompts();
+    const completed = await recordMessagesUntilTurnEnds({
       iterator,
       entries: input.entries,
       scenario: input.scenario,
-      resultCount: input.prompts.length,
+      turn,
     });
     if (!completed) {
       throw new Error("Claude active steering query ended before the turn completed.");
