@@ -458,6 +458,8 @@ it.effect.each(deliveries)(
             steered ? 1 : 2,
           );
           if (delivery === "child completion") {
+            // The completion was dispatched twice; it still reaches the thread once.
+            assert.equal(after.messages.filter((message) => message.id === messageId).length, 1);
             assert.equal(after.subagents[0]?.completionDelivery?.state, "delivered");
           } else if (delivery === "scheduled message") {
             assert.equal(

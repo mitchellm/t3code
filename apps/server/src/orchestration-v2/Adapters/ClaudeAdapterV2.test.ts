@@ -2843,7 +2843,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
   const makeWakeHarnessWithOptions = (options?: {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
-    readonly interrupt?: Effect.Effect<void>;
+    readonly interrupt?: Effect.Effect<void, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
     readonly setPermissionMode?: ClaudeAdapterV2.ClaudeAgentSdkQuerySession["setPermissionMode"];
     readonly stopTask?: (
       taskId: string,
@@ -5050,6 +5050,88 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.equal(terminal.providerTurnId, providerTurnId);
       assert.equal(terminal.status, "interrupted");
       assert.lengthOf(harness.terminalEvents(), 1);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  // An unwatched run (a scheduled task, a delegated wake) must not stay open on a steer the
+  // CLI never takes in.
+  it.effect.each(["never acknowledged", "queued"] as const)(
+    "settles a held answer when a %s steer never starts",
+    (acknowledgement) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const { providerTurnId, steerUuid } = yield* startSteeredTurn(
+          harness,
+          `steer-never-starts-${acknowledgement.replaceAll(" ", "-")}`,
+        );
+        if (acknowledgement === "queued") {
+          yield* harness.offerAndWait(
+            steerLifecycle(steerUuid, "queued", "00000000-0000-4000-8000-000000000a51"),
+          );
+        }
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000a52",
+            result: "Ran the three checks.",
+            usage: answerUsage,
+          }),
+        );
+        assert.lengthOf(harness.terminalEvents(), 0);
+        yield* TestClock.adjust("2 minutes");
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.providerTurnId, providerTurnId);
+        assert.equal(terminal.status, "completed");
+        assert.lengthOf(harness.terminalEvents(), 1);
+        assert.deepEqual(turnUsage(harness), {
+          usageScope: "main_agent",
+          usageStatus: "complete",
+          hasSubagents: false,
+          inputTokens: 600 + 500 + 2000,
+          outputTokens: 40,
+          cachedInputTokens: 2000,
+          cacheCreationTokens: 500,
+        });
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect("still closes the query when the CLI rejects the interrupt", () =>
+    Effect.gen(function* () {
+      const closed = yield* Deferred.make<void>();
+      const harness = yield* makeWakeHarnessWithOptions({
+        interrupt: Effect.fail(
+          new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+            method: "interrupt",
+            cause: new Error("Unknown field: cancel_queued"),
+          }),
+        ),
+        close: (sdkMessages) =>
+          Deferred.succeed(closed, undefined).pipe(Effect.andThen(Queue.shutdown(sdkMessages))),
+      });
+      const { providerTurnId, steerUuid } = yield* startSteeredTurn(
+        harness,
+        "steer-interrupt-rejected",
+      );
+      yield* harness.offerAndWait(
+        steerLifecycle(steerUuid, "queued", "00000000-0000-4000-8000-000000000a61"),
+      );
+      yield* harness.runtime.interruptTurn({
+        providerThread: harness.providerThread,
+        providerTurnId,
+      });
+      assert.isTrue(yield* Deferred.isDone(closed));
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.providerTurnId, providerTurnId);
+      assert.equal(terminal.status, "interrupted");
     }).pipe(
       Effect.scoped,
       Effect.provide(
