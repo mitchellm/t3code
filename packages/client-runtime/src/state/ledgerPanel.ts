@@ -4,9 +4,12 @@ import {
   type Ledger,
   type LedgerItem,
   type LedgerItemTask,
+  type ModelSelection,
   type OrchestrationV2Subagent,
+  type ServerProviderModel,
   type TaskStats,
 } from "@t3tools/contracts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import {
   orderLedgerTree,
@@ -18,6 +21,7 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 
+import { formatModelSelectionEffort, REASONING_EFFORT_OPTION_IDS } from "./threadExecution.ts";
 import { deriveLedgerItemTasks, deriveLedgerProgress } from "./threadLedger.ts";
 import type { EnvironmentThreadState } from "./threadState.ts";
 
@@ -36,7 +40,8 @@ export interface LedgerAgentLine {
   /** "running", or "done 1m 12s" once finished: nothing here depends on the clock. */
   readonly statusLabel: string;
   readonly report: string | null;
-  readonly title: string | null;
+  /** The task's title less a leading "Role:", which the line already shows. */
+  readonly label: string | null;
   readonly modelSelection: OrchestrationV2Subagent["modelSelection"];
   readonly startedAt: DateTime.Utc | null;
   readonly completedAt: DateTime.Utc | null;
@@ -106,6 +111,17 @@ const isInScope = (item: LedgerItem) => item.status !== "dropped" && item.status
 const elapsedMs = (from: DateTime.Utc, to: DateTime.Utc) =>
   Math.max(0, DateTime.toEpochMillis(to) - DateTime.toEpochMillis(from));
 
+// Delegations are titled "Worker: label zones 1-2"; the role is already its own column.
+function taskLabel(title: string | null | undefined, role: string | undefined): string | null {
+  const trimmed = title?.trim() ?? "";
+  const prefix = role === undefined ? "" : `${role.toLowerCase()}:`;
+  const label =
+    prefix !== "" && trimmed.toLowerCase().startsWith(prefix)
+      ? trimmed.slice(prefix.length).trim()
+      : trimmed;
+  return label === "" ? null : label;
+}
+
 function agentLine(
   row: ReturnType<typeof deriveLedgerItemTasks>[number],
   record: LedgerTaskRecord | undefined,
@@ -121,7 +137,7 @@ function agentLine(
     tone,
     statusLabel: finishedIn === null ? label : `${label} ${finishedIn}`,
     report: row.report,
-    title: record?.title ?? null,
+    label: taskLabel(record?.title, row.task.role),
     modelSelection: record?.modelSelection,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
@@ -233,20 +249,49 @@ export function formatLedgerPanelCount(count: LedgerPanelCount): string {
     .join(" · ");
 }
 
+/** "Claude Haiku 5.5" reads as "Haiku 5.5" where the provider is plain from context. */
+export function shortModelLabel(modelLabel: string, providerName: string | undefined): string {
+  const prefix = providerName === undefined ? "" : `${providerName.trim()} `;
+  return prefix.trim() !== "" && modelLabel.startsWith(prefix) && modelLabel.length > prefix.length
+    ? modelLabel.slice(prefix.length)
+    : modelLabel;
+}
+
+/**
+ * The effort the task's model options set, named as the provider's catalog names it, or as set
+ * when the catalog does not describe the model. Null when the options set none.
+ */
+export function ledgerAgentEffort(
+  selection: ModelSelection | null | undefined,
+  models: ReadonlyArray<ServerProviderModel>,
+): string | null {
+  if (selection == null) return null;
+  const set = REASONING_EFFORT_OPTION_IDS.map((id) =>
+    getModelSelectionStringOptionValue(selection, id),
+  ).find((value) => value !== undefined && value !== "");
+  if (set === undefined) return null;
+  return formatModelSelectionEffort(selection, models) ?? set;
+}
+
 export interface LedgerAgentCard {
   readonly status: string;
   readonly tone: LedgerAgentTone;
-  /** Running time up to when the card opened, or the total once finished. */
-  readonly time: {
-    readonly label: string;
-    readonly running: boolean;
-    readonly startedAtMs: number;
-  } | null;
+  /**
+   * Running time up to when the card opened, the total once finished, or only when it started
+   * when there is no end to measure to (idle, or its record is gone). Null before it starts.
+   */
+  readonly time:
+    | { readonly kind: "running" | "total"; readonly elapsed: string; readonly startedAtMs: number }
+    | { readonly kind: "started"; readonly startedAtMs: number }
+    | null;
+  /** Null while the stats load. */
   readonly tokens: string | null;
   readonly toolCalls: number | null;
   /** Only while the task runs. */
   readonly activity: string | null;
   readonly workspace: { readonly label: "Worktree" | "Branch"; readonly value: string } | null;
+  /** The task record's, else its thread's: the first delegation records none on the task. */
+  readonly modelSelection: ModelSelection | null;
 }
 
 /**
@@ -259,7 +304,9 @@ export function deriveLedgerAgentCard(
   openedAtMs: number,
 ): LedgerAgentCard {
   const running = line.status !== null && isOrchestrationV2WorkActive(line.status);
-  const startedAtMs = line.startedAt === null ? null : DateTime.toEpochMillis(line.startedAt);
+  // A link whose task record is gone ran once; the link was made when it started.
+  const started = line.startedAt ?? (line.status === null ? line.task.createdAt : null);
+  const startedAtMs = started === null ? null : DateTime.toEpochMillis(started);
   const endMs = running
     ? openedAtMs
     : line.completedAt === null
@@ -270,17 +317,24 @@ export function deriveLedgerAgentCard(
     status: `${statusLabel.charAt(0).toUpperCase()}${statusLabel.slice(1)}`,
     tone: line.tone,
     time:
-      startedAtMs === null || endMs === null
+      startedAtMs === null
         ? null
-        : {
-            label: formatDuration(Math.max(0, endMs - startedAtMs)),
-            running,
-            startedAtMs,
-          },
+        : endMs === null
+          ? { kind: "started", startedAtMs }
+          : {
+              kind: running ? "running" : "total",
+              elapsed: formatDuration(Math.max(0, endMs - startedAtMs)),
+              startedAtMs,
+            },
     tokens:
-      stats?.tokens == null
+      stats == null
         ? null
-        : `${formatTokens(stats.tokens.input + stats.tokens.output)} · ${formatTokens(stats.tokens.input)} in, ${formatTokens(stats.tokens.output)} out`,
+        : stats.tokens !== null
+          ? `${formatTokens(stats.tokens.input + stats.tokens.output)} · ${formatTokens(stats.tokens.input)} in, ${formatTokens(stats.tokens.output)} out`
+          : // Providers report usage as each turn ends, so a first turn still running has none.
+            running
+            ? "Counted when a turn ends"
+            : "Not reported",
     toolCalls: stats?.toolCalls ?? null,
     activity: running ? (stats?.activity ?? null) : null,
     workspace:
@@ -291,6 +345,7 @@ export function deriveLedgerAgentCard(
           : stats.branch !== null
             ? { label: "Branch", value: stats.branch }
             : null,
+    modelSelection: line.modelSelection ?? stats?.modelSelection ?? null,
   };
 }
 

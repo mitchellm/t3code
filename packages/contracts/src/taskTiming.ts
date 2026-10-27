@@ -11,6 +11,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { LedgerItemStatus } from "./ledger.ts";
+import { ModelSelection } from "./modelSelection.ts";
 import { OrchestrationV2RunStatus, OrchestrationV2Subagent } from "./orchestrationV2.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -175,10 +176,12 @@ export const TaskStats = Schema.Struct({
   /** Summed over the thread's provider turns; null when no turn reported usage. */
   tokens: Schema.NullOr(Schema.Struct({ input: NonNegativeInt, output: NonNegativeInt })),
   toolCalls: NonNegativeInt,
-  /** The latest tool call still running; null once none is. */
+  /** The latest tool call still running, else work left running in the background. */
   activity: Schema.NullOr(Schema.String),
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
+  /** The thread's own selection; the task record has none until a follow-up. */
+  modelSelection: ModelSelection,
 });
 export type TaskStats = typeof TaskStats.Type;
 

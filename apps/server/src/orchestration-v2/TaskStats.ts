@@ -1,12 +1,14 @@
 // Fork: the numbers on the ledger's agent card, derived from a delegated task's own thread.
 import type {
   OrchestrationV2AppThread,
+  OrchestrationV2PendingBackgroundTask,
+  OrchestrationV2ProviderThread,
   OrchestrationV2ProviderTurn,
   OrchestrationV2TurnItem,
   TaskStats,
 } from "@t3tools/contracts";
 
-/** The turn items that are a tool call; the service reads only these, so messages stay unread. */
+/** The turn item types that are a tool call; only these are counted, never messages. */
 export const TASK_STATS_TOOL_ITEM_TYPES = [
   "command_execution",
   "file_change",
@@ -15,53 +17,64 @@ export const TASK_STATS_TOOL_ITEM_TYPES = [
   "dynamic_tool",
 ] as const satisfies ReadonlyArray<OrchestrationV2TurnItem["type"]>;
 
-type ToolItem = Extract<
-  OrchestrationV2TurnItem,
-  { readonly type: (typeof TASK_STATS_TOOL_ITEM_TYPES)[number] }
->;
-
-const TOOL_TYPES: ReadonlySet<string> = new Set(TASK_STATS_TOOL_ITEM_TYPES);
-const MAX_ACTIVITY_LENGTH = 160;
-
-const isToolItem = (item: OrchestrationV2TurnItem): item is ToolItem => TOOL_TYPES.has(item.type);
-
-const isLive = (status: OrchestrationV2TurnItem["status"]) =>
-  status === "pending" || status === "running" || status === "waiting";
-
-const firstLine = (value: string | undefined) => value?.trim().split("\n", 1)[0]?.trim() ?? "";
-
-function toolDetail(item: ToolItem): { readonly verb: string; readonly detail: string } {
-  switch (item.type) {
-    case "command_execution":
-      return { verb: "Command", detail: firstLine(item.input) };
-    case "file_change":
-      return { verb: "Edit", detail: item.fileName };
-    case "file_search":
-      return { verb: "Search", detail: firstLine(item.pattern) };
-    case "web_search":
-      return { verb: "Web search", detail: firstLine(item.patterns?.[0]) };
-    case "dynamic_tool":
-      return { verb: item.toolName ?? "Tool", detail: "" };
-  }
+/** The latest tool call still running, as the service's one-row read gives it. */
+export interface TaskStatsLiveTool {
+  readonly type: string;
+  readonly title: string | null;
+  readonly toolName: string | null;
+  /** What the call works on: a command, a file, a pattern or a tool argument. */
+  readonly detail: string | null;
 }
 
-/** "PowerShell · label-zone.ps1 -Zone 47": the tool's title, then what it is working on. */
-function describeActivity(item: ToolItem): string {
-  const { verb, detail } = toolDetail(item);
-  const title = item.title?.trim() || verb;
-  const parts = detail === "" || detail === title ? [title] : [title, detail];
-  const text = parts.join(" · ").replace(/\s+/gu, " ");
+const MAX_ACTIVITY_LENGTH = 160;
+
+const TOOL_VERB: Record<string, string> = {
+  command_execution: "Command",
+  file_change: "Edit",
+  file_search: "Search",
+  web_search: "Web search",
+  dynamic_tool: "Tool",
+};
+
+const BACKGROUND_LABEL: Record<string, string> = {
+  subagent: "Subagent",
+  monitor: "Monitor",
+};
+
+const firstLine = (value: string | null | undefined) =>
+  value?.trim().split("\n", 1)[0]?.trim() ?? "";
+
+/** "PowerShell · Start-Sleep -Seconds 240": what is running, then what it is working on. */
+function describe(name: string, detail: string | null | undefined): string {
+  const line = firstLine(detail);
+  const text = (line === "" || line === name ? name : `${name} · ${line}`).replace(/\s+/gu, " ");
   return text.length > MAX_ACTIVITY_LENGTH
     ? `${text.slice(0, MAX_ACTIVITY_LENGTH - 1).trimEnd()}…`
     : text;
 }
 
+function describeLiveTool(tool: TaskStatsLiveTool): string {
+  const name = tool.title?.trim() || tool.toolName?.trim() || TOOL_VERB[tool.type] || "Tool";
+  return describe(name, tool.detail);
+}
+
+function describeBackground(task: OrchestrationV2PendingBackgroundTask): string {
+  return describe(BACKGROUND_LABEL[task.kind] ?? "Background", task.description);
+}
+
 export function deriveTaskStats(input: {
-  readonly thread: Pick<OrchestrationV2AppThread, "id" | "branch" | "worktreePath">;
+  readonly thread: Pick<
+    OrchestrationV2AppThread,
+    "id" | "branch" | "worktreePath" | "modelSelection"
+  >;
   readonly providerTurns: ReadonlyArray<
     Pick<OrchestrationV2ProviderTurn, "tokenUsage" | "turnTokenUsage">
   >;
-  readonly toolItems: ReadonlyArray<OrchestrationV2TurnItem>;
+  readonly providerThreads: ReadonlyArray<
+    Pick<OrchestrationV2ProviderThread, "pendingBackgroundTasks">
+  >;
+  readonly toolCalls: number;
+  readonly liveTool: TaskStatsLiveTool | null;
 }): TaskStats {
   let reported = false;
   let inputTokens = 0;
@@ -76,22 +89,24 @@ export function deriveTaskStats(input: {
     outputTokens += turnOutput ?? 0;
   }
 
-  let toolCalls = 0;
-  let current: ToolItem | null = null;
-  for (const item of input.toolItems) {
-    if (!isToolItem(item)) continue;
-    toolCalls += 1;
-    if (isLive(item.status) && (current === null || item.ordinal > current.ordinal)) {
-      current = item;
-    }
-  }
+  // A long command the agent moved to the background leaves no live tool call behind, only
+  // the pending task its turn is waiting on.
+  const background = input.providerThreads
+    .flatMap((providerThread) => providerThread.pendingBackgroundTasks ?? [])
+    .at(-1);
 
   return {
     threadId: input.thread.id,
     tokens: reported ? { input: inputTokens, output: outputTokens } : null,
-    toolCalls,
-    activity: current === null ? null : describeActivity(current),
+    toolCalls: input.toolCalls,
+    activity:
+      input.liveTool !== null
+        ? describeLiveTool(input.liveTool)
+        : background === undefined
+          ? null
+          : describeBackground(background),
     branch: input.thread.branch,
     worktreePath: input.thread.worktreePath,
+    modelSelection: input.thread.modelSelection,
   };
 }

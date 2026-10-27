@@ -23,6 +23,8 @@ import {
   deriveLedgerAgentCard,
   deriveLedgerPanel,
   formatLedgerPanelCount,
+  ledgerAgentEffort,
+  shortModelLabel,
   type LedgerAgentLine,
   type LedgerPanelRow,
   type LedgerTaskRecord,
@@ -74,12 +76,12 @@ const link = (name: string, role?: string) => ({
 const record = (
   name: string,
   status: OrchestrationV2Subagent["status"],
-  options: { result?: string; startedAt?: number; completedAt?: number } = {},
+  options: { result?: string; startedAt?: number; completedAt?: number; title?: string } = {},
 ): LedgerTaskRecord => ({
   id: NodeId.make(`task:${name}`),
   status,
   result: options.result ?? null,
-  title: `Task ${name}`,
+  title: options.title ?? `Task ${name}`,
   startedAt: options.startedAt === undefined ? null : at(options.startedAt),
   completedAt: options.completedAt === undefined ? null : at(options.completedAt),
 });
@@ -156,6 +158,7 @@ describe("deriveLedgerPanel grouping", () => {
         item("P", "in_progress"),
         item("Q", "open"),
         item("P1", "open", { parentItemId: id("P") }),
+        item("G", "open", { parentItemId: id("P1") }),
         item("P2", "closed", { parentItemId: id("P") }),
         item("R", "closed"),
         item("R1", "dropped", { parentItemId: id("R"), dropReason: "not needed" }),
@@ -172,6 +175,7 @@ describe("deriveLedgerPanel grouping", () => {
     expect(shape(panel.active)).toEqual([
       ["P", 0],
       ["P1", 1],
+      ["G", 2],
       ["Q", 0],
       ["S2", 0],
       ["Z", 0],
@@ -293,6 +297,55 @@ describe("deriveLedgerPanel agent lines", () => {
     expect(lines[0]?.report).toBe("Parser is in src/parse.ts.");
     expect(lines[1]?.report).toBeNull();
   });
+
+  it("names each line by its task, without the role the line already shows", () => {
+    const labelled = deriveLedgerPanel(
+      ledgerOf([
+        item("W", "in_progress", {
+          tasks: [link("a", "worker"), link("b", "explorer"), link("c", "worker"), link("d")],
+        }),
+      ]),
+      [
+        record("a", "running", { title: "Worker: label zones 1-2" }),
+        record("b", "completed", { title: "Schema check" }),
+        record("c", "running", { title: "worker:" }),
+      ],
+    );
+    expect(labelled.active[0]?.agents.map((line) => line.label)).toEqual([
+      "label zones 1-2",
+      "Schema check",
+      // Nothing is left once the role is gone, and a missing record has no title at all.
+      null,
+      null,
+    ]);
+  });
+});
+
+describe("shortModelLabel", () => {
+  it("drops the provider's name from the front of the model's", () => {
+    expect(shortModelLabel("Claude Haiku 5.5", "Claude")).toBe("Haiku 5.5");
+    expect(shortModelLabel("GPT-5.5 Codex", "Codex")).toBe("GPT-5.5 Codex");
+    // A model named only for its provider keeps the name.
+    expect(shortModelLabel("Claude", "Claude")).toBe("Claude");
+    expect(shortModelLabel("Haiku 5.5", undefined)).toBe("Haiku 5.5");
+  });
+});
+
+describe("ledgerAgentEffort", () => {
+  const selection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-haiku-5-5",
+    options: [{ id: "effort", value: "xhigh" }],
+  };
+
+  it("reads the effort the task's model options set, even without the provider's catalog", () => {
+    expect(ledgerAgentEffort(selection, [])).toBe("xhigh");
+  });
+
+  it("has no effort when the options set none", () => {
+    expect(ledgerAgentEffort({ ...selection, options: [] }, [])).toBeNull();
+    expect(ledgerAgentEffort(null, [])).toBeNull();
+  });
 });
 
 describe("deriveLedgerAgentCard", () => {
@@ -312,6 +365,11 @@ describe("deriveLedgerAgentCard", () => {
     );
     return panel.active[0]!.agents[0]!;
   };
+  const childSelection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-sonnet-5-5",
+    options: [{ id: "effort", value: "high" }],
+  };
   const stats: TaskStats = {
     threadId: ThreadId.make("thread:w"),
     tokens: { input: 160_000, output: 22_000 },
@@ -319,6 +377,7 @@ describe("deriveLedgerAgentCard", () => {
     activity: "PowerShell · label-zone.ps1 -Zone 47",
     branch: "agent/m4-zones-32-62",
     worktreePath: "C:/work/.t3/worktrees/m4",
+    modelSelection: childSelection,
   };
   const opened = DateTime.toEpochMillis(at(430));
 
@@ -326,8 +385,8 @@ describe("deriveLedgerAgentCard", () => {
     const card = deriveLedgerAgentCard(line("running", 30, null), stats, opened);
     expect(card.status).toBe("Running");
     expect(card.time).toEqual({
-      label: "6m 40s",
-      running: true,
+      kind: "running",
+      elapsed: "6m 40s",
       startedAtMs: DateTime.toEpochMillis(at(30)),
     });
     expect(card.activity).toBe("PowerShell · label-zone.ps1 -Zone 47");
@@ -336,8 +395,35 @@ describe("deriveLedgerAgentCard", () => {
   it("gives a finished task its total time and no current activity", () => {
     const card = deriveLedgerAgentCard(line("completed", 0, 72), stats, opened);
     expect(card.status).toBe("Done");
-    expect(card.time).toMatchObject({ label: "1m 12s", running: false });
+    expect(card.time).toMatchObject({ kind: "total", elapsed: "1m 12s" });
     expect(card.activity).toBeNull();
+  });
+
+  it("says when a task started even when it has no end to measure to", () => {
+    // Idle between follow-ups: it ran, but nothing is running now and it never completed.
+    expect(deriveLedgerAgentCard(line("idle", 30, null), null, opened).time).toEqual({
+      kind: "started",
+      startedAtMs: DateTime.toEpochMillis(at(30)),
+    });
+    // The task record is gone, so the link's own time is the best start there is.
+    const gone = deriveLedgerPanel(
+      ledgerOf([item("W", "in_progress", { tasks: [{ ...link("gone"), createdAt: at(12) }] })]),
+      [],
+    ).active[0]!.agents[0]!;
+    expect(deriveLedgerAgentCard(gone, null, opened).time).toEqual({
+      kind: "started",
+      startedAtMs: DateTime.toEpochMillis(at(12)),
+    });
+    expect(deriveLedgerAgentCard(line("pending", null, null), null, opened).time).toBeNull();
+  });
+
+  it("takes the model options from the task's thread when its record has none", () => {
+    expect(deriveLedgerAgentCard(line("running", 30, null), stats, opened).modelSelection).toEqual(
+      childSelection,
+    );
+    expect(
+      deriveLedgerAgentCard(line("running", 30, null), null, opened).modelSelection,
+    ).toBeNull();
   });
 
   it("totals tokens and tool calls and names the worktree's branch", () => {
@@ -353,7 +439,7 @@ describe("deriveLedgerAgentCard", () => {
     expect(sharedCheckout.workspace).toEqual({ label: "Branch", value: "main" });
   });
 
-  it("shows what the client already knows while the stats load or when none were reported", () => {
+  it("shows what the client already knows while the stats load", () => {
     const loading = deriveLedgerAgentCard(line("running", 30, null), null, opened);
     expect(loading).toMatchObject({
       status: "Running",
@@ -362,14 +448,20 @@ describe("deriveLedgerAgentCard", () => {
       activity: null,
       workspace: null,
     });
-    expect(loading.time?.label).toBe("6m 40s");
-    const unreported = deriveLedgerAgentCard(
-      line("completed", 0, 72),
-      { ...stats, tokens: null, toolCalls: 0, branch: null, worktreePath: null },
-      opened,
+    expect(loading.time).toMatchObject({ kind: "running", elapsed: "6m 40s" });
+  });
+
+  it("says why there is no token count yet instead of calling it unreported", () => {
+    const noUsage = { ...stats, tokens: null, toolCalls: 0, branch: null, worktreePath: null };
+    // Providers report usage as each turn ends, so a first turn still running has none.
+    expect(deriveLedgerAgentCard(line("running", 30, null), noUsage, opened).tokens).toBe(
+      "Counted when a turn ends",
     );
-    expect(unreported).toMatchObject({ tokens: null, toolCalls: 0, workspace: null });
-    expect(deriveLedgerAgentCard(line("pending", null, null), null, opened).time).toBeNull();
+    expect(deriveLedgerAgentCard(line("completed", 0, 72), noUsage, opened)).toMatchObject({
+      tokens: "Not reported",
+      toolCalls: 0,
+      workspace: null,
+    });
   });
 });
 

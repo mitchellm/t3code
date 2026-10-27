@@ -1,13 +1,15 @@
 /** Fork: the agents linked to a ledger item, one line each, with a card read when it opens. */
 import {
   deriveLedgerAgentCard,
+  ledgerAgentEffort,
+  shortModelLabel,
+  type LedgerAgentCard,
   type LedgerAgentLine,
   type LedgerAgentTone,
 } from "@t3tools/client-runtime/state/ledger-panel";
 import { resolveSubagentMetadata } from "@t3tools/client-runtime/state/subagent-display";
-import { formatModelSelectionEffort } from "@t3tools/client-runtime/state/thread-execution";
 import type { EnvironmentId, ServerProvider, ThreadId } from "@t3tools/contracts";
-import { ArrowUpRightIcon, ChevronRightIcon } from "lucide-react";
+import { ArrowUpRightIcon, FileTextIcon } from "lucide-react";
 import { useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 
 import { orchestrationEnvironment } from "~/state/orchestration";
@@ -95,14 +97,29 @@ function CardStat({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function cardTime(time: LedgerAgentCard["time"]): string {
+  if (time === null) return "Not started";
+  const at = formatClockTime(time.startedAtMs);
+  switch (time.kind) {
+    case "running":
+      return `${time.elapsed} · since ${at}`;
+    case "total":
+      return `${time.elapsed} total`;
+    case "started":
+      return `Started ${at}`;
+  }
+}
+
 /** Mounted only while open: the stats are read and the time is taken once, here. */
 function LedgerAgentCardBody({
   line,
-  model,
+  modelLabel,
+  provider,
   context,
 }: {
   line: LedgerAgentLine;
-  model: string;
+  modelLabel: string;
+  provider: ServerProvider | undefined;
   context: LedgerAgentContext;
 }) {
   const [openedAtMs] = useState(() => Date.now());
@@ -115,37 +132,35 @@ function LedgerAgentCardBody({
       : null,
   );
   const card = deriveLedgerAgentCard(line, stats.data, openedAtMs);
+  const effort = ledgerAgentEffort(card.modelSelection, provider?.models ?? []);
   const waiting = context.statsSupported && stats.data === null && stats.error === null;
   const unknown = waiting ? "…" : "-";
   return (
     <div className="flex flex-col gap-2 p-3 text-xs">
       <div className="flex min-w-0 items-baseline gap-1.5">
         <span className="shrink-0 text-sm font-semibold">{agentRole(line)}</span>
-        {line.title === null ? null : (
-          <span className="min-w-0 truncate text-muted-foreground">{line.title}</span>
+        {line.label === null ? null : (
+          <span className="min-w-0 truncate text-muted-foreground">{line.label}</span>
         )}
       </div>
       <dl className="m-0 flex flex-col gap-1">
-        <CardStat label="Model">{model}</CardStat>
+        <CardStat label="Model">
+          {effort === null ? modelLabel : `${modelLabel} · ${effort}`}
+        </CardStat>
         <CardStat label="Status">
           <span className={TONE_TEXT[card.tone]}>{card.status}</span>
         </CardStat>
-        <CardStat label="Time">
-          {card.time === null
-            ? "Not started"
-            : card.time.running
-              ? `${card.time.label} · since ${formatClockTime(card.time.startedAtMs)}`
-              : `${card.time.label} total`}
-        </CardStat>
-        <CardStat label="Tokens">{card.tokens ?? (waiting ? "…" : "Not reported")}</CardStat>
+        <CardStat label="Time">{cardTime(card.time)}</CardStat>
+        <CardStat label="Tokens">{card.tokens ?? unknown}</CardStat>
         <CardStat label="Tool calls">{card.toolCalls ?? unknown}</CardStat>
         <CardStat label={card.workspace?.label ?? "Worktree"}>
           {card.workspace?.value ?? unknown}
         </CardStat>
       </dl>
       {card.activity === null ? null : (
-        <p className="m-0 truncate rounded-md bg-muted/60 px-2 py-1.5 font-mono text-2xs">
-          {card.activity}
+        <p className="m-0 flex min-w-0 gap-1.5 rounded-md bg-muted/60 px-2 py-1.5 text-2xs">
+          <span className="shrink-0 text-muted-foreground">Now</span>
+          <span className="min-w-0 truncate font-mono">{card.activity}</span>
         </p>
       )}
       {stats.error === null ? null : (
@@ -199,15 +214,11 @@ function LedgerAgentLineRow({
     (candidate) => candidate.instanceId === line.task.providerInstanceId,
   );
   const { modelLabel } = resolveSubagentMetadata({ model: line.task.model, provider });
-  const effort =
-    line.modelSelection === undefined
-      ? null
-      : formatModelSelectionEffort(line.modelSelection, provider?.models ?? []);
   const openThread = () => context.openThread(line.task.childThreadId);
   const report = line.report;
   return (
     <li className="flex flex-col">
-      <div className="flex min-w-0 items-center gap-1">
+      <div className="flex min-w-0 items-center gap-0.5">
         <PreviewCard open={cardOpen} onOpenChange={setCardOpen}>
           <PreviewCardTrigger
             delay={300}
@@ -223,36 +234,33 @@ function LedgerAgentLineRow({
                   }
                   openThread();
                 }}
-                className="group flex min-w-0 flex-1 cursor-pointer select-none items-center gap-2 rounded-md py-1 ps-1 pe-1.5 text-left text-xs hover:bg-accent/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-popup-open:bg-accent/60"
+                className="flex min-w-0 flex-1 cursor-pointer select-none items-center gap-1.5 overflow-hidden rounded-md py-1 ps-1 pe-1 text-left text-xs hover:bg-accent/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-popup-open:bg-accent/60"
               />
             }
           >
             <span aria-hidden className="w-3 shrink-0 font-mono text-muted-foreground/50">
               {last ? "└" : "├"}
             </span>
-            <span className="w-16 shrink-0 truncate font-medium text-foreground/90">
+            {/* In a narrow panel the task's name gives way first, then the role; status never does. */}
+            <span className="w-14 min-w-0 truncate font-medium text-foreground/90">
               {agentRole(line)}
             </span>
             <span className="min-w-0 flex-1 truncate text-muted-foreground">
-              {modelLabel}
-              {line.title === null ? null : ` · ${line.title}`}
+              {line.label ?? shortModelLabel(modelLabel, provider?.displayName)}
             </span>
             <span
-              className={`inline-flex shrink-0 items-center gap-1 text-2xs ${TONE_TEXT[line.tone]}`}
+              className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-2xs ${TONE_TEXT[line.tone]}`}
             >
               <span aria-hidden className={`size-1.5 rounded-full ${TONE_DOT[line.tone]}`} />
               {line.statusLabel}
             </span>
-            <ArrowUpRightIcon
-              aria-hidden
-              className="size-3 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 pointer-coarse:opacity-100"
-            />
           </PreviewCardTrigger>
           {cardOpen ? (
             <PreviewCardPopup side="left" align="start" className="w-72">
               <LedgerAgentCardBody
                 line={line}
-                model={effort === null ? modelLabel : `${modelLabel} · ${effort}`}
+                modelLabel={modelLabel}
+                provider={provider}
                 context={context}
               />
             </PreviewCardPopup>
@@ -261,12 +269,13 @@ function LedgerAgentLineRow({
         {report === null ? null : (
           <Button
             variant="ghost-muted"
-            size="micro"
+            size="icon-micro"
             aria-expanded={reportOpen}
+            aria-label={reportOpen ? "Hide report" : "Show report"}
+            title={reportOpen ? "Hide report" : "Show report"}
             onClick={() => setReportOpen(!reportOpen)}
           >
-            <ChevronRightIcon aria-hidden className={reportOpen ? "rotate-90" : undefined} />
-            Report
+            <FileTextIcon aria-hidden />
           </Button>
         )}
       </div>

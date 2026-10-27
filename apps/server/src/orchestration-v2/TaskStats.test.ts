@@ -1,72 +1,51 @@
 import { assert, describe, it } from "@effect/vitest";
 import {
-  NodeId,
-  RunId,
+  ProviderInstanceId,
   ThreadId,
-  TurnItemId,
+  type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderTurn,
-  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 
-import { deriveTaskStats } from "./TaskStats.ts";
+import { deriveTaskStats, type TaskStatsLiveTool } from "./TaskStats.ts";
 
 const threadId = ThreadId.make("thread:worker");
-const now = DateTime.makeUnsafe(Date.UTC(2026, 9, 27));
-
-const base = (
-  ordinal: number,
-  status: OrchestrationV2TurnItem["status"],
-  title: string | null,
-) => ({
-  id: TurnItemId.make(`item:${ordinal}`),
-  threadId,
-  runId: RunId.make("run:1"),
-  nodeId: NodeId.make(`node:${ordinal}`),
-  providerThreadId: null,
-  providerTurnId: null,
-  nativeItemRef: null,
-  parentItemId: null,
-  ordinal,
-  status,
-  title,
-  startedAt: now,
-  completedAt: status === "running" ? null : now,
-  updatedAt: now,
-});
-
-const command = (
-  ordinal: number,
-  status: OrchestrationV2TurnItem["status"],
-  input: string,
-  title: string | null = "PowerShell",
-): OrchestrationV2TurnItem => ({
-  ...base(ordinal, status, title),
-  type: "command_execution",
-  input,
-});
-
-const edit = (ordinal: number, status: OrchestrationV2TurnItem["status"], fileName: string) =>
-  ({ ...base(ordinal, status, null), type: "file_change", fileName }) as OrchestrationV2TurnItem;
-
-const message = (ordinal: number): OrchestrationV2TurnItem => ({
-  ...base(ordinal, "running", null),
-  type: "assistant_message",
-  messageId: "message:1" as never,
-  text: "Working on it",
-  streaming: true,
-});
+const modelSelection = {
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  model: "claude-haiku-5-5",
+  options: [{ id: "effort", value: "xhigh" }],
+};
+const thread = {
+  id: threadId,
+  branch: "agent/m4-zones",
+  worktreePath: "C:/work/m4",
+  modelSelection,
+};
 
 const turn = (
   usage: Pick<OrchestrationV2ProviderTurn, "tokenUsage" | "turnTokenUsage">,
 ): Pick<OrchestrationV2ProviderTurn, "tokenUsage" | "turnTokenUsage"> => usage;
 
-const thread = { id: threadId, branch: "agent/m4-zones", worktreePath: "C:/work/m4" };
+const background = (
+  tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+): { readonly pendingBackgroundTasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask> } => ({
+  pendingBackgroundTasks: tasks,
+});
+
+const stats = (
+  input: Partial<Parameters<typeof deriveTaskStats>[0]> & { liveTool?: TaskStatsLiveTool | null },
+) =>
+  deriveTaskStats({
+    thread,
+    providerTurns: [],
+    providerThreads: [],
+    toolCalls: 0,
+    liveTool: null,
+    ...input,
+  });
 
 describe("deriveTaskStats", () => {
   it("totals each turn's tokens, falling back to the context snapshot a turn reported", () => {
-    const stats = deriveTaskStats({
-      thread,
+    const result = stats({
       providerTurns: [
         turn({
           turnTokenUsage: {
@@ -88,64 +67,80 @@ describe("deriveTaskStats", () => {
         // Nothing reported for this turn, so it adds nothing.
         turn({}),
       ],
-      toolItems: [],
     });
-    assert.deepStrictEqual(stats.tokens, { input: 160_000, output: 22_000 });
+    assert.deepStrictEqual(result.tokens, { input: 160_000, output: 22_000 });
   });
 
   it("has no token total when no turn reported usage", () => {
-    const stats = deriveTaskStats({ thread, providerTurns: [turn({})], toolItems: [] });
-    assert.strictEqual(stats.tokens, null);
+    assert.strictEqual(stats({ providerTurns: [turn({})] }).tokens, null);
   });
 
-  it("counts tool calls and nothing else", () => {
-    const stats = deriveTaskStats({
-      thread,
-      providerTurns: [],
-      toolItems: [
-        command(1, "completed", "ls"),
-        edit(2, "completed", "src/a.ts"),
-        message(3),
-        command(4, "failed", "vp test"),
+  it("names a running tool by its tool name and what it is running", () => {
+    // Claude's PowerShell and Bash tools arrive as dynamic tools with no title.
+    const powershell = stats({
+      liveTool: {
+        type: "dynamic_tool",
+        title: null,
+        toolName: "PowerShell",
+        detail: "Start-Sleep -Seconds 240\nWrite-Host done",
+      },
+    });
+    assert.strictEqual(powershell.activity, "PowerShell · Start-Sleep -Seconds 240");
+    const command = stats({
+      liveTool: { type: "command_execution", title: "Bash", toolName: null, detail: "label 47" },
+    });
+    assert.strictEqual(command.activity, "Bash · label 47");
+    const edit = stats({
+      liveTool: { type: "file_change", title: null, toolName: null, detail: "labels/out/47.json" },
+    });
+    assert.strictEqual(edit.activity, "Edit · labels/out/47.json");
+  });
+
+  it("falls back to work left running in the background", () => {
+    const sleeping = stats({
+      providerThreads: [
+        background([]),
+        background([
+          { kind: "command", taskId: "b1", description: "Sleep 240 seconds in background" },
+        ]),
       ],
     });
-    assert.strictEqual(stats.toolCalls, 3);
-  });
-
-  it("names the latest tool call still running as the current activity", () => {
-    const stats = deriveTaskStats({
-      thread,
-      providerTurns: [],
-      toolItems: [
-        command(1, "running", "label-zone.ps1 -Zone 46"),
-        command(2, "completed", "label-zone.ps1 -Zone 45"),
-        command(3, "running", "label-zone.ps1 -Zone 47\nWrite-Host done"),
-        message(4),
+    assert.strictEqual(sleeping.activity, "Background · Sleep 240 seconds in background");
+    const waiting = stats({
+      providerThreads: [
+        background([{ kind: "subagent", taskId: "s1", description: "Label zone 47" }]),
       ],
     });
-    assert.strictEqual(stats.activity, "PowerShell · label-zone.ps1 -Zone 47");
-    const editing = deriveTaskStats({
-      thread,
-      providerTurns: [],
-      toolItems: [edit(5, "running", "labels/out/47.json")],
+    assert.strictEqual(waiting.activity, "Subagent · Label zone 47");
+    // A live tool call says more than the background work it may be waiting on.
+    const both = stats({
+      providerThreads: [background([{ kind: "command", taskId: "b1", description: "sleep" }])],
+      liveTool: { type: "command_execution", title: "Bash", toolName: null, detail: "ls" },
     });
-    assert.strictEqual(editing.activity, "Edit · labels/out/47.json");
+    assert.strictEqual(both.activity, "Bash · ls");
   });
 
-  it("has no current activity once every tool call settled", () => {
-    const stats = deriveTaskStats({
-      thread,
-      providerTurns: [],
-      toolItems: [command(1, "completed", "ls"), command(2, "interrupted", "sleep 100")],
-    });
-    assert.strictEqual(stats.activity, null);
+  it("has no current activity when nothing runs, in a tool or in the background", () => {
+    assert.strictEqual(stats({ providerThreads: [background([])] }).activity, null);
   });
 
-  it("reports the child thread's branch and worktree", () => {
-    const stats = deriveTaskStats({ thread, providerTurns: [], toolItems: [] });
+  it("passes the tool call count and the thread's branch, worktree and model through", () => {
+    const result = stats({ toolCalls: 41 });
     assert.deepStrictEqual(
-      { threadId: stats.threadId, branch: stats.branch, worktreePath: stats.worktreePath },
-      { threadId, branch: "agent/m4-zones", worktreePath: "C:/work/m4" },
+      {
+        threadId: result.threadId,
+        toolCalls: result.toolCalls,
+        branch: result.branch,
+        worktreePath: result.worktreePath,
+        modelSelection: result.modelSelection,
+      },
+      {
+        threadId,
+        toolCalls: 41,
+        branch: "agent/m4-zones",
+        worktreePath: "C:/work/m4",
+        modelSelection,
+      },
     );
   });
 });

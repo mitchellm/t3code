@@ -279,11 +279,13 @@ export function LedgerPanel({ threadRef, ledger }: { threadRef: ScopedThreadRef;
       </div>
       <div className="flex items-baseline gap-2">
         {count.total === 0 && count.dropped === 0 && count.deferred === 0 ? null : (
-          <span className="text-base font-semibold tabular-nums">
+          <span className="shrink-0 text-base font-semibold whitespace-nowrap tabular-nums">
             {count.done} / {count.total}
           </span>
         )}
-        <span className="text-xs text-muted-foreground">{formatLedgerPanelCount(count)}</span>
+        <span className="min-w-0 text-xs text-muted-foreground">
+          {formatLedgerPanelCount(count)}
+        </span>
       </div>
       <div aria-hidden className="mb-1 h-1 overflow-hidden rounded-full bg-secondary">
         <div

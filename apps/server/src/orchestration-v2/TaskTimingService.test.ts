@@ -333,7 +333,16 @@ it.layer(layerTest)("TaskTimingService", (it) => {
             text: "Labelling",
             streaming: true,
           }),
-          turnItem(3, { type: "command_execution", status: "running", input: "label 47" }),
+          turnItem(3, { type: "command_execution", status: "running", input: "label 46" }),
+          // Claude's shell tools arrive as dynamic tools with the command in their input.
+          turnItem(4, {
+            type: "dynamic_tool",
+            status: "running",
+            title: null,
+            toolName: "PowerShell",
+            input: { command: "Start-Sleep -Seconds 240", description: "Sleep for 240 seconds" },
+          }),
+          turnItem(5, { type: "file_change", status: "completed", fileName: "labels/45.json" }),
         ],
         projections.apply,
         { discard: true },
@@ -344,10 +353,11 @@ it.layer(layerTest)("TaskTimingService", (it) => {
       assert.deepEqual(stats, {
         threadId: workerId,
         tokens: null,
-        toolCalls: 2,
-        activity: "Bash · label 47",
+        toolCalls: 4,
+        activity: "PowerShell · Start-Sleep -Seconds 240",
         branch: "agent/stats",
         worktreePath: "/work/stats",
+        modelSelection: { instanceId, model: "opus" },
       });
     }),
   );
