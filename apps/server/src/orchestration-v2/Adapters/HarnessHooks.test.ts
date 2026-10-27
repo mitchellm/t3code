@@ -517,15 +517,39 @@ describe("plan before editing", () => {
 
     current.value = state(ledgerOf([item("L1", "open")]));
     expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
-    // Every item done but the ledger not yet closed is still an open plan.
-    current.value = state(ledgerOf([item("L1", "closed")]));
+    current.value = state(ledgerOf([item("L1", "in_progress")]));
     expect(await fire("PreToolUse", preToolUse("Write"))).toEqual({});
+    // An item awaiting the judge's verdict is still the work in hand.
+    current.value = state(ledgerOf([{ ...item("L1", "in_progress"), judging: true }]));
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
 
     current.value = state(ledgerOf([item("L1", "closed")], { closedAt: at }));
     const reason = await reasonFor(fire, "Edit");
     expect(reason).toContain("closed");
     expect(reason).toContain("ledger_create");
-    expect(reason).toContain("ledger_reopen");
+  });
+
+  it("treats an open ledger with every item finished as no plan for the next work", async () => {
+    const current: Current = {
+      value: state(
+        ledgerOf([
+          item("L1", "closed"),
+          { ...item("L2", "dropped"), dropReason: "Not needed" },
+          { ...item("L3", "deferred"), deferReason: "Later" },
+        ]),
+      ),
+    };
+    const { fire } = gated(current);
+    const decision = decisionOf(await fire("PreToolUse", preToolUse("Edit")));
+    expect(decision?.permissionDecision).toBe("deny");
+    expect(decision?.permissionDecisionReason).toContain("ledger_add_items");
+    expect(decision?.permissionDecisionReason).not.toContain("ledger_create");
+
+    // Adding an item for the new work lifts the gate on the next edit.
+    current.value = state(
+      ledgerOf([item("L1", "closed"), item("L2", "dropped"), item("L4", "open")]),
+    );
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
   });
 
   it("tells a native subagent to report back instead of planning for the thread", async () => {

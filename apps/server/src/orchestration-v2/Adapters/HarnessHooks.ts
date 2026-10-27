@@ -132,18 +132,24 @@ const ledgerFingerprint = (ledger: Ledger) =>
     ledger.items.map((item) => [item.id, item.status, item.evidence, item.dropReason]),
   );
 
+/** An edit is planned only while some item is open or in progress (a judged item stays in progress). */
+const plansCurrentWork = (ledger: Ledger | null) =>
+  ledger !== null && ledger.closedAt === null && ledger.items.some(isOpen);
+
 function planFirstReason(tool: string, ledger: Ledger | null, subagent: boolean): string {
   // The plan is the main agent's to write; a subagent creating the thread's ledger would bypass it.
   if (subagent) {
-    return `This thread has no open task ledger yet, so a subagent's ${tool} is denied until the main agent writes its plan. Stop and report back that the plan comes first.`;
+    return `This thread has no open or in-progress ledger item for this work, so a subagent's ${tool} is denied until the main agent plans it. Stop and report back that the plan comes first.`;
+  }
+  const denied = `Plan before editing is on and`;
+  if (ledger !== null && ledger.closedAt === null) {
+    return `${denied} the task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" has no open or in-progress item, so ${tool} is denied: nothing in the plan covers this work. Add an item for it with ledger_add_items, with what done means, then work it and close it with evidence. Reading and searching stay allowed.`;
   }
   const why =
     ledger === null
       ? "this thread has no task ledger"
       : `its task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" is closed`;
-  const reopen =
-    ledger === null ? "" : " To carry on the same task instead, reopen it with ledger_reopen.";
-  return `Plan before editing is on and ${why}, so ${tool} is denied. Write the plan first with ledger_create: each item with what done means (one item is fine for a small change). If the task earns more structure than solo, propose a loadout with t3_loadout_propose. Then work through the items, closing each with evidence.${reopen} Reading and searching stay allowed.`;
+  return `${denied} ${why}, so ${tool} is denied. Write the plan first with ledger_create: each item with what done means (one item is fine for a small change). If the task earns more structure than solo, propose a loadout with t3_loadout_propose. Then work through the items, closing each with evidence. Reading and searching stay allowed.`;
 }
 
 // The SDK reports in-flight background work at a stop; a subagent there will wake the agent.
@@ -374,13 +380,13 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
                 : `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${tool} is denied (shells too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
             );
           }
-          // Read on every call, so a ledger the agent opens mid-turn lifts the gate on its next edit.
-          // A native subagent's edit is gated too: it is the thread editing, and routing an edit
-          // through Agent is the obvious way around a denial.
+          // Read on every call, so a ledger or item the agent adds mid-turn lifts the gate on its
+          // next edit. A native subagent's edit is gated too: it is the thread editing, and routing
+          // an edit through Agent is the obvious way around a denial.
           if (planGate === undefined || !FILE_EDIT_TOOLS.includes(tool)) return {};
           if ((await planGate.readPlanBeforeEditing(signal)) !== true) return {};
           const state = await planGate.readLedgerState(signal);
-          if (state === undefined || activeLedger(state) !== undefined) return {};
+          if (state === undefined || plansCurrentWork(state.ledger)) return {};
           return deny(planFirstReason(tool, state.ledger, input.agent_id !== undefined));
         },
         (managersGate === undefined ? FILE_EDIT_TOOLS : MANAGER_DENIED_TOOLS).join("|"),

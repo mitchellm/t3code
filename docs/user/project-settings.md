@@ -172,7 +172,7 @@ applies when the project and environment are both on **Inherit**.
 
 Pinned rules are instructions you want an agent to keep following in a long thread, such as "never edit files under `generated/`" or "run the tests before saying a task is done". When a thread's context is compacted, T3 Code gives the agent your rules again word for word, instead of leaving them to the summary.
 
-Write them in **Settings → General → Pinned rules**. With a project selected, the rules apply to that project's threads only; otherwise they apply to every project on the environment, and a project's own rules replace them.
+Write them in **Settings → Threads → Pinned rules**. With a project selected, the rules apply to that project's threads only; otherwise they apply to every project on the environment, and a project's own rules replace them.
 
 Pinned rules work with Claude and Codex threads. Other providers ignore them.
 
