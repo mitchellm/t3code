@@ -15,6 +15,7 @@ import {
   type LedgerAutoContinueDecision,
   partitionLedgerFollowUp,
 } from "@t3tools/shared/taskLedger";
+import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -157,6 +158,25 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   // A delegated task still working wakes this thread when it ends; nudging the agent before then
   // only gets "still waiting" back and soon reads as a stall.
   if (subagents.some((subagent) => isOrchestrationV2WorkActive(subagent.status))) return;
+  // The same holds for the provider's own background subagent: the provider wakes the agent when
+  // it reports. This reads what the composer shows as "Waiting on subagent", the roster and the
+  // timeline row, since a provider may record it without a subagent record here.
+  const { turnItems: liveSubagentItems } = yield* orchestrator.getThreadRecords(
+    input.threadId,
+    ["turnItems"],
+    { turnItemTypes: ["subagent"], turnItemStatuses: ["pending", "running", "waiting"] },
+  );
+  if (
+    derivePendingBackgroundWork({
+      latestRun: run,
+      runs,
+      providerThreads,
+      turnItems: liveSubagentItems,
+      activeProviderThreadId: thread.activeProviderThreadId,
+    }).some((task) => task.kind === "subagent")
+  ) {
+    return;
+  }
   // Agents and the server stop runs too; only a person's Stop says the user wants the work off.
   const userStoppedRunIds = new Set(
     turnItems.flatMap((item) =>
