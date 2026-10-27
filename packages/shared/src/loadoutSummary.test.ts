@@ -20,9 +20,6 @@ describe("summarizeLoadoutRoles", () => {
   const summary = (id: string) => summarizeLoadoutRoles(resolveLoadout(DEFAULT_LOADOUTS, id));
 
   it("says who plans, works and judges in role order, with effort where one is set", () => {
-    expect(summary("planner-workers-judge")).toBe(
-      "Opus xhigh plans · Sonnet works · Opus high judges",
-    );
     expect(summary("opus-blowout")).toBe(
       "Opus xhigh plans · Opus high sub-plans · Opus high explores · Opus high works · Opus high judges",
     );
@@ -33,7 +30,6 @@ describe("summarizeLoadoutRoles", () => {
     expect(summary("haiku-workers")).toBe(
       "Opus xhigh plans · Haiku xhigh works · Opus high judges",
     );
-    expect(summary("read-only-sweep")).toBe("Haiku explores");
   });
 
   it("names the judge's vendor when it is not Claude", () => {

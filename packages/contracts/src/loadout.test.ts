@@ -36,8 +36,6 @@ describe("loadout settings", () => {
     }
     expect(DEFAULT_LOADOUTS.map(({ id }) => id)).toEqual([
       "solo",
-      "planner-workers-judge",
-      "read-only-sweep",
       "opus-blowout",
       "blitz",
       "napalm",

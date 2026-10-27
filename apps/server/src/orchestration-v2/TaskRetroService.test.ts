@@ -58,7 +58,7 @@ const snapshot: ServerProvider = {
 const projectId = ProjectId.make("project:retro");
 const threadId = ThreadId.make("thread:retro-subject");
 // The orchestrator checks a thread's loadout against its own settings, so the built-in one is used.
-const org: Loadout = DEFAULT_LOADOUTS.find(({ id }) => id === "planner-workers-judge")!;
+const org: Loadout = DEFAULT_LOADOUTS.find(({ id }) => id === "haiku-workers")!;
 
 const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
   { name: "task-retro" },

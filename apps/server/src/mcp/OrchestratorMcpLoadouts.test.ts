@@ -134,16 +134,16 @@ it.effect("an agent proposal is recorded with its reason and reported by capabil
     );
 
     const proposed = yield* service.proposeLoadout(scope, {
-      loadoutId: "read-only-sweep",
+      loadoutId: "blitz",
       reason: "two independent modules",
       clientRequestId: "propose-1",
     });
     expect(proposed.loadout.active).toMatchObject({
-      id: "read-only-sweep",
+      id: "blitz",
       setBy: "agent",
       reason: "two independent modules",
     });
-    expect((yield* service.capabilities(scope)).loadout?.active.id).toBe("read-only-sweep");
+    expect((yield* service.capabilities(scope)).loadout?.active.id).toBe("blitz");
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -154,7 +154,7 @@ it.effect("the user's choice outranks a proposal until the user clears it", () =
 
     const refused = yield* Effect.exit(
       service.proposeLoadout(scope, {
-        loadoutId: "read-only-sweep",
+        loadoutId: "blitz",
         reason: "wants more",
         clientRequestId: "propose-refused",
       }),
@@ -167,11 +167,11 @@ it.effect("the user's choice outranks a proposal until the user clears it", () =
 
     yield* userSets(null);
     const accepted = yield* service.proposeLoadout(scope, {
-      loadoutId: "read-only-sweep",
+      loadoutId: "blitz",
       reason: "wants more",
       clientRequestId: "propose-accepted",
     });
-    expect(accepted.loadout.active).toMatchObject({ id: "read-only-sweep", setBy: "agent" });
+    expect(accepted.loadout.active).toMatchObject({ id: "blitz", setBy: "agent" });
   }).pipe(Effect.provide(layerTest)),
 );
 

@@ -811,7 +811,7 @@ const loadoutOf = (threadId: ThreadId) =>
   });
 
 const judged: ThreadLoadout = {
-  id: "planner-workers-judge",
+  id: "haiku-workers",
   reason: "four independent modules",
   setBy: "agent",
 };
@@ -824,7 +824,7 @@ it.effect("a user's loadout choice outranks an agent proposal, which can fill an
     yield* setLoadout(threadId, judged);
     assert.deepEqual(yield* loadoutOf(threadId), judged);
 
-    const user: ThreadLoadout = { id: "read-only-sweep", reason: null, setBy: "user" };
+    const user: ThreadLoadout = { id: "blitz", reason: null, setBy: "user" };
     yield* setLoadout(threadId, user);
     assert.deepEqual(yield* loadoutOf(threadId), user);
 

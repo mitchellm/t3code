@@ -53,7 +53,7 @@ const provider = (instanceId: ProviderInstanceId, models: ReadonlyArray<string>)
 
 describe("resolveLoadout", () => {
   it("returns the named loadout and falls back to solo for an unknown or missing id", () => {
-    expect(resolveLoadout(DEFAULT_LOADOUTS, "read-only-sweep").name).toBe("Read-only sweep");
+    expect(resolveLoadout(DEFAULT_LOADOUTS, "blitz").name).toBe("Blitz");
     expect(resolveLoadout(DEFAULT_LOADOUTS, "deleted-later").id).toBe("solo");
     expect(resolveLoadout(DEFAULT_LOADOUTS, undefined).id).toBe("solo");
     expect(resolveLoadout(DEFAULT_LOADOUTS, null).roles).toEqual({});
@@ -87,8 +87,8 @@ describe("resolveLoadout", () => {
     const forB = resolveProjectSettings(settings, projectB).settings.loadouts;
     expect(forA).toEqual([custom]);
     expect(forB).toEqual(DEFAULT_LOADOUTS);
-    expect(resolveLoadout(forA, "planner-workers-judge").id).toBe("solo");
-    expect(resolveLoadout(forB, "planner-workers-judge").roles.judge).toBeDefined();
+    expect(resolveLoadout(forA, "haiku-workers").id).toBe("solo");
+    expect(resolveLoadout(forB, "haiku-workers").roles.judge).toBeDefined();
   });
 });
 
@@ -107,18 +107,15 @@ describe("withSolo", () => {
 
 describe("loadoutHasJudge", () => {
   it("is true only for a loadout with a judge role", () => {
-    expect(loadoutHasJudge(resolveLoadout(DEFAULT_LOADOUTS, "planner-workers-judge"))).toBe(true);
+    expect(loadoutHasJudge(resolveLoadout(DEFAULT_LOADOUTS, "haiku-workers"))).toBe(true);
     expect(loadoutHasJudge(resolveLoadout(DEFAULT_LOADOUTS, "solo"))).toBe(false);
-    expect(loadoutHasJudge(resolveLoadout(DEFAULT_LOADOUTS, "read-only-sweep"))).toBe(false);
   });
 });
 
 describe("loadoutStructure", () => {
   it("follows the roles when unset, and keeps an explicit managers choice", () => {
     expect(loadoutStructure(resolveLoadout(DEFAULT_LOADOUTS, "solo"))).toBe("solo");
-    expect(loadoutStructure(resolveLoadout(DEFAULT_LOADOUTS, "planner-workers-judge"))).toBe(
-      "workers",
-    );
+    expect(loadoutStructure(resolveLoadout(DEFAULT_LOADOUTS, "haiku-workers"))).toBe("workers");
     const managers: Loadout = {
       id: "managers",
       name: "Managers",
@@ -143,9 +140,9 @@ describe("loadoutStructure", () => {
 
 describe("decideThreadLoadout", () => {
   const user: ThreadLoadout = { id: "solo", reason: null, setBy: "user" };
-  const agent: ThreadLoadout = { id: "read-only-sweep", reason: "just reading", setBy: "agent" };
+  const agent: ThreadLoadout = { id: "blitz", reason: "just reading", setBy: "agent" };
   const proposal: ThreadLoadout = {
-    id: "planner-workers-judge",
+    id: "haiku-workers",
     reason: "four modules",
     setBy: "agent",
   };
@@ -153,7 +150,7 @@ describe("decideThreadLoadout", () => {
   it("lets the user set, replace and clear the loadout whatever stands", () => {
     expect(decideThreadLoadout(undefined, user)).toEqual({ _tag: "set", loadout: user });
     expect(decideThreadLoadout(agent, user)).toEqual({ _tag: "set", loadout: user });
-    expect(decideThreadLoadout(user, { ...user, id: "read-only-sweep" })).toMatchObject({
+    expect(decideThreadLoadout(user, { ...user, id: "blitz" })).toMatchObject({
       _tag: "set",
     });
     expect(decideThreadLoadout(user, null)).toEqual({ _tag: "set", loadout: null });
@@ -211,10 +208,12 @@ describe("loadoutDelegationTarget", () => {
   const providers = [
     provider(claude, ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]),
   ];
-  const org = resolveLoadout(DEFAULT_LOADOUTS, "planner-workers-judge");
+  const org = resolveLoadout(DEFAULT_LOADOUTS, "haiku-workers");
 
   it("resolves a loadout role name to that role's model", () => {
-    expect(loadoutDelegationTarget(org, "worker", providers)).toEqual({
+    expect(
+      loadoutDelegationTarget(resolveLoadout(DEFAULT_LOADOUTS, "blitz"), "worker", providers),
+    ).toEqual({
       providerInstanceId: claude,
       model: "claude-sonnet-5-5",
     });
@@ -224,11 +223,7 @@ describe("loadoutDelegationTarget", () => {
       options: [{ id: "effort", value: "high" }],
     });
     expect(
-      loadoutDelegationTarget(
-        resolveLoadout(DEFAULT_LOADOUTS, "read-only-sweep"),
-        "explorer",
-        providers,
-      ),
+      loadoutDelegationTarget(resolveLoadout(DEFAULT_LOADOUTS, "blitz"), "explorer", providers),
     ).toMatchObject({ model: "claude-haiku-5-5" });
   });
 

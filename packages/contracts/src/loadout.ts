@@ -89,23 +89,6 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
     description: "One agent on the thread's own model. No delegated roles.",
     roles: {},
   },
-  {
-    id: "planner-workers-judge",
-    name: "Planner + workers + judge",
-    description:
-      "A strong planner splits the task, cheaper workers implement, and a separate judge must pass each ledger item before it closes.",
-    roles: {
-      planner: claude("claude-opus-5-5", "xhigh"),
-      worker: claude("claude-sonnet-5-5"),
-      judge: claude("claude-opus-5-5", "high"),
-    },
-  },
-  {
-    id: "read-only-sweep",
-    name: "Read-only sweep",
-    description: "Cheap explorers read and report across the codebase. Nothing is implemented.",
-    roles: { explorer: claude("claude-haiku-5-5") },
-  },
   // Fork presets. Ids are the claudeAgent slugs in the model manifest; on an install without that
   // instance every role degrades to the thread's own model (see loadoutRoleTarget).
   {
