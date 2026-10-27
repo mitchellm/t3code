@@ -342,6 +342,9 @@ it.effect("does nothing when the user stopped a run that still completed", () =>
     });
     yield* completeLatest(threadId);
     assert.equal((yield* autoContinues(threadId)).length, 0);
+    // A user's Stop ends everything: no notice and no unread mark either.
+    assert.deepEqual(yield* stopNotices(threadId), []);
+    assert.isFalse(yield* isMarkedStuck(threadId));
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -895,10 +898,49 @@ it.effect("waits for a running delegated task instead of nudging the agent", () 
   }).pipe(Effect.provide(layerTest)),
 );
 
+/**
+ * A Claude session as stored before its capabilities dropped `blocksStopWithOpenLedger`, which
+ * made auto-continue post a notice for its run instead of following up.
+ */
+const attachSessionThatBlockedStops = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const providerSessionId = ProviderSessionId.make(`provider-session:${threadId}`);
+    const storedContext = {
+      ...CodexProviderCapabilitiesV2.context,
+      blocksStopWithOpenLedger: true,
+    };
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(nextId("event:session")),
+          type: "provider-session.attached",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: providerSessionId,
+            driver: adapter.driver,
+            providerInstanceId: instanceId,
+            status: "ready",
+            cwd: "/workspace",
+            model: null,
+            capabilities: { ...CodexProviderCapabilitiesV2, context: storedContext },
+            createdAt: now,
+            updatedAt: now,
+            lastError: null,
+          },
+        },
+      ],
+    });
+    return providerSessionId;
+  });
+
 /** Ends the latest run on a provider thread whose roster lists `pendingBackgroundTasks`. */
 const runOnProviderThread = (
   threadId: ThreadId,
   pendingBackgroundTasks: OrchestrationV2ProviderThread["pendingBackgroundTasks"] = [],
+  providerSessionId: ProviderSessionId | null = null,
 ) =>
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
@@ -916,7 +958,7 @@ const runOnProviderThread = (
             id: providerThreadId,
             driver: adapter.driver,
             providerInstanceId: instanceId,
-            providerSessionId: null,
+            providerSessionId,
             appThreadId: threadId,
             ownerNodeId: null,
             nativeThreadRef: null,
@@ -1104,17 +1146,19 @@ it.effect("after the in-run gate gives up, follows up and replans before any not
   Effect.gen(function* () {
     const threadId = yield* setup("in-run-gate-gave-up");
     yield* sendUserMessage(threadId);
-    yield* runOnProviderThread(threadId);
+    // This session's run used to get "the agent stopped after repeated in-run nudges" here.
+    const session = yield* attachSessionThatBlockedStops(threadId);
+    yield* runOnProviderThread(threadId, [], session);
     assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), [1]);
     assert.deepEqual(yield* stopNotices(threadId), []);
 
-    yield* runOnProviderThread(threadId);
+    yield* runOnProviderThread(threadId, [], session);
     assert.equal(replanOf((yield* autoContinues(threadId)).at(-1))?.reason, "stalled");
     assert.deepEqual(yield* stopNotices(threadId), []);
     assert.isFalse(yield* isMarkedStuck(threadId));
 
     // Only a replan that moved nothing hands the ledger back.
-    yield* runOnProviderThread(threadId);
+    yield* runOnProviderThread(threadId, [], session);
     assert.equal((yield* autoContinues(threadId)).length, 2);
     const notices = yield* stopNotices(threadId);
     assert.equal(notices.length, 1);

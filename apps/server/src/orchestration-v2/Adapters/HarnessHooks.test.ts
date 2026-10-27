@@ -352,6 +352,18 @@ describe("Stop hook", () => {
     expect(recorded).toEqual([[cron], [], []]);
   });
 
+  it("forgets the crons when a turn ends through StopFailure, which no Stop follows", async () => {
+    const recorded: Array<ReadonlyArray<unknown>> = [];
+    const { fire } = make({
+      ...ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }),
+      onSessionCrons: (crons) => recorded.push(crons),
+    });
+    expect(
+      await fire("StopFailure", { ...base, hook_event_name: "StopFailure", error: "server_error" }),
+    ).toEqual({});
+    expect(recorded).toEqual([[]]);
+  });
+
   it("allows the stop while a watched pull request will wake the thread", async () => {
     const { fire } = make(
       ledgerReader({ value: state(ledgerOf([item("L1", "open")]), { pullRequestWatched: true }) }),

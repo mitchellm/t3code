@@ -449,6 +449,18 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
       }),
     ];
 
+    // An API error or usage limit ends the turn through StopFailure, which carries no crons and no
+    // Stop follows, so the last report would outlive a one-shot that already fired.
+    const { onSessionCrons } = port;
+    if (onSessionCrons !== undefined) {
+      hooks.StopFailure = [
+        matcher(async (input) => {
+          if (input.hook_event_name === "StopFailure") onSessionCrons([]);
+          return {};
+        }),
+      ];
+    }
+
     // Best effort: the SDK has no PreCompact output field, and whether Claude Code folds this
     // message into the compaction instructions is unverified. SessionStart(compact) above is the
     // guaranteed path, since it re-sends the ledger after the summary either way.

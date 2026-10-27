@@ -7313,6 +7313,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   input.context.input.providerThread.nativeThreadRef?.nativeId ?? null;
                 if (nativeThreadId !== null) {
                   if (input.status !== "completed") {
+                    // Fork: forget the crons too: a dead CLI took them along, and no Stop hook
+                    // reported them for a turn the user stopped or that failed.
+                    sessionWaits.recordCrons(nativeThreadId, []);
                     yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
                     yield* clearNativeThreadTaskIdSet(
                       wakeEligibleBackgroundTasksByNativeThread,
