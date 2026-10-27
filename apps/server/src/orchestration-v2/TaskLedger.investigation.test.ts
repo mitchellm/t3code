@@ -12,10 +12,13 @@ import {
 import { investigationBudgetUse, investigationLanes } from "@t3tools/shared/investigation";
 import { applyLedgerEvent } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
 import {
   APPROACHES_ITEM_ID,
+  findInvestigationDelegationRefusal,
+  type InvestigationChainRecords,
   investigationDelegationProblem,
   investigationEffects,
 } from "./Investigation.ts";
@@ -223,23 +226,107 @@ describe("investigation state machine", () => {
     assert.strictEqual(investigationEffects({ commandId, threadId }, planned).length, 1);
   });
 
-  it("refuses approaches beyond the parallel limit until one is refuted", () => {
-    const addVariant: LedgerCommand = {
-      type: "ledger.item.add",
-      commandId,
-      threadId,
-      ledgerId,
-      items: [
-        { id: id("d"), title: "Approach d", acceptance: "", parentItemId: APPROACHES_ITEM_ID },
-      ],
-    };
+  const addVariant: LedgerCommand = {
+    type: "ledger.item.add",
+    commandId,
+    threadId,
+    ledgerId,
+    items: [{ id: id("d"), title: "Approach d", acceptance: "", parentItemId: APPROACHES_ITEM_ID }],
+  };
+  const agentUpdate = (
+    name: string,
+    fields: Partial<Extract<LedgerCommand, { type: "ledger.item.update" }>>,
+  ): LedgerCommand => ({
+    type: "ledger.item.update",
+    commandId,
+    threadId,
+    ledgerId,
+    itemId: id(name),
+    createdBy: "agent",
+    ...fields,
+  });
+
+  it("the cap counts every active approach, refuted ones too, until a refuted one is dropped", () => {
     const full = running();
     assert.isTrue(
       Result.isFailure(planLedgerCommand({ command: addVariant, ledger: full, now: at(6) })),
     );
     const refuted = step(full, recordVerdict("a", "fail"), at(7)).ledger;
     assert.isTrue(
-      Result.isSuccess(planLedgerCommand({ command: addVariant, ledger: refuted, now: at(8) })),
+      Result.isFailure(planLedgerCommand({ command: addVariant, ledger: refuted, now: at(8) })),
+      "a refuted approach handed back in progress still holds its slot",
+    );
+    // Dropping a refuted approach claims nothing, so the agent may do it on the judged ledger.
+    const dropped = step(
+      refuted,
+      agentUpdate("a", { status: "dropped", dropReason: "Refuted: the repro still fails." }),
+      at(9),
+    ).ledger;
+    assert.isTrue(
+      Result.isSuccess(planLedgerCommand({ command: addVariant, ledger: dropped, now: at(10) })),
+    );
+    // An approach still being explored or judged is not the agent's to drop.
+    const judging = planLedgerCommand({
+      command: agentUpdate("a", { status: "dropped", dropReason: "giving up" }),
+      ledger: full,
+      now: at(9),
+    });
+    assert.isTrue(Result.isFailure(judging));
+  });
+
+  it("while running, the agent cannot close the ledger, replace it, or move the Approaches item", () => {
+    // Started, no approaches yet: the Approaches item has no unfinished sub-items in the way.
+    const fresh = step(undefined, startCommand, start, true).ledger;
+    const refusedForAgent = (command: LedgerCommand, ledger: Ledger) =>
+      Result.isFailure(planLedgerCommand({ command, ledger, now: at(6) }));
+    assert.isTrue(
+      refusedForAgent(agentUpdate("approaches", { status: "closed", evidence: "done" }), fresh),
+      "status change on the server-managed Approaches item",
+    );
+    // The escape the ordinary judge would open: Approaches closed, then the ledger.
+    const approachesClosed: Ledger = {
+      ...fresh,
+      items: fresh.items.map((item) =>
+        item.id === APPROACHES_ITEM_ID
+          ? { ...item, status: "closed", evidence: "done", closedAt: at(5) }
+          : item,
+      ),
+    };
+    assert.isTrue(
+      refusedForAgent(
+        { type: "ledger.close", commandId, threadId, ledgerId, createdBy: "agent" },
+        approachesClosed,
+      ),
+    );
+    const replacement: LedgerCommand = {
+      type: "ledger.create",
+      commandId,
+      threadId,
+      ledgerId: LedgerId.make("ledger:escape"),
+      title: "Something else",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: [],
+      createdBy: "agent",
+    };
+    assert.isTrue(refusedForAgent(replacement, { ...approachesClosed, closedAt: at(6) }));
+  });
+
+  it("after it ends, the agent cannot reopen the ledger; the user can", () => {
+    const solved = step(running(), recordVerdict("a", "pass"), at(4)).ledger;
+    const reopen = (createdBy?: "agent" | "user"): LedgerCommand => ({
+      type: "ledger.reopen",
+      commandId,
+      threadId,
+      ledgerId,
+      ...(createdBy === undefined ? {} : { createdBy }),
+    });
+    assert.isTrue(
+      Result.isFailure(planLedgerCommand({ command: reopen("agent"), ledger: solved, now: at(5) })),
+    );
+    assert.isTrue(
+      Result.isSuccess(planLedgerCommand({ command: reopen(), ledger: solved, now: at(5) })),
     );
   });
 
@@ -332,18 +419,36 @@ describe("investigation state machine", () => {
     assert.isTrue(Result.isFailure(moveOut), "freeing a slot by moving one out");
   });
 
-  it("delegate_task is refused once the investigation has ended, and allowed while it runs", () => {
+  it("delegate_task is refused once the investigation has ended, even on a reopened ledger", () => {
     const thesis = running();
-    assert.strictEqual(investigationDelegationProblem(thesis), undefined);
+    assert.strictEqual(
+      investigationDelegationProblem({ ledger: thesis, activeWorkers: 0 }),
+      undefined,
+    );
     const solved = step(thesis, recordVerdict("a", "pass"), at(4)).ledger;
-    assert.include(investigationDelegationProblem(solved) ?? "", "has ended (solved");
-    // Reopening the ledger hands the thread back to ordinary work.
+    assert.include(
+      investigationDelegationProblem({ ledger: solved, activeWorkers: 0 }) ?? "",
+      "has ended (solved",
+    );
+    // Reopening does not revive the investigation, so its workers stay stopped.
     const reopened = step(
       solved,
       { type: "ledger.reopen", commandId, threadId, ledgerId },
       at(5),
     ).ledger;
-    assert.strictEqual(investigationDelegationProblem(reopened), undefined);
+    assert.isDefined(investigationDelegationProblem({ ledger: reopened, activeWorkers: 0 }));
+  });
+
+  it("delegate_task refuses a worker beyond the parallel limit while it runs", () => {
+    const thesis = running();
+    assert.strictEqual(
+      investigationDelegationProblem({ ledger: thesis, activeWorkers: 2 }),
+      undefined,
+    );
+    assert.include(
+      investigationDelegationProblem({ ledger: thesis, activeWorkers: 3 }) ?? "",
+      "at most 3",
+    );
   });
 
   it("only a refuter's pass solves it: a plain pass on an approach item does not", () => {
@@ -372,4 +477,59 @@ describe("investigation state machine", () => {
     ).ledger;
     assert.strictEqual(closed.investigation?.status, "running");
   });
+
+  const chainLink = (
+    ledger: Ledger | undefined,
+    parentThreadId: ThreadId | null,
+    subagents: InvestigationChainRecords["subagents"] = [],
+  ): InvestigationChainRecords => ({
+    thread: {
+      lineage: {
+        parentThreadId,
+        relationshipToParent: parentThreadId === null ? null : "subagent",
+        rootThreadId: threadId,
+      },
+    },
+    ledger,
+    subagents,
+  });
+
+  it.effect("a worker's worker is refused once the root investigation has ended", () =>
+    Effect.gen(function* () {
+      const child = ThreadId.make("thread:worker");
+      const grandchild = ThreadId.make("thread:sub-worker");
+      const solved = step(running(), recordVerdict("a", "pass"), at(4)).ledger;
+      const chain: Record<string, InvestigationChainRecords> = {
+        [threadId]: chainLink(solved, null),
+        [child]: chainLink(undefined, threadId),
+        [grandchild]: chainLink(undefined, child),
+      };
+      const refusal = yield* findInvestigationDelegationRefusal(grandchild, (id) =>
+        Effect.succeed(chain[id]!),
+      );
+      assert.include(refusal ?? "", "has ended (solved");
+      // While it runs, a worker may start its own helpers; only the root's cap applies there.
+      const live: Record<string, InvestigationChainRecords> = {
+        ...chain,
+        [threadId]: chainLink(running(), null),
+      };
+      assert.strictEqual(
+        yield* findInvestigationDelegationRefusal(grandchild, (id) => Effect.succeed(live[id]!)),
+        undefined,
+      );
+    }),
+  );
+
+  it.effect("the investigation thread's cap counts running workers and exempts judges", () =>
+    Effect.gen(function* () {
+      const worker = { origin: "app_owned", role: "worker", status: "running" } as const;
+      const judge = { origin: "app_owned", role: "judge", status: "running" } as const;
+      const withChildren = (subagents: InvestigationChainRecords["subagents"]) =>
+        findInvestigationDelegationRefusal(threadId, () =>
+          Effect.succeed(chainLink(running(), null, subagents)),
+        );
+      assert.strictEqual(yield* withChildren([worker, worker, judge, judge]), undefined);
+      assert.include((yield* withChildren([worker, worker, worker, judge])) ?? "", "at most 3");
+    }),
+  );
 });

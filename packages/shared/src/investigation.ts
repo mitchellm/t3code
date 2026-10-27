@@ -35,12 +35,15 @@ export function investigationLanes(ledger: Ledger): ReadonlyArray<ApproachLane> 
 }
 
 /**
- * Approaches still being worked or judged; what the parallel cap counts. A refuted approach is
- * left out: the agent cannot drop work in progress on a judged ledger, so its variant must fit.
+ * Approaches that still hold a slot under the parallel cap: every open or in-progress one,
+ * refuted ones included. A refuted approach frees its slot only when it is dropped.
  */
 export const isLiveApproach = (item: LedgerItem) =>
-  (item.status === "open" || item.status === "in_progress") &&
-  approachLaneStatus(item) !== "refuted";
+  item.status === "open" || item.status === "in_progress";
+
+/** Handed back by the refuter and not judging again: the agent may drop it, claiming nothing. */
+export const isRefutedApproach = (investigation: LedgerInvestigation, item: LedgerItem) =>
+  isApproachItem(investigation, item) && approachLaneStatus(item) === "refuted";
 
 export const investigationDeadlineMs = (investigation: LedgerInvestigation): number | null =>
   investigation.budget.minutes === undefined

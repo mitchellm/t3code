@@ -265,6 +265,7 @@ const make = Effect.gen(function* () {
           checkpoints: input.checkpoints ?? [],
           winConditions: input.winConditions ?? [],
           items: input.items,
+          createdBy: "agent",
         }),
       (ledger) => ledger !== undefined && ledger.closedAt === null,
     );
@@ -363,7 +364,7 @@ const make = Effect.gen(function* () {
       "close",
       scope,
       input,
-      (common) => ({ type: "ledger.close", ...common }),
+      (common) => ({ type: "ledger.close", ...common, createdBy: "agent" }),
       (ledger) => ledger.closedAt !== null,
     );
   });
@@ -376,7 +377,7 @@ const make = Effect.gen(function* () {
       "reopen",
       scope,
       input,
-      (common) => ({ type: "ledger.reopen", ...common }),
+      (common) => ({ type: "ledger.reopen", ...common, createdBy: "agent" }),
       (ledger) => ledger.closedAt === null,
     );
   });

@@ -84,8 +84,8 @@ export function kickoffText(input: {
     `1. Propose up to ${n} distinct approaches. Add each as a ledger item under the item "${APPROACHES_ITEM_ID}" (ledger_add_items with parentItemId "${APPROACHES_ITEM_ID}"): the title names the approach, the acceptance says what it would show.`,
     '2. Work each approach in its own delegated child: delegate_task with role "worker", in the background, one per approach. Ask each to come back with a thesis and the evidence for it.',
     "3. When a child reports a thesis, close its approach item with the thesis and evidence as the evidence. The server's refuter then judges it against the criteria above.",
-    "4. A FAIL hands the item back with the refutation. Either close it again with stronger evidence, or add a variant as a new approach item; refuted approaches do not count toward the limit.",
-    "5. The first thesis that passes solves the investigation: the server stops every other child and asks you for the report. Do not close the Approaches item yourself.",
+    "4. A FAIL hands the item back with the refutation. Either close it again with stronger evidence, or drop it (with the refutation as the reason) to free its slot and add a variant as a new approach item. Every open or in-progress approach counts toward the limit.",
+    "5. The first thesis that passes solves the investigation: the server stops every other child and asks you for the report. The server manages the Approaches item and the ledger: do not close them or start another ledger.",
   ].join("\n");
 }
 

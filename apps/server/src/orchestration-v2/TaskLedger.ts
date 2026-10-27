@@ -9,6 +9,7 @@ import type {
   OrchestrationV2InternalCommand,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import { isRefutedApproach } from "@t3tools/shared/investigation";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
@@ -499,12 +500,19 @@ function planCoreLedgerCommand(input: {
       }
       // On a judged ledger, work the agent started ends only through the judge; setting it aside
       // is the user's call. Deferring or dropping work it never started stays open to it.
+      // Fork: dropping a refuted investigation approach claims nothing, so the agent may, to make
+      // room for a variant under the parallel cap.
+      const dropsRefutedApproach =
+        target === "dropped" &&
+        ledger.investigation?.status === "running" &&
+        isRefutedApproach(ledger.investigation, item);
       if (
         command.createdBy === "agent" &&
         requiresJudge &&
         changesStatus &&
         item.status === "in_progress" &&
-        (target === "deferred" || target === "dropped" || target === "open")
+        (target === "deferred" || target === "dropped" || target === "open") &&
+        !dropsRefutedApproach
       ) {
         return reject(
           `Item ${item.id} is in progress on a judged ledger. Close it with evidence for the judge, or ask the user to defer or drop it.`,

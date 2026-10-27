@@ -1,13 +1,17 @@
 import {
   type CommandId,
+  isOrchestrationV2WorkActive,
   type Ledger,
   type LedgerInvestigation,
   type LedgerItem,
   LedgerItemId,
+  type OrchestrationV2AppThread,
+  type OrchestrationV2Subagent,
   type ThreadId,
 } from "@t3tools/contracts";
 import { isApproachItem, isLiveApproach } from "@t3tools/shared/investigation";
 import type * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
 import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
@@ -225,6 +229,18 @@ export function investigationCommandProblem(
 ): string | undefined {
   const investigation = ledger?.investigation;
   if (ledger === undefined || investigation === undefined) return undefined;
+  const byAgent = "createdBy" in command && command.createdBy === "agent";
+  const running = investigation.status === "running";
+  // The investigation decides when its ledger ends; the agent cannot end, replace or revive it.
+  if (byAgent && running && command.type === "ledger.close") {
+    return "The investigation closes its own ledger when an approach passes the refuter or the budget runs out. Keep working the approaches, or ask the user to stop it.";
+  }
+  if (byAgent && running && command.type === "ledger.create") {
+    return "An investigation is running on this thread. Work its approaches; a new ledger would replace it.";
+  }
+  if (byAgent && !running && command.type === "ledger.reopen") {
+    return `This ledger's investigation has ended (${investigation.status}). Only the user can reopen it.`;
+  }
   const live = () =>
     ledger.items.filter((item) => isApproachItem(investigation, item) && isLiveApproach(item))
       .length;
@@ -246,6 +262,15 @@ export function investigationCommandProblem(
   if (command.type !== "ledger.item.update") return undefined;
   const item = ledger.items.find(({ id }) => id === command.itemId);
   if (item === undefined) return undefined;
+  if (
+    byAgent &&
+    running &&
+    item.id === investigation.approachesItemId &&
+    command.status !== undefined &&
+    command.status !== item.status
+  ) {
+    return `The server manages the ${investigation.approachesItemId} item; it closes when an approach passes the refuter.`;
+  }
   if (command.parentItemId !== undefined) {
     if (item.id === investigation.approachesItemId) {
       return `The ${investigation.approachesItemId} item holds the investigation's approaches and cannot move.`;
@@ -368,15 +393,69 @@ export function followInvestigation(
 }
 
 /**
- * Why `delegate_task` refuses on a thread whose investigation has ended, while its ledger is still
- * the closed investigation ledger (a reopened or replaced ledger lifts it).
+ * Why `delegate_task` refuses a new worker on an investigation thread. An ended investigation
+ * takes none, whatever its ledger's open state (a reopen does not revive it); a running one takes
+ * no more than its parallel limit. `activeWorkers` counts running non-judge children; judges are
+ * exempt, as are workers of workers, which this thread's own cap does not see.
  */
-export function investigationDelegationProblem(ledger: Ledger | undefined): string | undefined {
-  const investigation = ledger?.investigation;
-  if (ledger === undefined || investigation === undefined) return undefined;
-  if (investigation.status === "running" || ledger.closedAt === null) return undefined;
-  return `This thread's investigation has ended (${investigation.status}${investigation.endReason === undefined ? "" : `: ${investigation.endReason}`}), and its workers were stopped. Do not start new ones; write the report, or ask the user before starting new work.`;
+export function investigationDelegationProblem(input: {
+  readonly ledger: Ledger | undefined;
+  readonly activeWorkers: number;
+}): string | undefined {
+  const investigation = input.ledger?.investigation;
+  if (investigation === undefined) return undefined;
+  if (investigation.status !== "running") {
+    return `This thread's investigation has ended (${investigation.status}${investigation.endReason === undefined ? "" : `: ${investigation.endReason}`}), and its workers were stopped. Do not start new ones; write the report, or ask the user before starting new work.`;
+  }
+  if (input.activeWorkers >= investigation.parallelApproaches) {
+    return `The investigation runs at most ${investigation.parallelApproaches} workers at once and ${input.activeWorkers} are running. Wait for one to finish before starting another.`;
+  }
+  return undefined;
 }
+
+/** How far up the subagent chain the check looks; deeper delegation trees are not expected. */
+const MAX_INVESTIGATION_DEPTH = 8;
+
+/** The records the walk reads per thread. */
+export interface InvestigationChainRecords {
+  readonly thread: Pick<OrchestrationV2AppThread, "lineage">;
+  readonly ledger?: Ledger | undefined;
+  readonly subagents: ReadonlyArray<Pick<OrchestrationV2Subagent, "origin" | "role" | "status">>;
+}
+
+/**
+ * Why `delegate_task` refuses the caller a new worker: its own investigation caps its running
+ * workers, and walking up the subagent chain, an ended investigation refuses its workers' workers
+ * too, so stopping the run cannot be outlived by a grandchild.
+ */
+export const findInvestigationDelegationRefusal = Effect.fn("Investigation.findDelegationRefusal")(
+  function* <E>(
+    callerThreadId: ThreadId,
+    read: (threadId: ThreadId) => Effect.Effect<InvestigationChainRecords, E>,
+  ): Effect.fn.Return<string | undefined, E> {
+    let threadId: ThreadId | null = callerThreadId;
+    const visited = new Set<ThreadId>();
+    while (threadId !== null && !visited.has(threadId) && visited.size < MAX_INVESTIGATION_DEPTH) {
+      visited.add(threadId);
+      const records: InvestigationChainRecords = yield* read(threadId);
+      const { thread, ledger, subagents } = records;
+      const activeWorkers =
+        threadId === callerThreadId
+          ? subagents.filter(
+              (task) =>
+                task.origin === "app_owned" &&
+                task.role !== "judge" &&
+                isOrchestrationV2WorkActive(task.status),
+            ).length
+          : 0;
+      const problem = investigationDelegationProblem({ ledger, activeWorkers });
+      if (problem !== undefined) return problem;
+      threadId =
+        thread.lineage.relationshipToParent === "subagent" ? thread.lineage.parentThreadId : null;
+    }
+    return undefined;
+  },
+);
 
 /** Ending an investigation stops every delegated task under the thread, committed with the end. */
 export function investigationEffects(

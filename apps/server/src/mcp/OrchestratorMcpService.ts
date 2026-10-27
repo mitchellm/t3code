@@ -129,7 +129,7 @@ import {
   startBackgroundJudgement,
 } from "./LedgerJudgement.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
-import { investigationDelegationProblem } from "../orchestration-v2/Investigation.ts";
+import { findInvestigationDelegationRefusal } from "../orchestration-v2/Investigation.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -2041,6 +2041,21 @@ const make = Effect.gen(function* () {
   });
 
   /**
+   * Fork: why an investigation forbids this thread a new delegated worker. The caller's own
+   * investigation caps its running workers; up the subagent chain, an ended investigation refuses
+   * its workers' workers too, so stopping the run cannot be outlived by a grandchild.
+   */
+  const investigationDelegationRefusal = Effect.fn(
+    "OrchestratorMcpService.investigationDelegationRefusal",
+  )(function* (callerThreadId: ThreadId) {
+    return yield* findInvestigationDelegationRefusal(callerThreadId, (threadId) =>
+      threadManagement
+        .getThreadRecords(threadId, ["ledger", "subagents"])
+        .pipe(Effect.mapError(threadManagementFailure)),
+    );
+  });
+
+  /**
    * The caller the server judges as: the thread itself, under a namespace of its own so its
    * command ids never collide with an agent's, matching the thread's active run when it has one.
    */
@@ -2434,13 +2449,10 @@ const make = Effect.gen(function* () {
         operation,
       });
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
-      // Fork: an ended investigation's workers were stopped on purpose; do not start more.
+      // Fork: an investigation bounds its workers; judges are exempt.
       if (!isRetryOfAcceptedDelegation && operation !== JUDGE_DELEGATION_OPERATION) {
-        const { ledger } = yield* threadManagement
-          .getThreadRecords(scope.thread.threadId, ["ledger"])
-          .pipe(Effect.mapError(threadManagementFailure));
-        const ended = investigationDelegationProblem(ledger);
-        if (ended !== undefined) return yield* failure("invalid_request", ended);
+        const refused = yield* investigationDelegationRefusal(scope.thread.threadId);
+        if (refused !== undefined) return yield* failure("invalid_request", refused);
       }
       // An explicit target always wins; the role only picks a default.
       const target = yield* resolveTargetRechecking({
