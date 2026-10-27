@@ -46,6 +46,7 @@ import {
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import {
+  OrchestratorDispatchError,
   OrchestratorProjectionError,
   OrchestratorThreadAboveModeLimitError,
 } from "../orchestration-v2/Orchestrator.ts";
@@ -1675,7 +1676,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       role: "explorer",
       status: "running",
       result: null,
-      startedAt: null,
+      startedAt: DateTime.makeUnsafe("2026-10-27T01:00:00.000Z"),
       completedAt: null,
     };
 
@@ -1683,6 +1684,10 @@ describe("OrchestratorMcpService provider resolution", () => {
     const delegateOnLedger = (input: {
       readonly ledgerItemId?: string;
       readonly parentLedger?: Ledger;
+      /** The delegation was already accepted, so this call replays it. */
+      readonly retry?: boolean;
+      /** The ledger refuses the link with this reason. */
+      readonly linkRejection?: string;
     }) =>
       Effect.gen(function* () {
         const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationV2ServerCommand>>([]);
@@ -1690,7 +1695,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         const layerDependencies = Layer.mergeAll(
           NodeServices.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
-            hasReceipt: () => Effect.succeed(false),
+            hasReceipt: () => Effect.succeed(input.retry === true),
             getThreadRecords: (threadId) =>
               Effect.succeed(
                 threadId === parentThreadId
@@ -1704,23 +1709,31 @@ describe("OrchestratorMcpService provider resolution", () => {
             dispatch: (command) =>
               Ref.update(dispatched, (commands) => [...commands, command]).pipe(
                 Effect.andThen(
-                  Effect.sync(() => {
-                    delegated = true;
-                  }),
+                  command.type === "ledger.item.task.link" && input.linkRejection !== undefined
+                    ? Effect.fail(
+                        new OrchestratorDispatchError({
+                          commandId: command.commandId,
+                          commandType: command.type,
+                          cause: input.linkRejection,
+                        }),
+                      )
+                    : Effect.sync(() => {
+                        delegated = true;
+                        return {
+                          sequence: 1,
+                          storedEvents:
+                            command.type === "delegated_task.request"
+                              ? [
+                                  {
+                                    sequence: 1,
+                                    commandId: null,
+                                    event: { type: "subagent.updated", payload: task },
+                                  },
+                                ]
+                              : [],
+                        } as never;
+                      }),
                 ),
-                Effect.as({
-                  sequence: 1,
-                  storedEvents:
-                    command.type === "delegated_task.request"
-                      ? [
-                          {
-                            sequence: 1,
-                            commandId: null,
-                            event: { type: "subagent.updated", payload: task },
-                          },
-                        ]
-                      : [],
-                } as never),
               ),
           }),
           providerRegistryLayer([
@@ -1757,6 +1770,8 @@ describe("OrchestratorMcpService provider resolution", () => {
       Effect.gen(function* () {
         const { exit, commands } = yield* delegateOnLedger({ ledgerItemId: "L1" });
         assert.isTrue(Exit.isSuccess(exit));
+        // Linked as asked, so the result carries no note about it.
+        assert.notProperty(Exit.isSuccess(exit) ? exit.value : {}, "ledgerLink");
         assert.deepEqual(
           commands.map(({ type }) => type),
           ["delegated_task.request", "ledger.item.task.link"],
@@ -1807,6 +1822,55 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.include((error as OrchestratorMcpFailure).message, message);
           assert.deepEqual(commands, [], itemId);
         }
+      }),
+    );
+
+    it.effect("tells the agent when the ledger refuses the link after the task started", () =>
+      Effect.gen(function* () {
+        const { exit, commands } = yield* delegateOnLedger({
+          ledgerItemId: "L1",
+          linkRejection: "Item L1 is closed. Reopen it before delegating work on it.",
+        });
+        // The task runs either way; the result says why it is not on the item.
+        assert.isTrue(Exit.isSuccess(exit));
+        assert.equal(
+          Exit.isSuccess(exit) ? exit.value.ledgerLink : undefined,
+          "rejected: Item L1 is closed. Reopen it before delegating work on it.",
+        );
+        assert.deepEqual(
+          commands.map(({ type }) => type),
+          ["delegated_task.request", "ledger.item.task.link"],
+        );
+      }),
+    );
+
+    it.effect("never attaches a retried task to a ledger that replaced the one it was given", () =>
+      Effect.gen(function* () {
+        const replacement: Ledger = {
+          ...ledger,
+          id: LedgerId.make("ledger:mcp-providers-replacement"),
+          createdAt: DateTime.makeUnsafe("2026-10-27T02:00:00.000Z"),
+        };
+        const { exit, commands } = yield* delegateOnLedger({
+          ledgerItemId: "L1",
+          parentLedger: replacement,
+          retry: true,
+        });
+        assert.isTrue(Exit.isSuccess(exit));
+        assert.include(
+          (Exit.isSuccess(exit) ? exit.value.ledgerLink : undefined) ?? "",
+          "rejected: this thread's ledger was replaced after the task started",
+        );
+        assert.deepEqual(
+          commands.map(({ type }) => type),
+          ["delegated_task.request"],
+        );
+        // A retry against the ledger it was given still links.
+        const same = yield* delegateOnLedger({ ledgerItemId: "L1", retry: true });
+        assert.deepEqual(
+          same.commands.map(({ type }) => type),
+          ["delegated_task.request", "ledger.item.task.link"],
+        );
       }),
     );
   });

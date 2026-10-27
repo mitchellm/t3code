@@ -803,6 +803,19 @@ describe("loadout context", () => {
     );
   });
 
+  it("gives a solo-structure loadout no fan-out, keeping only its judge", async () => {
+    const { fire } = withLoadout({
+      value: { ...oversightLoadout, name: "Solo judged", structure: "solo" },
+    });
+    const block = contextOf(await fire("UserPromptSubmit", prompt())) ?? "";
+    expect(block).toContain("Structure: solo.");
+    expect(block).toContain("Do every item yourself; this structure delegates no work.");
+    expect(block).not.toContain("fan out");
+    expect(block).not.toContain("in parallel");
+    expect(block).not.toContain("ledgerItemId");
+    expect(block).toContain("closing an item with ledger_update_item starts the judge");
+  });
+
   it("sends the block on a session's first prompt, then only when it changes", async () => {
     const current: CurrentLoadout = { value: oversightLoadout };
     const { fire } = withLoadout(current);

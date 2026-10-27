@@ -234,6 +234,11 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   isolationNote: Schema.optional(Schema.String).annotate({
     description: "Why a defaulted worktree fell back to your checkout.",
   }),
+  // Fork: see ledgerItemId on the input.
+  ledgerLink: Schema.optional(Schema.String).annotate({
+    description:
+      "Only when ledgerItemId was given and the task could not be linked: `rejected: <reason>`. The task still runs.",
+  }),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 

@@ -2603,7 +2603,7 @@ const make = Effect.gen(function* () {
       }
       const taskId = taskEvent.event.payload.id;
       const childThreadId = taskEvent.event.payload.childThreadId;
-      yield* linkDelegatedTask(threadManagement, {
+      const ledgerLinkNote = yield* linkDelegatedTask(threadManagement, {
         target: ledgerLink,
         task: taskEvent.event.payload,
         commandId: stableCommandId({ scope, requestKey: taskId, operation: "ledger-task-link" }),
@@ -2623,7 +2623,7 @@ const make = Effect.gen(function* () {
         });
       }
 
-      const report = isolationReport(workspace);
+      const report = { ...isolationReport(workspace), ...ledgerLinkNote };
       if (input.mode !== "wait") {
         return { ...(yield* readTask(scope, taskId, false, true)), ...report };
       }

@@ -164,11 +164,13 @@ export function formatLoadoutBlock(
       role.fallback === undefined ? "" : `; falls back to ${roleModel(role.fallback)}`;
     return [`- ${label}: ${roleModel(role)}${fallback}`];
   });
-  // The scale is the planner's call; only managers is held to delegating every edit.
+  // The scale is the planner's call under workers; managers delegates everything, solo nothing.
   const use =
     structure === "managers"
       ? "You plan and review only: delegate every edit and shell command with delegate_task and a role (worker or subPlanner). Pass each task the ledgerItemId of the item it works on."
-      : "How far to fan out is your call. Write the ledger and plan each item, small ones yourself and unclear ones through an explorer; add, split or drop items as you learn. Send independent items to workers in parallel with delegate_task, a role and the item's ledgerItemId, and do small ones yourself.";
+      : structure === "solo"
+        ? "Do every item yourself; this structure delegates no work."
+        : "How far to fan out is your call. Write the ledger and plan each item, small ones yourself and unclear ones through an explorer; add, split or drop items as you learn. Send independent items to workers in parallel with delegate_task, a role and the item's ledgerItemId, and do small ones yourself.";
   const judge =
     loadout.roles.judge === undefined
       ? ""

@@ -492,7 +492,9 @@ function planCoreLedgerCommand(input: {
     case "ledger.item.task.link": {
       const item = ledger.items.find(({ id }) => id === command.itemId);
       if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
-      // A retried delegation links its task again; checked first, so a later close cannot fail it.
+      // A task linked again under a new command id is already in effect, so the item closing since
+      // does not fail it. A closed ledger refused the command above; the usual retry never gets
+      // here either, since its same command id replays the stored receipt.
       if (item.tasks?.some(({ taskId }) => taskId === command.task.taskId) === true) {
         return Result.succeed([]);
       }

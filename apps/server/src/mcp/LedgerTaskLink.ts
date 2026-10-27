@@ -8,10 +8,15 @@ import {
   type ProjectId,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
+import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import { ledgerTaskLinkProblem } from "../orchestration-v2/TaskLedger.ts";
-import type { ThreadManagementServiceShape } from "../orchestration-v2/ThreadManagementService.ts";
+import type {
+  ThreadManagementProviderInstanceDisabledError,
+  ThreadManagementServiceShape,
+} from "../orchestration-v2/ThreadManagementService.ts";
 
 /**
  * Fork: delegate_task's `ledgerItemId`. The ledger is the calling thread's own, the one the ledger
@@ -20,6 +25,7 @@ import type { ThreadManagementServiceShape } from "../orchestration-v2/ThreadMan
 export interface LedgerLinkTarget {
   readonly threadId: ThreadId;
   readonly ledgerId: LedgerId;
+  readonly ledgerCreatedAt: DateTime.Utc;
   readonly itemId: LedgerItemId;
 }
 
@@ -54,7 +60,12 @@ export const resolveLedgerLink = Effect.fn("LedgerTaskLink.resolve")(function* (
   }
   return ledger === undefined
     ? undefined
-    : { threadId: input.threadId, ledgerId: ledger.id, itemId: input.itemId };
+    : {
+        threadId: input.threadId,
+        ledgerId: ledger.id,
+        ledgerCreatedAt: ledger.createdAt,
+        itemId: input.itemId,
+      };
 });
 
 /** The link as the task was started; an app-owned task always has a child thread and a model. */
@@ -69,10 +80,20 @@ const linkedTaskOf = (task: OrchestrationV2Subagent): LedgerItemTaskDraft | unde
         model: task.model,
       };
 
+/** The planner's own words when it refused; a retry replays them from the stored rejection. */
+const rejectionReason = (
+  error: OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError,
+): string =>
+  error._tag === "OrchestratorDispatchError" && typeof error.cause === "string"
+    ? error.cause
+    : error._tag === "OrchestratorCommandPreviouslyRejectedError"
+      ? error.detail
+      : "the ledger could not be updated.";
+
 /**
  * Writes the link through the ledger's own command, so it is persisted and projected like any
- * item change. The task already runs, so a link that cannot be written is logged, not raised:
- * failing the call would tell the agent its delegation did not happen.
+ * item change. The task already runs, so a link that cannot be written does not fail the call;
+ * the note it returns goes in the result, so the agent knows the item does not list the task.
  */
 export const linkDelegatedTask = Effect.fn("LedgerTaskLink.link")(function* (
   threads: Pick<ThreadManagementServiceShape, "dispatch">,
@@ -81,17 +102,25 @@ export const linkDelegatedTask = Effect.fn("LedgerTaskLink.link")(function* (
     readonly task: OrchestrationV2Subagent;
     readonly commandId: CommandId;
   },
-) {
+): Effect.fn.Return<{ readonly ledgerLink?: string }> {
   const { target, task } = input;
-  if (target === undefined) return;
+  if (target === undefined) return {};
+  // A thread holds one ledger at a time, so one created after the task started replaced the
+  // ledger delegate_task checked; a retry must not attach the task to its same-named item.
+  if (
+    task.startedAt !== null &&
+    DateTime.toEpochMillis(target.ledgerCreatedAt) > DateTime.toEpochMillis(task.startedAt)
+  ) {
+    return {
+      ledgerLink:
+        "rejected: this thread's ledger was replaced after the task started, so the task belongs to no item of it.",
+    };
+  }
   const linked = linkedTaskOf(task);
   if (linked === undefined) {
-    return yield* Effect.logWarning("orchestrator-mcp.delegate-task.ledger-link-skipped", {
-      taskId: task.id,
-      itemId: target.itemId,
-    });
+    return { ledgerLink: "rejected: the task has no child thread or model to record." };
   }
-  yield* threads
+  return yield* threads
     .dispatch({
       type: "ledger.item.task.link",
       commandId: input.commandId,
@@ -101,12 +130,10 @@ export const linkDelegatedTask = Effect.fn("LedgerTaskLink.link")(function* (
       task: linked,
     })
     .pipe(
-      Effect.asVoid,
+      Effect.as({}),
       Effect.catch((error) =>
-        Effect.logWarning("orchestrator-mcp.delegate-task.ledger-link-failed", {
-          taskId: task.id,
-          itemId: target.itemId,
-          error,
+        Effect.succeed({
+          ledgerLink: `rejected: ${Array.from(rejectionReason(error)).slice(0, 500).join("")}`,
         }),
       ),
     );
