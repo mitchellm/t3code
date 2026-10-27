@@ -1460,7 +1460,7 @@ export function makeClaudeQueryOptions(input: {
   // Fork: ledger and loadout reads for the harness hooks.
   readonly harness?: Pick<
     HarnessHookPort,
-    "readLedgerState" | "readThreadPolicy" | "delegatedChild"
+    "readLedgerState" | "readThreadPolicy" | "readLoadout" | "delegatedChild"
   >;
   /** Fork: CLAUDE_CONFIG_DIR or ~/.claude, which holds plan mode's default plans directory. */
   readonly claudeHome?: string;
@@ -9885,6 +9885,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       runPromise(harness.readLedgerState, { signal }),
                     readThreadPolicy: (signal: AbortSignal) =>
                       runPromise(harness.readThreadPolicy, { signal }),
+                    readLoadout: (signal: AbortSignal) =>
+                      runPromise(harness.readLoadout, { signal }),
                     delegatedChild: turnInput.appThread.lineage.relationshipToParent === "subagent",
                   },
                   claudeHome: claudeConfigDirOf(

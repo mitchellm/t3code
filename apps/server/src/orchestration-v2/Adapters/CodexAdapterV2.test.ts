@@ -9,6 +9,7 @@ import {
   CommandId,
   CheckpointId,
   CodexSettings,
+  DEFAULT_LOADOUTS,
   EnvironmentId,
   type Ledger,
   LedgerId,
@@ -64,7 +65,7 @@ import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
-import { formatLedgerBlock } from "./HarnessHooks.ts";
+import { formatLedgerBlock, formatLoadoutBlock, LOADOUT_WITHDRAWN } from "./HarnessHooks.ts";
 import { makeReplayServerConfig, withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
 
@@ -2142,10 +2143,139 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 delegatedWorkActive: false,
               })),
               readThreadPolicy: Effect.succeed({ structure: "solo", planBeforeEditing: true }),
+              // This session has no T3 tools, so the loadout stays out of its context.
+              readLoadout: Effect.succeed({
+                ...DEFAULT_LOADOUTS.find(({ id }) => id === "cross-check")!,
+                setBy: "user",
+              }),
             },
           });
           yield* harness.firstTerminal;
           assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect(
+    "sends the thread's loadout as trusted loadout_state and replaces it with a notice when the thread goes solo",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "loadout-thread";
+          const nativeTurnId = "loadout-turn";
+          const proposed: ProviderAdapter.ProviderAdapterV2HarnessLoadout = {
+            ...DEFAULT_LOADOUTS.find(({ id }) => id === "cross-check")!,
+            setBy: "agent",
+          };
+          const loadoutState = formatLoadoutBlock(proposed)!;
+          let loadoutReads = 0;
+          const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "work" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            hasT3Mcp: true,
+            loadoutState,
+          });
+          assert.deepEqual(params.additionalContext?.["loadout_state"], {
+            kind: "application",
+            value: loadoutState,
+          });
+          // The user switches the thread back to Solo mid-turn. The compaction restore must
+          // withdraw the block, not restore the turn-start snapshot or drop the key, which would
+          // leave the old block standing in the transcript.
+          const restored = {
+            ...params.additionalContext,
+            loadout_state: { kind: "application" as const, value: LOADOUT_WITHDRAWN },
+          };
+          const entries = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+          const transcript = makeCodexReplayTranscript({
+            scenario: "restore-loadout-state",
+            entries: [
+              ...entries.slice(0, 5),
+              {
+                type: "expect_outbound",
+                label: "loadout turn",
+                frame: { id: 3, method: "turn/start", params },
+              },
+              ...entries.slice(6),
+              {
+                type: "emit_inbound",
+                label: "compacted",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    item: { type: "contextCompaction", id: "compact-loadout" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                label: "restore loadout",
+                frame: {
+                  id: 4,
+                  method: "thread/inject_items",
+                  params: {
+                    threadId: nativeThreadId,
+                    items: Object.entries(restored).map(([key, entry]) => ({
+                      type: "message",
+                      role: "developer",
+                      content: [{ type: "input_text", text: `<${key}>${entry.value}</${key}>` }],
+                    })),
+                  },
+                },
+              },
+              { type: "emit_inbound", label: "restored", frame: { id: 4, result: {} } },
+              {
+                type: "emit_inbound",
+                label: "done",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          yield* (yield* McpProviderSessions.McpProviderSessions).set({
+            environmentId: EnvironmentId.make("test"),
+            threadId: harness.threadId,
+            providerSessionId: "loadout-session",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            endpoint: "http://127.0.0.1:43123/mcp",
+            authorizationHeader: "Bearer test",
+            browserToolsAvailable: true,
+          });
+          yield* harness.runtime.startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("loadout-attempt"),
+              text: "work",
+            }),
+            harness: {
+              readLedgerState: Effect.succeed({
+                ledger: null,
+                userInterrupted: false,
+                delegatedWorkActive: false,
+              }),
+              readThreadPolicy: Effect.die("not read for the turn context"),
+              readLoadout: Effect.sync(() => (loadoutReads++ === 0 ? proposed : null)),
+            },
+          });
+          yield* harness.firstTerminal;
+          assert.equal(harness.terminalEvents()[0]?.status, "completed");
+          assert.equal(loadoutReads, 2);
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

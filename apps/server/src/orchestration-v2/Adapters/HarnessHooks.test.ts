@@ -5,12 +5,14 @@ import {
   type LedgerInvestigation,
   type LedgerItem,
   LedgerItemId,
+  type Loadout,
   type LoadoutStructure,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import type {
   ProviderAdapterV2HarnessLedgerState,
+  ProviderAdapterV2HarnessLoadout,
   ProviderAdapterV2HarnessThreadPolicy,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
@@ -26,6 +28,7 @@ import {
   HARNESS_REMINDER_EVERY,
   HARNESS_STOP_BLOCK_CEILING,
   HARNESS_STOP_BLOCK_LIMIT,
+  LOADOUT_WITHDRAWN,
 } from "./HarnessHooks.ts";
 
 const at = DateTime.makeUnsafe(Date.UTC(2026, 9, 26));
@@ -738,6 +741,169 @@ describe("plan before editing", () => {
     structure = "managers";
     await fire("PreToolUse", preToolUse("Edit"));
     expect(reads).toEqual({ policy: 3, ledger: 1 });
+  });
+});
+
+const claudeAgent = ProviderInstanceId.make("claudeAgent");
+const oversight: Loadout = {
+  id: "oversight",
+  name: "Oversight",
+  description: "Not shown to the agent.",
+  roles: {
+    planner: {
+      instanceId: ProviderInstanceId.make("superbot"),
+      model: "superbot-1",
+      effort: "high",
+    },
+    explorer: { instanceId: claudeAgent, model: "claude-haiku-5-5" },
+    worker: { instanceId: claudeAgent, model: "claude-sonnet-5-5" },
+    judge: {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6.1-sol",
+      effort: "high",
+      fallback: { instanceId: claudeAgent, model: "claude-opus-5-5", effort: "high" },
+    },
+  },
+};
+const oversightLoadout: ProviderAdapterV2HarnessLoadout = { ...oversight, setBy: "user" };
+const prompt = (): HookInput => ({ ...base, hook_event_name: "UserPromptSubmit", prompt: "go" });
+
+interface CurrentLoadout {
+  value: ProviderAdapterV2HarnessLoadout | null | undefined;
+}
+
+const withLoadout = (current: CurrentLoadout, port: Partial<HarnessHookPort> = {}) => {
+  const reads = { loadout: 0 };
+  return {
+    reads,
+    ...make({
+      readLoadout: async () => {
+        reads.loadout++;
+        return current.value;
+      },
+      ledgerTools: true,
+      ...port,
+    }),
+  };
+};
+
+describe("loadout context", () => {
+  it("tells the agent its loadout: roles with model and effort, the judge's fallback, how to use it", async () => {
+    const { fire } = withLoadout({ value: oversightLoadout });
+    expect(contextOf(await fire("UserPromptSubmit", prompt()))).toBe(
+      [
+        'Loadout: "Oversight", set by the user. Structure: workers.',
+        "Roles:",
+        "- planner (the top-level thread, you): superbot-1 on superbot, effort high",
+        "- explorer: claude-haiku-5-5 on claudeAgent",
+        "- worker: claude-sonnet-5-5 on claudeAgent",
+        "- judge: gpt-6.1-sol on codex, effort high; falls back to claude-opus-5-5 on claudeAgent, effort high",
+        "Delegate work with delegate_task and a role (worker, explorer, subPlanner) rather than doing it all yourself. When ledger_read shows requiresJudge, closing an item with ledger_update_item starts the judge, and the item closes when it passes.",
+      ].join("\n"),
+    );
+  });
+
+  it("sends the block on a session's first prompt, then only when it changes", async () => {
+    const current: CurrentLoadout = { value: oversightLoadout };
+    const { fire } = withLoadout(current);
+    expect(contextOf(await fire("UserPromptSubmit", prompt()))).toContain('"Oversight"');
+    // Task notifications and auto-continue arrive as prompts too; an unchanged loadout is not repeated.
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+
+    // The agent proposes a managers loadout with no roles mid-thread; the next prompt says so.
+    current.value = {
+      ...oversight,
+      name: "Lean",
+      roles: {},
+      structure: "managers",
+      setBy: "agent",
+    };
+    const next = contextOf(await fire("UserPromptSubmit", prompt())) ?? "";
+    expect(next).toContain('Loadout: "Lean", proposed by you. Structure: managers.');
+    expect(next).toContain("Roles: none assigned");
+    expect(next).toContain(
+      "You plan and review only: delegate every edit and shell command with delegate_task and a role (worker or subPlanner).",
+    );
+    expect(next).not.toContain("explorer");
+    expect(next).not.toContain("judge");
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+  });
+
+  it("withdraws the loadout once when the thread goes back to solo, and after each compaction", async () => {
+    const current: CurrentLoadout = { value: oversightLoadout };
+    const { fire } = withLoadout(current);
+    await fire("UserPromptSubmit", prompt());
+    current.value = null;
+    expect(contextOf(await fire("UserPromptSubmit", prompt()))).toBe(LOADOUT_WITHDRAWN);
+    expect(LOADOUT_WITHDRAWN).toBe(
+      "This thread now runs solo; the earlier loadout no longer applies.",
+    );
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    // The summary may still carry the old loadout's gist, so a compaction withdraws it again.
+    expect(contextOf(await fire("SessionStart", compact()))).toBe(LOADOUT_WITHDRAWN);
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    // A loadout chosen again is shown again.
+    current.value = oversightLoadout;
+    expect(contextOf(await fire("UserPromptSubmit", prompt()))).toContain('"Oversight"');
+  });
+
+  it("says nothing on a thread that never had a loadout, even after a compaction", async () => {
+    const { fire } = withLoadout({ value: null });
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    expect(await fire("SessionStart", compact())).toEqual({});
+  });
+
+  it("skips the loadout without the T3 tools, since its roles are reached only through them", async () => {
+    const { fire, reads } = withLoadout({ value: oversightLoadout }, { ledgerTools: false });
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    expect(await fire("SessionStart", compact())).toEqual({});
+    expect(reads.loadout).toBe(0);
+  });
+
+  it("adds nothing when a read fails, reports it, and keeps the last block as sent", async () => {
+    const current: CurrentLoadout = { value: undefined };
+    const { fire } = withLoadout(current);
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    current.value = oversightLoadout;
+    await fire("UserPromptSubmit", prompt());
+    current.value = undefined;
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    current.value = oversightLoadout;
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+
+    const failure = new Error("settings unavailable");
+    const failing = make({
+      readLoadout: async () => {
+        throw failure;
+      },
+      ledgerTools: true,
+    });
+    expect(await failing.fire("UserPromptSubmit", prompt())).toEqual({});
+    expect(failing.errors).toEqual([failure]);
+  });
+
+  it("reaches a delegated child only through the child thread's own loadout", async () => {
+    // A child thread is created without a loadout, so its own read is solo.
+    const plain = withLoadout({ value: null }, { delegatedChild: true });
+    expect(await plain.fire("UserPromptSubmit", prompt())).toEqual({});
+    const own = withLoadout({ value: oversightLoadout }, { delegatedChild: true });
+    expect(contextOf(await own.fire("UserPromptSubmit", prompt()))).toContain(
+      'Loadout: "Oversight"',
+    );
+  });
+
+  it("re-sends the loadout after a compaction, alongside the ledger", async () => {
+    const { fire } = withLoadout(
+      { value: oversightLoadout },
+      { readLedgerState: async () => state(ledgerOf([item("L1", "open")])) },
+    );
+    const block = contextOf(await fire("UserPromptSubmit", prompt()))!;
+    const context = contextOf(await fire("SessionStart", compact())) ?? "";
+    expect(context).toContain("L1 Item L1");
+    expect(context).toContain(block);
+    // The compaction re-sent it, so the next prompt does not.
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
   });
 });
 
