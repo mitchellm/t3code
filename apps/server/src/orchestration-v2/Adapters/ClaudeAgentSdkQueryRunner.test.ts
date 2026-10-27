@@ -381,6 +381,41 @@ it.effect("does not reuse a fresh session ID after MCP registration times out", 
   ),
 );
 
+// Fork: a plain interrupt leaves a waiting "next" steer queued, and the CLI runs it after Stop.
+it.effect("cancels queued messages when it interrupts the turn", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const interrupt = vi.fn(async (_options?: { readonly cancelQueued?: boolean }) => ({
+        still_queued: [],
+        cancelled: [],
+      }));
+      const querySpy = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+        () =>
+          ({
+            interrupt,
+            close: vi.fn(),
+            [Symbol.asyncDispose]: vi.fn(async () => {}),
+          }) as unknown as ClaudeSdk.Query,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(() => querySpy.mockRestore()));
+      const runner = yield* ClaudeAgentSdkQueryRunner;
+      const session = yield* runner.open({
+        threadId: ThreadId.make("thread-interrupt-cancels-queued"),
+        providerSessionId: ProviderSessionId.make("session-interrupt-cancels-queued"),
+        options: {
+          sessionId: "native-session-interrupt-cancels-queued",
+          model: "claude-sonnet-4-6",
+          tools: [],
+          permissionMode: "default",
+        },
+      });
+      yield* Effect.addFinalizer(() => session.close.pipe(Effect.orDie));
+      yield* session.interrupt;
+      assert.deepEqual(interrupt.mock.calls, [[{ cancelQueued: true }]]);
+    }).pipe(Effect.provide(realQueryRunner)),
+  ),
+);
+
 function fakeClaudeCli(script: string): string {
   const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-claude-cli-"));
   const cli = NodePath.join(dir, "claude");

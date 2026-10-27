@@ -2,6 +2,15 @@ import * as DocumentText from "../../provider/DocumentText.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 import {
+  forgetClaudeSteer,
+  holdClaudeSegmentResult,
+  interruptClaudeQuery,
+  makeClaudeTurnSteers,
+  observeClaudeSteerLifecycle,
+  recordClaudeSteer,
+  type ClaudeTurnSteers,
+} from "./ClaudeSteering.ts";
+import {
   buildClaudeHarnessHooks,
   claudePlansDirectory,
   type HarnessHookPort,
@@ -378,7 +387,8 @@ export const ClaudeProviderCapabilitiesV2 = {
     emitsTurnCompleted: true,
     supportsInterrupt: true,
     supportsActiveSteering: true,
-    activeSteeringInterruptsTools: true,
+    // Fork: steers wait for the running tool call (priority "next"), so nothing is cancelled.
+    activeSteeringInterruptsTools: false,
     supportsSteeringByInterruptRestart: false,
     supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
@@ -1192,7 +1202,8 @@ export const layerQueryRunner: Layer.Layer<
                 ),
               ),
             interrupt: Effect.tryPromise({
-              try: () => queryRuntime.interrupt(),
+              // Fork: a plain interrupt leaves a waiting steer queued, and the CLI runs it next.
+              try: () => interruptClaudeQuery(queryRuntime),
               catch: (cause) => queryRunnerError(cause, "interrupt"),
             }).pipe(
               Effect.tap(() =>
@@ -3465,12 +3476,6 @@ function terminalStatusFromResult(
   return "failed";
 }
 
-function isClaudeActiveSteeringAbortResult(message: SDKResultMessage): boolean {
-  return (
-    message.terminal_reason === "aborted_streaming" || message.terminal_reason === "aborted_tools"
-  );
-}
-
 function isClaudeProviderContinuationTurn(
   input: ProviderAdapter.ProviderAdapterV2TurnInput,
 ): boolean {
@@ -3848,6 +3853,8 @@ interface ActiveClaudeTurnContext {
   compactionFailure: { readonly message: string | undefined } | null;
   // Steers end segments whose usage is excluded from the final result; bill them too, oldest first.
   readonly steeredSegmentUsage: Array<SDKResultMessage["usage"]>;
+  // Fork: this turn's "next" steers, which decide whether a result ends a segment or the turn.
+  readonly steers: ClaudeTurnSteers;
   readonly subagentsByTaskId: Map<string, ActiveClaudeSubagent>;
   readonly subagentsByToolUseId: Map<string, ActiveClaudeSubagent>;
   readonly subagentNodesByTaskId: Map<string, OrchestrationV2ExecutionNode["id"]>;
@@ -4525,7 +4532,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           >(),
         );
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
-        const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         // A worktree handoff changes the project settings even within one session.
         let bypassCache: { cwd: string | null; availability: ClaudeBypassAvailability } | null =
@@ -9053,16 +9059,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (message.type === "result") {
             const completedAt = yield* DateTime.now;
             const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
-            const wasSteered = (yield* Ref.get(steeredTurns)).has(context.providerTurnId);
-            if (!interrupted && wasSteered && isClaudeActiveSteeringAbortResult(message)) {
-              context.steeredSegmentUsage.push(message.usage);
-              return;
-            }
-            yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
-              next.delete(context.providerTurnId);
-              return next;
-            });
+            // Fork: while a steer waits, the CLI runs it as another segment of this turn.
+            if (!interrupted && holdClaudeSegmentResult(context, message)) return;
             const usageLimited =
               context.authenticationFailureMessage === undefined &&
               (context.rejectedRateLimitTypes.size > 0 ||
@@ -9198,6 +9196,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const message = input.message;
           const context = yield* Ref.get(activeTurn);
           const liveQuery = yield* Ref.get(queryContext);
+          // Fork: a steer that ends without starting releases the answer held for it.
+          const releasedResult =
+            context !== null && liveQuery?.query === input.query
+              ? observeClaudeSteerLifecycle(context, message)
+              : null;
+          if (releasedResult !== null) {
+            yield* handleRoutedSdkMessage({ query: input.query, message: releasedResult });
+            return;
+          }
           if (
             context?.promptUuid === null &&
             liveQuery?.query === input.query &&
@@ -10067,6 +10074,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               latestAssistantRateLimit: null,
               compactionFailure: null,
               steeredSegmentUsage: [],
+              steers: makeClaudeTurnSteers(),
               subagentsByTaskId: new Map(),
               subagentsByToolUseId: new Map(),
               subagentNodesByTaskId: new Map(),
@@ -10376,7 +10384,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ),
         );
 
-        // Move subagents to the background before priority "now" steers cancel foreground tools.
+        // Fork: a "next" steer cancels nothing but waits for the running tool call, and a
+        // foreground subagent is one tool call that can run for many minutes. Moving it to the
+        // background ends that call without stopping the subagent, so the steer lands promptly.
         const backgroundForegroundSubagents = Effect.fnUntraced(function* (
           live: ClaudeLiveQueryContext,
           deadline: number,
@@ -10468,13 +10478,26 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 }),
               persistAttachmentBudget(existing.nativeThreadId),
             );
+            // Fork: a fresh uuid per steer, so its command_lifecycle frames can be told apart.
+            const steerUuid = yield* crypto.randomUUIDv4().pipe(
+              Effect.filterOrFail(isClaudePromptUuid),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CLAUDE_PROVIDER,
+                    detail: "Failed to allocate a Claude steer uuid.",
+                    payload: cause,
+                  }),
+              ),
+            );
             const userMessage = yield* makeClaudeUserMessageWithAttachments({
               text: applyClaudePromptEffortPrefix(
                 turnInput.message.text,
                 compileClaudeModelSelection(currentTurn.input.modelSelection).promptEffort,
               ),
               attachments: turnInput.message.attachments,
-              priority: "now",
+              priority: "next",
+              uuid: steerUuid,
               attachmentsDir,
               fileSystem,
               pdfReservation,
@@ -10496,11 +10519,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 detail: `Claude provider turn ${turnInput.providerTurnId} ended before the steer was sent.`,
               });
             }
-            yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
-              next.add(turnInput.providerTurnId);
-              return next;
-            });
+            recordClaudeSteer(currentTurn.steers, steerUuid);
             yield* Effect.uninterruptibleMask((restore) =>
               restore(
                 existing.query.offer(userMessage, () => {
@@ -10512,6 +10531,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     pdfReservation.commit();
                   }),
                 ),
+              ),
+            ).pipe(
+              Effect.onError(() =>
+                Effect.sync(() => forgetClaudeSteer(currentTurn.steers, steerUuid)),
               ),
             );
           },
