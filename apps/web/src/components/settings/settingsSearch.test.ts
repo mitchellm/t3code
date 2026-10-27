@@ -305,6 +305,8 @@ describe("movedSettingsPath", () => {
     expect(movedSettingsPath("/settings/storage", "")).toBe("/settings/maintenance");
     expect(movedSettingsPath("/settings/integrations", "devices")).toBe("/settings/devices");
     expect(movedSettingsPath("/settings/beta", "")).toBe("/settings/labs");
+    expect(movedSettingsPath("/settings/general", "loadouts")).toBe("/settings/threads");
+    expect(movedSettingsPath("/settings/general", "pinned-rules")).toBe("/settings/threads");
   });
 
   it("leaves current pages alone", () => {

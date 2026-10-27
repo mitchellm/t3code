@@ -679,14 +679,14 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "pinned-rules",
     title: "Pinned rules",
-    to: "/settings/general",
+    to: "/settings/threads",
     scope: "project-defaults",
     searchTerms: ["survive context compaction instructions always remember rules claude codex"],
   },
   {
     id: "loadouts",
     title: "Loadouts",
-    to: "/settings/general",
+    to: "/settings/threads",
     scope: "project-defaults",
     searchTerms: ["agent structure planner worker judge explorer solo model roles delegate"],
   },

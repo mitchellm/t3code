@@ -45,7 +45,7 @@ function EditLoadoutsItem(props: { scope: ComposerLoadout["settingsScope"] }) {
       className="min-w-64"
       onClick={() =>
         void navigate({
-          to: "/settings/general",
+          to: "/settings/threads",
           search: loadoutSettingsScopeSearch({
             environmentId: props.scope.environmentId,
             projectOverridden: props.scope.projectOverridden,
