@@ -224,14 +224,18 @@ describe("plannerModelSwitch", () => {
     ).toEqual(none);
   });
 
-  it("waits for the provider list rather than calling the planner unavailable", () => {
+  it("keeps the model before the provider list loads, and says so rather than calling it gone", () => {
     expect(
       plannerModelSwitch({
         pick: picked(oversight),
         loadout: oversight,
         picker: picker({ providers: [] }),
       }),
-    ).toEqual({ _tag: "none" });
+    ).toEqual({
+      _tag: "kept",
+      reason:
+        "Model picker has not loaded its models yet, so this thread stays on its current model. Pick the loadout again once it has.",
+    });
   });
 
   it("keeps a thread locked to another provider, in the model picker's own words", () => {
@@ -406,6 +410,74 @@ describe("plannerModelSwitch", () => {
     ).toEqual({ _tag: "none" });
   });
 
+  it("moves off the fallback onto the planner once the planner itself can run", () => {
+    const toCodex = {
+      _tag: "switch",
+      selection: {
+        instanceId: codex,
+        model: "gpt-6.1-sol",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+    };
+    const loadout = withPlanner({
+      instanceId: codex,
+      model: "gpt-6.1-sol",
+      effort: "high",
+      fallback: { instanceId: claude, model: "claude-opus-5-5", effort: "xhigh" },
+    });
+    const onFallback = {
+      instanceId: claude,
+      model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "xhigh" }],
+    };
+    expect(
+      plannerModelSwitch({
+        pick: picked(loadout),
+        loadout,
+        picker: picker({ composer: { selected: onFallback } }),
+      }),
+    ).toEqual(toCodex);
+    // A fallback with no effort of its own matches any effort on its model; it still moves.
+    const plainFallback = withPlanner({
+      instanceId: codex,
+      model: "gpt-6.1-sol",
+      effort: "high",
+      fallback: { instanceId: claude, model: "claude-opus-5-5" },
+    });
+    expect(
+      plannerModelSwitch({
+        pick: picked(plainFallback),
+        loadout: plainFallback,
+        picker: picker({ composer: { selected: onFallback } }),
+      }),
+    ).toEqual(toCodex);
+  });
+
+  it("puts back the planner's effort when only the effort was changed by hand", () => {
+    expect(
+      plannerModelSwitch({
+        pick: picked(oversight),
+        loadout: oversight,
+        picker: picker({
+          composer: {
+            selected: {
+              instanceId: superbot,
+              model: "superbot",
+              options: [{ id: "effort", value: "low" }],
+            },
+          },
+        }),
+      }),
+    ).toEqual({
+      _tag: "switch",
+      selection: {
+        instanceId: superbot,
+        model: "superbot",
+        options: [{ id: "effort", value: "high" }],
+      },
+    });
+  });
+
   it("leaves the model alone while the model picker is disabled, and says so", () => {
     expect(
       plannerModelSwitch({
@@ -482,6 +554,70 @@ describe("plannerRun", () => {
     });
   });
 
+  it("does not run on the fallback once the planner itself can", () => {
+    const loadout = withPlanner({
+      instanceId: codex,
+      model: "gpt-6.1-sol",
+      effort: "high",
+      fallback: { instanceId: claude, model: "claude-opus-5-5", effort: "xhigh" },
+    });
+    expect(
+      plannerRun({
+        loadout,
+        picker: picker({
+          composer: {
+            selected: {
+              instanceId: claude,
+              model: "claude-opus-5-5",
+              options: [{ id: "effort", value: "xhigh" }],
+            },
+          },
+        }),
+      }),
+    ).toEqual({
+      _tag: "notRunning",
+      reason:
+        "This thread runs on claude-opus-5-5, not its planner, gpt-6.1-sol. Pick the loadout again to switch.",
+    });
+  });
+
+  it("does not promise a pick can fix the effort on a planner model the picker hides", () => {
+    const hidden: UnifiedSettings = {
+      ...settings,
+      providerModelPreferences: { [superbot]: { hiddenModels: ["superbot"], modelOrder: [] } },
+    };
+    const lowered = { ...onPlanner, options: [{ id: "effort", value: "low" }] };
+    const hiddenPicker = picker({ settings: hidden, composer: { selected: lowered } });
+    expect(plannerRun({ loadout: oversight, picker: hiddenPicker })).toEqual({
+      _tag: "notRunning",
+      reason:
+        "This thread runs superbot at low effort, not the planner's high. Set the effort in the composer; picking the loadout cannot change it here.",
+    });
+    expect(
+      plannerModelSwitch({ pick: picked(oversight), loadout: oversight, picker: hiddenPicker }),
+    ).toEqual({ _tag: "none" });
+  });
+
+  it("promises a fan-out can go back to the planner only when the planner can run there", () => {
+    const projectOff: UnifiedSettings = {
+      ...settings,
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [superbot]: { enabled: false } } },
+      },
+    };
+    const fanOut = [onPlanner, { instanceId: claude, model: "claude-opus-5-5" }];
+    expect(
+      plannerRun({
+        loadout: oversight,
+        picker: picker({ settings: projectOff, projectId, composer: { fanOut } }),
+      }),
+    ).toEqual({
+      _tag: "notRunning",
+      reason:
+        "This chat sends to 2 models at once, so the planner does not run. Superbot is not available here. This thread stays on its current model.",
+    });
+  });
+
   it("knows nothing for a loadout without a planner or before the catalog loads", () => {
     const workersOnly: Loadout = { ...oversight, roles: { worker: oversight.roles.worker! } };
     expect(plannerRun({ loadout: workersOnly, picker: picker() })).toEqual({ _tag: "unknown" });
@@ -499,9 +635,11 @@ describe("loadoutAsRun", () => {
       effort: "high",
       fallback: { instanceId: claude, model: "claude-opus-5-5", effort: "xhigh" },
     });
+    // Locked to Claude, so the Codex planner cannot run and its fallback is the right one.
     const run = plannerRun({
       loadout,
       picker: picker({
+        lock: { lockedProvider: claudeDriver },
         composer: {
           selected: {
             instanceId: claude,

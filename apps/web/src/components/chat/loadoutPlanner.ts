@@ -54,6 +54,7 @@ type Candidate =
       readonly _tag: "usable";
       readonly name: string;
       readonly selection: ModelSelection;
+      readonly onFallback: boolean;
     }
   | { readonly _tag: "blocked"; readonly reason: string };
 
@@ -61,9 +62,11 @@ const NONE: PlannerModelSwitch = { _tag: "none" };
 
 const DISABLED_REASON =
   "Model picker is disabled, so this thread stays on its current model. Pick the loadout again once it is ready.";
+const NOT_LOADED_REASON =
+  "Model picker has not loaded its models yet, so this thread stays on its current model. Pick the loadout again once it has.";
 
 /** A role model as the picker offers it on this thread, or why it does not, in its own words. */
-function usable(candidate: RoleModel, picker: PlannerPicker): Candidate {
+function usable(candidate: RoleModel, picker: PlannerPicker, onFallback: boolean): Candidate {
   const entry = picker.entries.find(({ instanceId }) => instanceId === candidate.instanceId);
   if (entry === undefined || !isProviderInstancePickerReady(entry)) {
     return {
@@ -109,40 +112,51 @@ function usable(candidate: RoleModel, picker: PlannerPicker): Candidate {
       model: slug,
       ...(options.length > 0 ? { options } : {}),
     },
+    onFallback,
   };
 }
 
 /** The planner's own model, else its fallback; when neither can run, the planner's own reason. */
 function plannerChoice(planner: LoadoutRole, picker: PlannerPicker): Candidate {
   const { fallback, ...own } = planner;
-  const first = usable(own, picker);
+  const first = usable(own, picker, false);
   if (first._tag === "usable" || fallback === undefined) return first;
-  const second = usable(fallback, picker);
+  const second = usable(fallback, picker, true);
   return second._tag === "usable" ? second : first;
 }
 
-/** Which of the planner's models the single selection is on, and the effort it differs by, if any. */
-function onPlanner(planner: LoadoutRole, picker: PlannerPicker) {
+const sameModel = (left: ModelSelection, right: ModelSelection) =>
+  left.instanceId === right.instanceId && left.model === right.model;
+
+/** How the selection's effort differs from the target's, when the target sets one. */
+function effortGap(target: ModelSelection, selected: ModelSelection) {
+  const wanted = target.options?.[0];
+  if (wanted === undefined) return null;
+  const actual = selected.options?.find(({ id }) => id === wanted.id)?.value;
+  return actual === wanted.value
+    ? null
+    : { wanted: String(wanted.value), actual: actual === undefined ? null : String(actual) };
+}
+
+/**
+ * The planner model the selection is on although the picker would not move it there now: a model
+ * it hides, say. Only meaningful when neither planner model can be chosen.
+ */
+function stuckOn(planner: LoadoutRole, picker: PlannerPicker) {
   const { fallback, ...own } = planner;
-  const { selected } = picker;
-  const candidates = fallback === undefined ? [own] : [own, fallback];
-  const on = candidates.find(
-    ({ instanceId, model }) => instanceId === selected.instanceId && model === selected.model,
+  const roles = fallback === undefined ? [own] : [own, fallback];
+  const role = roles.find(
+    ({ instanceId, model }) =>
+      instanceId === picker.selected.instanceId && model === picker.selected.model,
   );
-  if (on === undefined) return null;
-  const entry = picker.entries.find(({ instanceId }) => instanceId === on.instanceId);
-  const [wanted] = roleEffortOptions(
-    entry?.models.find(({ slug }) => slug === on.model),
-    on.effort,
+  if (role === undefined) return null;
+  const entry = picker.entries.find(({ instanceId }) => instanceId === role.instanceId);
+  const options = roleEffortOptions(
+    entry?.models.find(({ slug }) => slug === role.model),
+    role.effort,
   );
-  const actual = selected.options?.find(({ id }) => id === wanted?.id)?.value;
-  return {
-    onFallback: on !== own,
-    effortOff:
-      wanted === undefined || actual === wanted.value
-        ? null
-        : { wanted: String(wanted.value), actual: actual === undefined ? null : String(actual) },
-  };
+  const target = { instanceId: role.instanceId, model: role.model, options };
+  return { onFallback: role !== own, effortGap: effortGap(target, picker.selected) };
 }
 
 function selectedName(picker: PlannerPicker): string {
@@ -163,17 +177,29 @@ export function plannerModelSwitch(input: {
 }): PlannerModelSwitch {
   const { picker } = input;
   const planner = input.loadout.roles.planner;
+  if (input.pick?.setBy !== "user" || planner === undefined) return NONE;
   // Before the catalog loads every provider reads as missing, which is not the planner being gone.
-  if (input.pick?.setBy !== "user" || planner === undefined || picker.entries.length === 0) {
-    return NONE;
-  }
-  const on = picker.fanOut === null ? onPlanner(planner, picker) : null;
-  // Already there: nothing moves, and a planner model the picker hides is not reported missing.
-  if (on !== null && on.effortOff === null) return NONE;
-  if (picker.disabled) return { _tag: "kept", reason: DISABLED_REASON };
+  if (picker.entries.length === 0) return { _tag: "kept", reason: NOT_LOADED_REASON };
   const choice = plannerChoice(planner, picker);
-  if (choice._tag === "usable") return { _tag: "switch", selection: choice.selection };
-  return on === null ? { _tag: "kept", reason: choice.reason } : NONE;
+  if (picker.fanOut === null) {
+    // Already on the model a pick would choose now, at its effort: nothing moves. Being on the
+    // fallback while the planner itself can run is not that, and moves.
+    if (choice._tag === "usable") {
+      if (
+        sameModel(choice.selection, picker.selected) &&
+        effortGap(choice.selection, picker.selected) === null
+      ) {
+        return NONE;
+      }
+    } else if (stuckOn(planner, picker) !== null) {
+      // On a planner model the picker will not choose (it hides it): a pick cannot do better.
+      return NONE;
+    }
+  }
+  if (picker.disabled) return { _tag: "kept", reason: DISABLED_REASON };
+  return choice._tag === "usable"
+    ? { _tag: "switch", selection: choice.selection }
+    : { _tag: "kept", reason: choice.reason };
 }
 
 /**
@@ -187,29 +213,37 @@ export function plannerRun(input: {
   const { picker } = input;
   const planner = input.loadout.roles.planner;
   if (planner === undefined || picker.entries.length === 0) return { _tag: "unknown" };
+  const choice = plannerChoice(planner, picker);
+  const notRunning = (reason: string): PlannerRun => ({ _tag: "notRunning", reason });
+  const atEffort = (gap: { readonly wanted: string; readonly actual: string | null }) =>
+    `This thread runs ${selectedName(picker)} at ${gap.actual ?? "its default"} effort, not the planner's ${gap.wanted}.`;
   if (picker.fanOut !== null) {
     const count = picker.fanOut.length >= 2 ? `${picker.fanOut.length}` : "several";
-    return {
-      _tag: "notRunning",
-      reason: `This chat sends to ${count} models at once, so the planner does not run. Pick the loadout again to send to the planner alone.`,
-    };
+    const lead = `This chat sends to ${count} models at once, so the planner does not run.`;
+    return notRunning(
+      choice._tag === "usable"
+        ? `${lead} Pick the loadout again to send to the planner alone.`
+        : `${lead} ${choice.reason}`,
+    );
   }
-  const on = onPlanner(planner, picker);
-  if (on !== null) {
-    if (on.effortOff === null) return { _tag: "running", onFallback: on.onFallback };
-    return {
-      _tag: "notRunning",
-      reason: `This thread runs ${selectedName(picker)} at ${on.effortOff.actual ?? "its default"} effort, not the planner's ${on.effortOff.wanted}. Pick the loadout again to switch.`,
-    };
+  if (choice._tag === "usable") {
+    if (!sameModel(choice.selection, picker.selected)) {
+      return notRunning(
+        `This thread runs on ${selectedName(picker)}, not its planner, ${choice.name}. Pick the loadout again to switch.`,
+      );
+    }
+    const gap = effortGap(choice.selection, picker.selected);
+    return gap === null
+      ? { _tag: "running", onFallback: choice.onFallback }
+      : notRunning(`${atEffort(gap)} Pick the loadout again to switch.`);
   }
-  const choice = plannerChoice(planner, picker);
-  return {
-    _tag: "notRunning",
-    reason:
-      choice._tag === "blocked"
-        ? choice.reason
-        : `This thread runs on ${selectedName(picker)}, not its planner, ${choice.name}. Pick the loadout again to switch.`,
-  };
+  const stuck = stuckOn(planner, picker);
+  if (stuck === null) return notRunning(choice.reason);
+  return stuck.effortGap === null
+    ? { _tag: "running", onFallback: stuck.onFallback }
+    : notRunning(
+        `${atEffort(stuck.effortGap)} Set the effort in the composer; picking the loadout cannot change it here.`,
+      );
 }
 
 /** The loadout as it runs, for its summary: the fallback if that plans, no planner if none does. */
