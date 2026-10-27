@@ -3,7 +3,10 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
+  LedgerId,
   LedgerItemId,
+  NodeId,
+  type OrchestrationV2Subagent,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -151,4 +154,109 @@ it.effect("creates and reads a ledger through the real orchestrator and projecti
       ),
     ),
   ),
+);
+
+/** As `layerThreads`, but the thread's task records come from `taskRecords`, which a test moves. */
+const layerThreadsWithTasks = (taskRecords: Map<NodeId, OrchestrationV2Subagent["status"]>) =>
+  Layer.unwrap(
+    Effect.map(Orchestrator.OrchestratorV2, (orchestrator) =>
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: orchestrator.getThreadShell,
+        dispatch: orchestrator.dispatch,
+        getProjectThreadRecords: ({ threadId }, fields) =>
+          orchestrator.getThreadRecords(threadId, fields).pipe(
+            Effect.map((records) => ({
+              ...records,
+              subagents: [...taskRecords].map(([id, status]) => ({ id, status }) as never),
+            })),
+            Effect.orDie,
+          ),
+      }),
+    ),
+  );
+
+it.effect(
+  "ledger_read lists each item's tasks with role, model, child thread and live status",
+  () => {
+    const taskRecords = new Map<NodeId, OrchestrationV2Subagent["status"]>();
+    return Effect.gen(function* () {
+      const tasksThreadId = ThreadId.make("thread:ledger-mcp-tasks");
+      const tasksScope: McpInvocationContext.McpInvocationScope = {
+        ...scope,
+        thread: {
+          threadId: tasksThreadId,
+          providerSessionId: "ledger-mcp-session",
+          providerInstanceId: instanceId,
+        },
+      };
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("command:ledger-mcp-tasks:thread"),
+        threadId: tasksThreadId,
+        projectId: ProjectId.make("project:ledger-mcp"),
+        title: "ledger tasks",
+        modelSelection: { instanceId, model: "gpt-5.1-codex" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const service = yield* LedgerMcpService.LedgerMcpService;
+      const created = yield* service.create(tasksScope, {
+        title: "Ship the parser",
+        items: [
+          { id: LedgerItemId.make("L1"), title: "Parse", acceptance: "tests pass" },
+          { id: LedgerItemId.make("L2"), title: "Wire", acceptance: "smoke passes" },
+        ],
+      });
+      const taskId = NodeId.make("task:ledger-mcp-explore");
+      yield* orchestrator.dispatch({
+        type: "ledger.item.task.link",
+        commandId: CommandId.make("command:ledger-mcp-tasks:link"),
+        threadId: tasksThreadId,
+        ledgerId: LedgerId.make(created.ledger!.ledgerId),
+        itemId: LedgerItemId.make("L1"),
+        task: {
+          taskId,
+          childThreadId: ThreadId.make("thread:ledger-mcp-explorer"),
+          role: "explorer",
+          providerInstanceId: instanceId,
+          model: "gpt-5.1-codex-mini",
+        },
+      });
+      taskRecords.set(taskId, "running");
+      const running = yield* service.read(tasksScope);
+      assert.deepEqual(running.ledger?.items[0]?.tasks, [
+        {
+          taskId,
+          role: "explorer",
+          model: "gpt-5.1-codex-mini",
+          status: "running",
+          childThreadId: ThreadId.make("thread:ledger-mcp-explorer"),
+        },
+      ]);
+      // An item with no tasks stays as compact as before.
+      assert.notProperty(running.ledger?.items[1] ?? {}, "tasks");
+
+      // Status is read from the task each time, never stored on the ledger.
+      taskRecords.set(taskId, "completed");
+      assert.equal(
+        (yield* service.read(tasksScope)).ledger?.items[0]?.tasks?.[0]?.status,
+        "completed",
+      );
+      taskRecords.delete(taskId);
+      assert.isNull((yield* service.read(tasksScope)).ledger?.items[0]?.tasks?.[0]?.status);
+    }).pipe(
+      Effect.provide(
+        LedgerMcpService.layer.pipe(
+          Layer.provideMerge(layerThreadsWithTasks(taskRecords)),
+          Layer.provideMerge(layerOrchestrator),
+          Layer.provideMerge(NodeCrypto.layer),
+        ),
+      ),
+    );
+  },
 );

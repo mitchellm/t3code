@@ -135,6 +135,7 @@ import {
   startBackgroundJudgement,
 } from "./LedgerJudgement.ts";
 import { workspaceCheckpoints } from "./LedgerJudgeCriteria.ts";
+import { linkDelegatedTask, resolveLedgerLink } from "./LedgerTaskLink.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
 import {
   delegationRefusalFor,
@@ -2026,6 +2027,11 @@ const make = Effect.gen(function* () {
             ),
             Effect.mapError(threadManagementFailure),
           ),
+      taskRecords: () =>
+        threadManagement.getThreadRecords(scope.thread.threadId, ["subagents"]).pipe(
+          Effect.map(({ subagents }) => subagents),
+          Effect.mapError(threadManagementFailure),
+        ),
       recordVerdict: ({ itemId, judgedEvidence, verdict, taskId, judgingRequestedAt }) =>
         threadManagement
           .dispatch({
@@ -2493,6 +2499,13 @@ const make = Effect.gen(function* () {
         operation,
       });
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
+      // Fork: the ledger item this task works on is checked before any work starts.
+      const ledgerLink = yield* resolveLedgerLink(threadManagement, {
+        projectId: parent.thread.projectId,
+        threadId: scope.thread.threadId,
+        itemId: input.ledgerItemId,
+        isRetry: isRetryOfAcceptedDelegation,
+      });
       // Narrowed above; the closure below would not see the narrowing.
       const parentNodeId = parentRun.rootNodeId;
       // Fork: an investigation bounds its workers. The check and the dispatch that records the
@@ -2590,6 +2603,11 @@ const make = Effect.gen(function* () {
       }
       const taskId = taskEvent.event.payload.id;
       const childThreadId = taskEvent.event.payload.childThreadId;
+      const ledgerLinkNote = yield* linkDelegatedTask(threadManagement, {
+        target: ledgerLink,
+        task: taskEvent.event.payload,
+        commandId: stableCommandId({ scope, requestKey: taskId, operation: "ledger-task-link" }),
+      });
       const childRunEvent = result.storedEvents.find(
         (stored) => stored.event.type === "run.created" && stored.event.threadId === childThreadId,
       );
@@ -2605,7 +2623,7 @@ const make = Effect.gen(function* () {
         });
       }
 
-      const report = isolationReport(workspace);
+      const report = { ...isolationReport(workspace), ...ledgerLinkNote };
       if (input.mode !== "wait") {
         return { ...(yield* readTask(scope, taskId, false, true)), ...report };
       }
@@ -3339,12 +3357,12 @@ const make = Effect.gen(function* () {
         const after = yield* threadManagement
           .getProjectThreadRecords(
             { projectId: parent.thread.projectId, threadId: scope.thread.threadId },
-            ["ledger"],
+            ["ledger", "subagents"],
           )
           .pipe(Effect.mapError(threadManagementFailure));
         return {
           ...judged,
-          ledger: after.ledger === undefined ? null : snapshotLedger(after.ledger),
+          ledger: after.ledger === undefined ? null : snapshotLedger(after.ledger, after.subagents),
         };
       },
     ),

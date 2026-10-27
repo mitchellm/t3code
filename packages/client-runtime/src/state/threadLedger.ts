@@ -1,4 +1,10 @@
-import type { Ledger, LedgerItem, LedgerItemStatus } from "@t3tools/contracts";
+import type {
+  Ledger,
+  LedgerItem,
+  LedgerItemStatus,
+  LedgerItemTask,
+  OrchestrationV2Subagent,
+} from "@t3tools/contracts";
 import {
   orderLedgerTree,
   releasedLedgerItemIds,
@@ -66,6 +72,43 @@ export function formatLedgerProgress(progress: LedgerProgress): string {
     return progress.deferred === 0 ? `All ${progress.dropped} dropped` : setAside.join(" · ");
   }
   return [`${progress.closed} of ${progress.scope} done`, ...setAside].join(" · ");
+}
+
+type LedgerTaskRecord = Pick<
+  OrchestrationV2Subagent,
+  "id" | "status" | "result" | "startedAt" | "completedAt"
+>;
+
+export interface LedgerItemTaskRow {
+  readonly task: LedgerItemTask;
+  /** Live from the thread's task record; null once that record is gone. */
+  readonly status: OrchestrationV2Subagent["status"] | null;
+  /** The task's final report, once it has one. */
+  readonly report: string | null;
+  readonly startedAt: OrchestrationV2Subagent["startedAt"];
+  readonly completedAt: OrchestrationV2Subagent["completedAt"];
+}
+
+/**
+ * Fork: the agents that worked an item, in link order. The ledger stores only the link, so status
+ * and report come from the thread projection's `subagents`, which the stream keeps current.
+ */
+export function deriveLedgerItemTasks(
+  item: Pick<LedgerItem, "tasks">,
+  subagents: ReadonlyArray<LedgerTaskRecord>,
+): ReadonlyArray<LedgerItemTaskRow> {
+  if (item.tasks === undefined || item.tasks.length === 0) return [];
+  const byId = new Map(subagents.map((record) => [record.id as string, record]));
+  return item.tasks.map((task) => {
+    const record = byId.get(task.taskId);
+    return {
+      task,
+      status: record?.status ?? null,
+      report: record?.result ?? null,
+      startedAt: record?.startedAt ?? null,
+      completedAt: record?.completedAt ?? null,
+    };
+  });
 }
 
 export interface LedgerViewRow {

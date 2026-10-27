@@ -71,6 +71,7 @@ import {
   LedgerVerdictRecordCommand,
   LedgerJudgementAbandonCommand,
   LedgerJudgementStartedCommand,
+  LedgerItemTaskLinkCommand,
   LedgerJson,
 } from "./ledger.ts";
 import {
@@ -3563,6 +3564,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
   LedgerVerdictRecordCommand,
   LedgerJudgementAbandonCommand,
   LedgerJudgementStartedCommand,
+  LedgerItemTaskLinkCommand,
   // Fork: Investigate mode; clients reach these only through the investigation RPCs.
   LedgerInvestigationStartCommand,
   LedgerInvestigationEndCommand,

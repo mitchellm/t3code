@@ -38,6 +38,7 @@ import {
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
 import { Loadout, LoadoutId, LoadoutSetBy } from "./loadout.ts";
+import { LedgerMcpItemKey } from "./ledgerMcp.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
@@ -158,6 +159,13 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   target: Schema.optional(OrchestratorMcpTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
+  // Fork: links the task to an item of your own ledger.
+  ledgerItemId: Schema.optional(
+    LedgerMcpItemKey.annotate({
+      description:
+        "The open item of your ledger this task works on. The item then lists the task, and its judge reads the task's final report.",
+    }),
+  ),
   isolation: Schema.optional(
     Schema.Literals(["shared", "worktree", "none"]).annotate({
       description:
@@ -225,6 +233,11 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   }),
   isolationNote: Schema.optional(Schema.String).annotate({
     description: "Why a defaulted worktree fell back to your checkout.",
+  }),
+  // Fork: see ledgerItemId on the input.
+  ledgerLink: Schema.optional(Schema.String).annotate({
+    description:
+      "Only when ledgerItemId was given and the task could not be linked: `rejected: <reason>`. The task still runs.",
   }),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;

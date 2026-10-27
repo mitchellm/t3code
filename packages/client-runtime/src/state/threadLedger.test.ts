@@ -4,9 +4,13 @@ import {
   LedgerId,
   LedgerItemId,
   MessageId,
+  NodeId,
+  ProviderInstanceId,
+  ThreadId,
   type Ledger,
   type LedgerItem,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -18,6 +22,7 @@ import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection
 import { v2Now, v2Projection, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
 import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
 import {
+  deriveLedgerItemTasks,
   deriveLedgerProgress,
   deriveLedgerView,
   formatLedgerProgress,
@@ -155,6 +160,53 @@ describe("deriveLedgerView", () => {
   it("labels an item under judgement as judging", () => {
     expect(ledgerItemStatusLabel({ ...item("J", "in_progress"), judging: true })).toBe("Judging");
     expect(ledgerItemStatusLabel(item("J", "deferred"))).toBe("Deferred");
+  });
+});
+
+describe("deriveLedgerItemTasks", () => {
+  const link = (name: string, role?: string) => ({
+    taskId: NodeId.make(`task:${name}`),
+    childThreadId: ThreadId.make(`thread:${name}`),
+    ...(role === undefined ? {} : { role }),
+    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-haiku-5-5",
+    createdAt: v2Now,
+  });
+  const record = (
+    name: string,
+    status: OrchestrationV2Subagent["status"],
+    result: string | null,
+  ): Pick<OrchestrationV2Subagent, "id" | "status" | "result" | "startedAt" | "completedAt"> => ({
+    id: NodeId.make(`task:${name}`),
+    status,
+    result,
+    startedAt: v2Now,
+    completedAt: result === null ? null : v2Now,
+  });
+
+  it("joins each linked task with the thread's live task record, in link order", () => {
+    const linked = {
+      ...item("item-0", "in_progress"),
+      tasks: [link("explore", "explorer"), link("build", "worker"), link("gone")],
+    };
+    const rows = deriveLedgerItemTasks(linked, [
+      record("build", "running", null),
+      record("explore", "completed", "The parser lives in src/parse.ts."),
+    ]);
+    expect(
+      rows.map(({ task, status, report }) => [task.taskId, task.role, status, report]),
+    ).toEqual([
+      ["task:explore", "explorer", "completed", "The parser lives in src/parse.ts."],
+      ["task:build", "worker", "running", null],
+      // A task whose record is gone is still listed, with nothing live to show.
+      ["task:gone", undefined, null, null],
+    ]);
+  });
+
+  it("is empty for an item no task worked on", () => {
+    expect(deriveLedgerItemTasks(item("item-0", "open"), [record("x", "running", null)])).toEqual(
+      [],
+    );
   });
 });
 

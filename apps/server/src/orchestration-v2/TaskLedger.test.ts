@@ -269,6 +269,46 @@ it.effect("creates a ledger with open items and unreached checkpoints at the com
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("links a delegated task to its item through the ledger's own events and store", () =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread("task-link");
+    yield* createLedger(threadId);
+    const before = itemOf(yield* ledgerOf(threadId), "a");
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const link = (name: string) =>
+      orchestrator.dispatch({
+        type: "ledger.item.task.link",
+        commandId: nextCommandId(),
+        threadId,
+        ledgerId,
+        itemId: itemId(name),
+        task: {
+          taskId: NodeId.make("task:link-a"),
+          childThreadId: ThreadId.make("thread:child:link-a"),
+          role: "explorer",
+          providerInstanceId: claudeInstanceId,
+          model: "claude-haiku-5-5",
+        },
+      });
+    const linked = yield* link("a");
+    assert.deepEqual(
+      linked.storedEvents.map(({ event }) => event.type),
+      ["ledger.item.updated"],
+    );
+    const stored = yield* orchestrator.getThreadRecords(threadId, ["ledger"]);
+    const item = itemOf(stored.ledger, "a");
+    assert.deepEqual(
+      item?.tasks?.map(({ taskId, role, model }) => [taskId, role, model]),
+      [[NodeId.make("task:link-a"), "explorer", "claude-haiku-5-5"]],
+    );
+    assert.deepEqual(item?.updatedAt, before?.updatedAt);
+    // The retried delegation links nothing new.
+    assert.lengthOf((yield* link("a")).storedEvents, 0);
+    yield* updateItem(threadId, "b", { status: "dropped", dropReason: "not needed" });
+    yield* assertRejected(threadId, link("b"), "b is dropped");
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("allows one open ledger per thread and a replacement only after close", () =>
   Effect.gen(function* () {
     const threadId = yield* createThread("one-ledger");
