@@ -798,7 +798,7 @@ describe("loadout context", () => {
         "- explorer: claude-haiku-5-5 on claudeAgent",
         "- worker: claude-sonnet-5-5 on claudeAgent",
         "- judge: gpt-6.1-sol on codex, effort high; falls back to claude-opus-5-5 on claudeAgent, effort high",
-        "Delegate work with delegate_task and a role (worker, explorer, subPlanner) rather than doing it all yourself. When ledger_read shows requiresJudge, closing an item with ledger_update_item starts the judge, and the item closes when it passes.",
+        "How far to fan out is your call. Write the ledger and plan each item, small ones yourself and unclear ones through an explorer; add, split or drop items as you learn. Send independent items to workers in parallel with delegate_task, a role and the item's ledgerItemId, and do small ones yourself. When ledger_read shows requiresJudge, closing an item with ledger_update_item starts the judge, and the item closes when it passes.",
       ].join("\n"),
     );
   });
@@ -823,7 +823,7 @@ describe("loadout context", () => {
     expect(next).toContain('Loadout: "Lean", proposed by you. Structure: managers.');
     expect(next).toContain("Roles: none assigned");
     expect(next).toContain(
-      "You plan and review only: delegate every edit and shell command with delegate_task and a role (worker or subPlanner).",
+      "You plan and review only: delegate every edit and shell command with delegate_task and a role (worker or subPlanner). Pass each task the ledgerItemId of the item it works on.",
     );
     expect(next).not.toContain("explorer");
     expect(next).not.toContain("judge");
