@@ -1,5 +1,7 @@
 import type {
   Ledger,
+  Loadout,
+  LoadoutSetBy,
   LoadoutStructure,
   OrchestrationV2HistoricalMessage,
 } from "@t3tools/contracts";
@@ -460,6 +462,8 @@ export interface ProviderAdapterV2HarnessPort {
 export interface ProviderAdapterV2HarnessThreadPolicy {
   readonly structure: LoadoutStructure;
   readonly planBeforeEditing: boolean;
+  /** The resolved loadout and who chose it, so each turn can tell the agent. Absent when solo. */
+  readonly loadout?: Loadout & { readonly setBy: LoadoutSetBy };
 }
 
 export interface ProviderAdapterV2HarnessLedgerState {

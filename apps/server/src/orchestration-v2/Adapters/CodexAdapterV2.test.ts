@@ -9,6 +9,7 @@ import {
   CommandId,
   CheckpointId,
   CodexSettings,
+  DEFAULT_LOADOUTS,
   EnvironmentId,
   type Ledger,
   LedgerId,
@@ -64,7 +65,7 @@ import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
-import { formatLedgerBlock } from "./HarnessHooks.ts";
+import { formatLedgerBlock, formatLoadoutBlock } from "./HarnessHooks.ts";
 import { makeReplayServerConfig, withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
 
@@ -2142,6 +2143,129 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 delegatedWorkActive: false,
               })),
               readThreadPolicy: Effect.succeed({ structure: "solo", planBeforeEditing: true }),
+            },
+          });
+          yield* harness.firstTerminal;
+          assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect(
+    "sends the thread's loadout as trusted loadout_state each turn and restores it fresh after compaction",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "loadout-thread";
+          const nativeTurnId = "loadout-turn";
+          const crossCheck = DEFAULT_LOADOUTS.find(({ id }) => id === "cross-check")!;
+          const proposed: ProviderAdapter.ProviderAdapterV2HarnessThreadPolicy = {
+            structure: "workers",
+            planBeforeEditing: true,
+            loadout: { ...crossCheck, setBy: "agent" },
+          };
+          // The user replaces the agent's proposal mid-turn; the compaction restore must carry
+          // that, not the turn-start snapshot.
+          const chosen: ProviderAdapter.ProviderAdapterV2HarnessThreadPolicy = {
+            structure: "managers",
+            planBeforeEditing: true,
+            loadout: { ...crossCheck, structure: "managers", setBy: "user" },
+          };
+          const loadoutState = formatLoadoutBlock(proposed)!;
+          const restoredState = formatLoadoutBlock(chosen)!;
+          assert.notEqual(restoredState, loadoutState);
+          let policyReads = 0;
+          const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "work" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            loadoutState,
+          });
+          assert.deepEqual(params.additionalContext?.["loadout_state"], {
+            kind: "application",
+            value: loadoutState,
+          });
+          const entries = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+          const transcript = makeCodexReplayTranscript({
+            scenario: "restore-loadout-state",
+            entries: [
+              ...entries.slice(0, 5),
+              {
+                type: "expect_outbound",
+                label: "loadout turn",
+                frame: { id: 3, method: "turn/start", params },
+              },
+              ...entries.slice(6),
+              {
+                type: "emit_inbound",
+                label: "compacted",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    item: { type: "contextCompaction", id: "compact-loadout" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                label: "restore loadout",
+                frame: {
+                  id: 4,
+                  method: "thread/inject_items",
+                  params: {
+                    threadId: nativeThreadId,
+                    items: [
+                      {
+                        type: "message",
+                        role: "developer",
+                        content: [
+                          {
+                            type: "input_text",
+                            text: `<loadout_state>${restoredState}</loadout_state>`,
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              },
+              { type: "emit_inbound", label: "restored", frame: { id: 4, result: {} } },
+              {
+                type: "emit_inbound",
+                label: "done",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          yield* harness.runtime.startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("loadout-attempt"),
+              text: "work",
+            }),
+            harness: {
+              readLedgerState: Effect.succeed({
+                ledger: null,
+                userInterrupted: false,
+                delegatedWorkActive: false,
+              }),
+              readThreadPolicy: Effect.sync(() => (policyReads++ === 0 ? proposed : chosen)),
             },
           });
           yield* harness.firstTerminal;

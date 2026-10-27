@@ -4,6 +4,7 @@
  */
 import {
   isOrchestrationV2WorkActive,
+  type LoadoutSetBy,
   type OrchestrationV2Run,
   type ProjectId,
   type ServerSettings,
@@ -30,7 +31,11 @@ export interface HarnessThreadReads {
     ProjectionStore.ProjectionStoreV2Error
   >;
   readonly readThreadLoadout: () => Effect.Effect<
-    { readonly projectId: ProjectId; readonly loadoutId: string | null },
+    {
+      readonly projectId: ProjectId;
+      readonly loadoutId: string | null;
+      readonly setBy: LoadoutSetBy | null;
+    },
     ProjectionStore.ProjectionStoreV2Error
   >;
 }
@@ -75,6 +80,7 @@ export function makeHarnessThreadReads(
         Effect.map(({ thread }) => ({
           projectId: thread.projectId,
           loadoutId: thread.loadout?.id ?? null,
+          setBy: thread.loadout?.setBy ?? null,
         })),
       ),
   };
@@ -97,11 +103,16 @@ export function makeHarnessPort<E>(
     readLedgerState: orUndefined(Effect.suspend(reads.readLedgerState), "ledger"),
     readThreadPolicy: orUndefined(
       Effect.gen(function* () {
-        const { projectId, loadoutId } = yield* reads.readThreadLoadout();
+        const { projectId, loadoutId, setBy } = yield* reads.readThreadLoadout();
         const settings = yield* readProjectSettings(projectId);
+        const loadout = resolveLoadout(settings.loadouts, loadoutId);
+        const structure = loadoutStructure(loadout);
         return {
-          structure: loadoutStructure(resolveLoadout(settings.loadouts, loadoutId)),
+          structure,
           planBeforeEditing: settings.planBeforeEditing,
+          // No loadout, Solo, or a deleted loadout (which resolves to Solo) has nothing to tell the
+          // agent.
+          ...(structure === "solo" || setBy === null ? {} : { loadout: { ...loadout, setBy } }),
         };
       }),
       "loadout and plan before editing setting",

@@ -9,7 +9,12 @@ import type {
   HookJSONOutput,
   Options as ClaudeQueryOptions,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { Ledger, LedgerItem } from "@t3tools/contracts";
+import {
+  LOADOUT_ROLE_NAMES,
+  type Ledger,
+  type LedgerItem,
+  type LoadoutRole,
+} from "@t3tools/contracts";
 import type {
   ProviderAdapterV2HarnessLedgerState,
   ProviderAdapterV2HarnessThreadPolicy,
@@ -129,6 +134,42 @@ export function formatLedgerBlock(ledger: Ledger | null | undefined): string | u
   }
   if (inProgress.length === 0 && open.length === 0) lines.push("No open items.");
   return clip(lines.join("\n"), LEDGER_BLOCK_MAX_CHARS);
+}
+
+const roleModel = (role: Omit<LoadoutRole, "fallback">) =>
+  `${role.model} on ${role.instanceId}${role.effort === undefined ? "" : `, effort ${role.effort}`}`;
+
+/**
+ * The thread's loadout as a short block for the model at the start of each turn, shared by the
+ * Claude prompt hook and Codex's `loadout_state` context. The agent cannot see the loadout any
+ * other way short of calling a tool. Undefined when the thread runs solo.
+ */
+export function formatLoadoutBlock(
+  policy: ProviderAdapterV2HarnessThreadPolicy | undefined,
+): string | undefined {
+  const loadout = policy?.loadout;
+  if (policy === undefined || loadout === undefined) return undefined;
+  const roles = LOADOUT_ROLE_NAMES.flatMap((name) => {
+    const role = loadout.roles[name];
+    if (role === undefined) return [];
+    const fallback =
+      role.fallback === undefined ? "" : `; falls back to ${roleModel(role.fallback)}`;
+    return [`- ${name}: ${roleModel(role)}${fallback}`];
+  });
+  const use =
+    policy.structure === "managers"
+      ? "You plan and review only: delegate every edit and shell command with delegate_task and a role (worker, explorer, subPlanner)."
+      : "Delegate work with delegate_task and a role (worker, explorer, subPlanner) rather than doing it all yourself.";
+  const judge =
+    loadout.roles.judge === undefined
+      ? ""
+      : " The judge gates item closes: an item closes only after ledger_request_judgement passes.";
+  return [
+    `Loadout: "${clip(loadout.name, TITLE_MAX_CHARS)}", ${loadout.setBy === "user" ? "set by the user" : "proposed by you"}. Structure: ${policy.structure}.`,
+    roles.length === 0 ? "Roles: none assigned, so each role runs on your own model." : "Roles:",
+    ...roles,
+    `${use}${judge}`,
+  ].join("\n");
 }
 
 function stopReason(open: ReadonlyArray<LedgerItem>): string {
@@ -273,19 +314,22 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
   };
 
   // The system prompt is fixed when the CLI opens, so after a compaction this re-sends the current
-  // rules and the ledger, both outside the summary that just replaced the transcript.
+  // rules, the ledger and the loadout, all outside the summary that just replaced the transcript.
   hooks.SessionStart = [
     matcher(async (input, signal) => {
       if (input.hook_event_name !== "SessionStart" || input.source !== "compact") return {};
-      const [rules, ledger] = await Promise.all([
+      const [rules, ledger, loadout] = await Promise.all([
         settle(signal, () => pinnedRulesContext(signal)),
         readLedgerState === undefined
           ? Promise.resolve(undefined)
           : settle(signal, async () =>
               formatLedgerBlock(activeLedger(await readLedgerState(signal))),
             ),
+        readThreadPolicy === undefined
+          ? Promise.resolve(undefined)
+          : settle(signal, async () => formatLoadoutBlock(await readThreadPolicy(signal))),
       ]);
-      const parts = [rules, ledger].filter((part): part is string => part !== undefined);
+      const parts = [rules, ledger, loadout].filter((part): part is string => part !== undefined);
       if (parts.length === 0) return {};
       return {
         hookSpecificOutput: {
@@ -396,6 +440,22 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
             hookEventName: "PostToolUse",
             additionalContext: `Ledger reminder: ${focus}; ${open.length} open.`,
           },
+        };
+      }),
+    ];
+  }
+
+  if (readThreadPolicy !== undefined) {
+    // Fires once per prompt before the model starts, and reads fresh, so a loadout the user or
+    // the agent changed since the last prompt is the one shown. A delegated child reads its own
+    // thread, which starts with no loadout, so it hears nothing unless one was set on it.
+    hooks.UserPromptSubmit = [
+      matcher(async (input, signal) => {
+        if (input.hook_event_name !== "UserPromptSubmit") return {};
+        const block = formatLoadoutBlock(await readThreadPolicy(signal));
+        if (block === undefined) return {};
+        return {
+          hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: block },
         };
       }),
     ];

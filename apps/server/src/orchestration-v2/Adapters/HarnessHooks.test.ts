@@ -5,6 +5,7 @@ import {
   type LedgerInvestigation,
   type LedgerItem,
   LedgerItemId,
+  type Loadout,
   type LoadoutStructure,
   ProviderInstanceId,
   ThreadId,
@@ -738,6 +739,105 @@ describe("plan before editing", () => {
     structure = "managers";
     await fire("PreToolUse", preToolUse("Edit"));
     expect(reads).toEqual({ policy: 3, ledger: 1 });
+  });
+});
+
+const claudeAgent = ProviderInstanceId.make("claudeAgent");
+const oversight: Loadout = {
+  id: "oversight",
+  name: "Oversight",
+  description: "Not shown to the agent.",
+  roles: {
+    planner: {
+      instanceId: ProviderInstanceId.make("superbot"),
+      model: "superbot-1",
+      effort: "high",
+    },
+    explorer: { instanceId: claudeAgent, model: "claude-haiku-5-5" },
+    worker: { instanceId: claudeAgent, model: "claude-sonnet-5-5" },
+    judge: {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6.1-sol",
+      effort: "high",
+      fallback: { instanceId: claudeAgent, model: "claude-opus-5-5", effort: "high" },
+    },
+  },
+};
+const oversightPolicy: ProviderAdapterV2HarnessThreadPolicy = {
+  structure: "workers",
+  planBeforeEditing: true,
+  loadout: { ...oversight, setBy: "user" },
+};
+const prompt = (): HookInput => ({ ...base, hook_event_name: "UserPromptSubmit", prompt: "go" });
+
+describe("loadout context", () => {
+  it("tells the agent its loadout on every prompt, read fresh each time", async () => {
+    let policy = oversightPolicy;
+    const { fire } = make({ readThreadPolicy: async () => policy });
+    expect(contextOf(await fire("UserPromptSubmit", prompt()))).toBe(
+      [
+        'Loadout: "Oversight", set by the user. Structure: workers.',
+        "Roles:",
+        "- planner: superbot-1 on superbot, effort high",
+        "- explorer: claude-haiku-5-5 on claudeAgent",
+        "- worker: claude-sonnet-5-5 on claudeAgent",
+        "- judge: gpt-6.1-sol on codex, effort high; falls back to claude-opus-5-5 on claudeAgent, effort high",
+        "Delegate work with delegate_task and a role (worker, explorer, subPlanner) rather than doing it all yourself. The judge gates item closes: an item closes only after ledger_request_judgement passes.",
+      ].join("\n"),
+    );
+
+    // The agent proposes a managers loadout with no roles mid-thread; the next prompt says so.
+    policy = {
+      structure: "managers",
+      planBeforeEditing: true,
+      loadout: { ...oversight, name: "Lean", roles: {}, structure: "managers", setBy: "agent" },
+    };
+    const next = contextOf(await fire("UserPromptSubmit", prompt())) ?? "";
+    expect(next).toContain('Loadout: "Lean", proposed by you. Structure: managers.');
+    expect(next).toContain("Roles: none assigned");
+    expect(next).toContain("You plan and review only");
+    expect(next).not.toContain("judge");
+  });
+
+  it("adds nothing under Solo, and a failed read adds nothing and is reported", async () => {
+    for (const policy of [{ structure: "solo" as const, planBeforeEditing: true }, undefined]) {
+      expect(
+        await make({ readThreadPolicy: async () => policy }).fire("UserPromptSubmit", prompt()),
+      ).toEqual({});
+    }
+    const failure = new Error("settings unavailable");
+    const { fire, errors } = make({
+      readThreadPolicy: async () => {
+        throw failure;
+      },
+    });
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    expect(errors).toEqual([failure]);
+  });
+
+  it("reaches a delegated child only through the child thread's own loadout", async () => {
+    const child = (policy: ProviderAdapterV2HarnessThreadPolicy) =>
+      make({ readThreadPolicy: async () => policy, delegatedChild: true });
+    // A child thread is created without a loadout, so its own policy reads as solo.
+    expect(
+      await child({ structure: "solo", planBeforeEditing: true }).fire(
+        "UserPromptSubmit",
+        prompt(),
+      ),
+    ).toEqual({});
+    expect(contextOf(await child(oversightPolicy).fire("UserPromptSubmit", prompt()))).toContain(
+      'Loadout: "Oversight"',
+    );
+  });
+
+  it("re-sends the loadout after a compaction, alongside the ledger", async () => {
+    const { fire } = make({
+      readThreadPolicy: async () => oversightPolicy,
+      readLedgerState: async () => state(ledgerOf([item("L1", "open")])),
+    });
+    const context = contextOf(await fire("SessionStart", compact())) ?? "";
+    expect(context).toContain("L1 Item L1");
+    expect(context).toContain(contextOf(await fire("UserPromptSubmit", prompt()))!);
   });
 });
 
