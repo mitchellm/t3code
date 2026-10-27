@@ -7,6 +7,7 @@ import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerControl, ComposerControlSeparator } from "./ComposerControl";
 import { ComposerLoadoutPicker } from "./ComposerLoadoutPicker";
 import { useComposerLoadout } from "./useComposerLoadout";
+import { ComposerInvestigateToggle } from "./ComposerInvestigate";
 import {
   ComposerFooterModeControls,
   ComposerModelPicker,
@@ -188,6 +189,15 @@ export function ComposerControlsBar(props: {
             onToggleInteractionMode={toggleInteractionMode}
             onRuntimeModeChange={handleRuntimeModeChange}
           />
+          {/* Fork: Investigate mode needs a thread to hold the run, like the loadout picker. */}
+          {routeKind === "server" ? (
+            <ComposerInvestigateToggle
+              environmentId={environmentId}
+              threadId={routeThreadRef.threadId}
+              size={composerControlsCollapsed ? "xs" : "sm"}
+              hidden={composerControlsHidden || restingHiddenBlockCount > 0}
+            />
+          ) : null}
           {loadout === null ? null : (
             <>
               <ComposerControlSeparator size={composerControlsCollapsed ? "xs" : "sm"} />

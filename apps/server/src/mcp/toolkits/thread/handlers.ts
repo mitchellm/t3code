@@ -26,6 +26,7 @@ import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { ThreadToolkit } from "./tools.ts";
+import { guardInvestigationSpawn } from "../../InvestigationSpawnGuard.ts";
 
 function queueEntry(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
@@ -98,6 +99,8 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
+      // Fork: Investigate mode locks work-starting tools.
+      yield* guardInvestigationSpawn("run_scheduled_task_now");
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;
       const { tasks } = yield* scheduler.list().pipe(Effect.mapError(unavailable));
       if (!tasks.some((task) => task.id === input.taskId))
@@ -159,6 +162,8 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_fork: writesThread((input) =>
     Effect.gen(function* () {
+      // Fork: Investigate mode locks work-starting tools.
+      yield* guardInvestigationSpawn("t3_thread_fork");
       const { threads, projection } = yield* readThread(input.threadId);
       const commandId = yield* newCommandId();
       const targetThreadId = ThreadId.make(`${commandId}:fork`);
@@ -181,6 +186,8 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     (input) => [input.targetThreadId, input.sourceThreadId],
     (input) =>
       Effect.gen(function* () {
+        // Fork: Investigate mode locks work-starting tools.
+        yield* guardInvestigationSpawn("t3_thread_merge_back");
         const context = yield* readThread(input.targetThreadId);
         const source = yield* readThread(input.sourceThreadId);
         const result = yield* context.threads
@@ -261,6 +268,8 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_pending_request_respond: writesThread((input) =>
     Effect.gen(function* () {
+      // Fork: Investigate mode locks work-starting tools.
+      yield* guardInvestigationSpawn("t3_pending_request_respond");
       const { threads, projection } = yield* readQuestion(input);
       const result = yield* threads
         .dispatch({
@@ -303,12 +312,17 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     }),
   ),
   t3_queue_edit: writesThread((input) =>
-    dispatch(input.threadId, (common) => ({
-      ...common,
-      type: "queued-run.edit",
-      runId: input.queuedRunId,
-      text: input.text,
-    })),
+    // Fork: Investigate mode locks work-starting tools.
+    guardInvestigationSpawn("t3_queue_edit").pipe(
+      Effect.andThen(
+        dispatch(input.threadId, (common) => ({
+          ...common,
+          type: "queued-run.edit",
+          runId: input.queuedRunId,
+          text: input.text,
+        })),
+      ),
+    ),
   ),
   t3_queue_cancel: writesThread((input) =>
     dispatch(input.threadId, (common) => ({
@@ -326,12 +340,17 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     })),
   ),
   t3_queue_promote_to_steer: writesThread((input) =>
-    dispatch(input.threadId, (common) => ({
-      ...common,
-      type: "queued-message.promote-to-steer",
-      queuedRunId: input.queuedRunId,
-      targetRunId: input.targetRunId,
-    })),
+    // Fork: Investigate mode locks work-starting tools.
+    guardInvestigationSpawn("t3_queue_promote_to_steer").pipe(
+      Effect.andThen(
+        dispatch(input.threadId, (common) => ({
+          ...common,
+          type: "queued-message.promote-to-steer",
+          queuedRunId: input.queuedRunId,
+          targetRunId: input.targetRunId,
+        })),
+      ),
+    ),
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {

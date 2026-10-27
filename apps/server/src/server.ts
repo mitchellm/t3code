@@ -188,6 +188,7 @@ import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as TaskTimingService from "./orchestration-v2/TaskTimingService.ts";
 import * as TaskRetroService from "./orchestration-v2/TaskRetroService.ts";
+import * as InvestigationService from "./orchestration-v2/InvestigationService.ts";
 import * as TaskRetros from "./persistence/TaskRetros.ts";
 import * as BuildModeService from "./orchestration-v2/BuildModeService.ts";
 import * as ThreadPreviews from "./orchestration-v2/ThreadPreviews.ts";
@@ -616,6 +617,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     ),
   ),
   DelegatedTaskAnalytics.layer,
+  // Fork: Investigate mode; also watches budgets, so it starts with the server.
+  InvestigationService.layer,
   Layer.effectDiscard(
     Effect.gen(function* () {
       const service = yield* PullRequestSyncReactor.PullRequestSyncReactor;

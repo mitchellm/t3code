@@ -164,6 +164,12 @@ import {
   TaskRetro,
 } from "./taskRetro.ts";
 import {
+  OrchestrationInvestigationError,
+  OrchestrationStartInvestigationInput,
+  OrchestrationStartInvestigationResult,
+  OrchestrationStopInvestigationInput,
+} from "./investigation.ts";
+import {
   OrchestrationBuildModeError,
   OrchestrationRunBuildModeInput,
   OrchestrationRunBuildModeResult,
@@ -1752,6 +1758,29 @@ const WsOrchestrationV2GetTaskTimingRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.g
   error: Schema.Union([OrchestrationGetTaskTimingError, EnvironmentAuthorizationError]),
 });
 
+const InvestigationRpcError = Schema.Union([
+  OrchestrationInvestigationError,
+  EnvironmentAuthorizationError,
+]);
+
+const WsOrchestrationV2StartInvestigationRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.startInvestigation,
+  {
+    payload: OrchestrationStartInvestigationInput,
+    success: OrchestrationStartInvestigationResult,
+    error: InvestigationRpcError,
+  },
+);
+
+const WsOrchestrationV2StopInvestigationRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.stopInvestigation,
+  {
+    payload: OrchestrationStopInvestigationInput,
+    success: Schema.Void,
+    error: InvestigationRpcError,
+  },
+);
+
 const TaskRetroRpcError = Schema.Union([
   OrchestrationTaskRetroError,
   EnvironmentAuthorizationError,
@@ -2245,6 +2274,8 @@ export const ForkWsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetTaskRetroRpc,
   WsOrchestrationV2RunTaskRetroRpc,
   WsOrchestrationV2ResolveTaskRetroRpc,
+  WsOrchestrationV2StartInvestigationRpc,
+  WsOrchestrationV2StopInvestigationRpc,
   WsOrchestrationV2RunBuildModeRpc,
 ).middleware(RpcScopeAuthorization);
 

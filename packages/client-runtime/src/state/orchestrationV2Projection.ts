@@ -380,6 +380,7 @@ export function applyOrchestrationV2ProjectionEvent(
     case "ledger.item.updated":
     case "ledger.checkpoint.updated":
     case "ledger.closed":
+    case "ledger.investigation.updated":
     case "ledger.reopened": {
       // Ledger edits are not thread activity, matching the server projection.
       const ledger = applyLedgerEvent(projection.ledger, event);

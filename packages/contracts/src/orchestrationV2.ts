@@ -73,6 +73,13 @@ import {
   LedgerJudgementStartedCommand,
   LedgerJson,
 } from "./ledger.ts";
+import {
+  LedgerInvestigationEndCommand,
+  LedgerInvestigationSpendCommand,
+  LedgerInvestigationStartCommand,
+  LedgerInvestigationUpdatedPayload,
+  LedgerInvestigationUpdatedPayloadJson,
+} from "./investigation.ts";
 import { ThreadLoadout } from "./loadout.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
@@ -893,6 +900,11 @@ export const OrchestrationV2Subagent = Schema.Struct({
    * the judge's carries none, so timing reads it from here. Absent when the delegation named none.
    */
   role: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Fork: started by the server's own ledger judge, not by an agent naming the judge role. Only
+   * these are exempt from an investigation's worker cap. Absent means an agent's delegation.
+   */
+  serverJudge: Schema.optionalKey(Schema.Literal(true)),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   status: Schema.Literals([
     "idle",
@@ -1289,6 +1301,11 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
       ),
     }),
     Schema.Struct({ kind: Schema.Literal("system") }),
+    /**
+     * Fork: the server asking an ended investigation's planner for its report, the one automatic
+     * turn an ended investigation still starts.
+     */
+    Schema.Struct({ kind: Schema.Literal("investigation_report") }),
   ],
   (kind) => Schema.Struct({ kind }),
   () => ({ kind: "background_task" }),
@@ -1975,6 +1992,12 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("ledger.reopened"),
     payload: LedgerReopenedPayload,
+  }),
+  // Fork: Investigate mode's record on the ledger changed.
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("ledger.investigation.updated"),
+    payload: LedgerInvestigationUpdatedPayload,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2895,6 +2918,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("ledger.investigation.updated"),
+    payload: LedgerInvestigationUpdatedPayloadJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("checkpoint-scope.created"),
     payload: OrchestrationV2CheckpointScopeJson,
   }),
@@ -3412,6 +3440,8 @@ export const OrchestrationV2Command = Schema.Union([
     // Defaults to settled_only; fire-and-forget wakes require always.
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
     role: Schema.optional(TrimmedNonEmptyString),
+    /** Fork: set only by the server's ledger judge delegation; see the subagent field. */
+    serverJudge: Schema.optional(Schema.Literal(true)),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
@@ -3533,6 +3563,10 @@ const OrchestrationV2InternalCommand = Schema.Union([
   LedgerVerdictRecordCommand,
   LedgerJudgementAbandonCommand,
   LedgerJudgementStartedCommand,
+  // Fork: Investigate mode; clients reach these only through the investigation RPCs.
+  LedgerInvestigationStartCommand,
+  LedgerInvestigationEndCommand,
+  LedgerInvestigationSpendCommand,
   /**
    * Internal so no client can mark a request saved without the value being
    * stored.
@@ -3565,6 +3599,8 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getTaskRetro: "orchestration.getTaskRetro",
   runTaskRetro: "orchestration.runTaskRetro",
   resolveTaskRetro: "orchestration.resolveTaskRetro",
+  startInvestigation: "orchestration.startInvestigation",
+  stopInvestigation: "orchestration.stopInvestigation",
   runBuildMode: "orchestration.runBuildMode",
   searchThread: "orchestration.searchThread",
   searchThreadStream: "orchestration.searchThreadStream",

@@ -61,11 +61,12 @@ export const liveThreadShell = (
 
 export const liveThreadsLayer = Layer.mock(ThreadManagement.ThreadManagementService)({
   getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+  getThreadRecords: (threadId) => Effect.succeed(idleThreadProjection(liveThreadShell(threadId))),
 });
 
-export const idleThreadProjection = (
+export function idleThreadProjection(
   shell: OrchestrationV2ThreadShell,
-): OrchestrationV2ThreadProjection => {
+): OrchestrationV2ThreadProjection {
   const {
     status: _status,
     activeRunId: _activeRunId,
@@ -99,4 +100,4 @@ export const idleThreadProjection = (
     visibleTurnItems: [],
     updatedAt: shell.updatedAt,
   };
-};
+}

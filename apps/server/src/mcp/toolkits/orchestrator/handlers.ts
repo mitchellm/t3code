@@ -7,6 +7,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+import { guardInvestigationSpawn } from "../../InvestigationSpawnGuard.ts";
 
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads((input) =>
@@ -96,6 +97,8 @@ const handlers = {
     () => ({}),
     (input) =>
       Effect.gen(function* () {
+        // Fork: Investigate mode locks work-starting tools.
+        yield* guardInvestigationSpawn("schedule_task");
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         return yield* service.scheduleTask(scope, input);
@@ -110,6 +113,8 @@ const handlers = {
   ),
   update_scheduled_task: McpToolAccess.writes((input) =>
     Effect.gen(function* () {
+      // Fork: Investigate mode locks work-starting tools.
+      yield* guardInvestigationSpawn("update_scheduled_task");
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.updateScheduledTask(scope, input);
@@ -131,6 +136,8 @@ const handlers = {
   ),
   create_threads: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
+      // Fork: Investigate mode locks work-starting tools.
+      yield* guardInvestigationSpawn("create_threads");
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.createThreads(scope, input);
@@ -163,6 +170,8 @@ const handlers = {
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {
+        // Fork: Investigate mode locks work-starting tools.
+        yield* guardInvestigationSpawn("t3_thread_send");
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         return yield* service.sendToThread(scope, input);

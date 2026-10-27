@@ -9,10 +9,19 @@ import type {
   OrchestrationV2InternalCommand,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import { isRefutedApproach } from "@t3tools/shared/investigation";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
 import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
+import {
+  followInvestigation,
+  type InvestigationCommand,
+  investigationCommandProblem,
+  isInvestigationCommand,
+  planInvestigationCommand,
+  stampRefuterVerdict,
+} from "./Investigation.ts";
 
 export type LedgerEventBody = Extract<
   OrchestrationV2DomainEvent,
@@ -53,6 +62,8 @@ export function ledgerEventFromPlan(
     case "ledger.closed":
       return { ...envelope, type: planned.type, payload: planned.payload };
     case "ledger.reopened":
+      return { ...envelope, type: planned.type, payload: planned.payload };
+    case "ledger.investigation.updated":
       return { ...envelope, type: planned.type, payload: planned.payload };
   }
 }
@@ -252,6 +263,33 @@ const describeItems = (items: ReadonlyArray<LedgerItem>) =>
  */
 export function planLedgerCommand(input: {
   readonly command: LedgerCommand;
+  readonly ledger: Ledger | undefined;
+  readonly now: DateTime.Utc;
+  readonly requiresJudge?: boolean;
+}): Result.Result<ReadonlyArray<PlannedLedgerEvent>, LedgerRejection> {
+  // Fork: Investigate mode rides the ledger; its own commands and the solve it decides.
+  const { command } = input;
+  if (isInvestigationCommand(command)) {
+    return planInvestigationCommand({
+      command,
+      ledger: input.ledger,
+      now: input.now,
+      requiresJudge: input.requiresJudge === true,
+    });
+  }
+  const problem = investigationCommandProblem(command, input.ledger);
+  if (problem !== undefined) return Result.fail(problem);
+  return Result.map(planCoreLedgerCommand({ ...input, command }), (planned) =>
+    followInvestigation(
+      input.ledger,
+      stampRefuterVerdict(command, input.ledger, planned),
+      input.now,
+    ),
+  );
+}
+
+function planCoreLedgerCommand(input: {
+  readonly command: Exclude<LedgerCommand, InvestigationCommand>;
   readonly ledger: Ledger | undefined;
   readonly now: DateTime.Utc;
   readonly requiresJudge?: boolean;
@@ -481,12 +519,19 @@ export function planLedgerCommand(input: {
       }
       // On a judged ledger, work the agent started ends only through the judge; setting it aside
       // is the user's call. Deferring or dropping work it never started stays open to it.
+      // Fork: dropping a refuted investigation approach claims nothing, so the agent may, to make
+      // room for a variant under the parallel cap.
+      const dropsRefutedApproach =
+        target === "dropped" &&
+        ledger.investigation?.status === "running" &&
+        isRefutedApproach(ledger.investigation, item);
       if (
         byAgent &&
         requiresJudge &&
         changesStatus &&
         item.status === "in_progress" &&
-        (target === "deferred" || target === "dropped" || target === "open")
+        (target === "deferred" || target === "dropped" || target === "open") &&
+        !dropsRefutedApproach
       ) {
         return reject(
           `Item ${item.id} is in progress on a judged ledger. Close it with evidence for the judge, or ask the user to defer or drop it.`,

@@ -79,6 +79,7 @@ const parentProjection = (loadoutId: string | null, worktreePath: string | null 
   ({
     thread: {
       id: threadId,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
       projectId,
       title: "Parent",
       createdBy: "user",

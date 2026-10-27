@@ -135,6 +135,11 @@ import {
   startBackgroundJudgement,
 } from "./LedgerJudgement.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
+import {
+  delegationRefusalFor,
+  withInvestigationDelegationLease,
+} from "../orchestration-v2/Investigation.ts";
+import { investigationLockFor } from "./InvestigationSpawnGuard.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -2074,6 +2079,16 @@ const make = Effect.gen(function* () {
     return { scope, parent, ledger, ports };
   });
 
+  /** Fork: Investigate mode's spawn rule as it applies to a new delegated worker. */
+  const investigationDelegationRefusal = Effect.fn(
+    "OrchestratorMcpService.investigationDelegationRefusal",
+  )(function* (callerThreadId: ThreadId, requestedRole: string | undefined) {
+    return delegationRefusalFor(
+      yield* investigationLockFor(threadManagement, callerThreadId),
+      requestedRole,
+    );
+  });
+
   /**
    * The caller the server judges as: the thread itself, under a namespace of its own so its
    * command ids never collide with an agent's, matching the thread's active run when it has one.
@@ -2468,72 +2483,91 @@ const make = Effect.gen(function* () {
         operation,
       });
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
-      // An explicit target always wins; the role only picks a default.
-      const target = yield* resolveTargetRechecking({
-        parent,
-        target: input.target ?? (yield* loadoutRoleTarget(parent.thread, input.role, providers)),
-        providers,
-        skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
-      });
-      const runtimeMode = yield* resolveRuntimeMode(
-        parent.thread.runtimeMode,
-        input.runtimeMode,
-        target,
-      );
-      const interactionMode = yield* resolveInteractionMode(
-        parent.thread.interactionMode,
-        input.interactionMode,
-      );
-      // Fork: editing roles get a worktree by default (see WorkerIsolation).
-      const workspace = isRetryOfAcceptedDelegation
-        ? undefined
-        : yield* resolveDelegationWorkspace({
-            delegation: input,
-            thread: parent.thread,
-            activeLoadout: loadLoadouts(parent.thread).pipe(Effect.map(({ active }) => active)),
-            requireProject,
-            git: gitDriver,
+      // Narrowed above; the closure below would not see the narrowing.
+      const parentNodeId = parentRun.rootNodeId;
+      // Fork: an investigation bounds its workers. The check and the dispatch that records the
+      // task run alone per parent thread, so two concurrent calls cannot both take the last slot.
+      const { result, workspace } = yield* withInvestigationDelegationLease(
+        scope.thread.threadId,
+        Effect.gen(function* () {
+          if (!isRetryOfAcceptedDelegation && operation !== JUDGE_DELEGATION_OPERATION) {
+            const refused = yield* investigationDelegationRefusal(
+              scope.thread.threadId,
+              input.role,
+            );
+            if (refused !== undefined) return yield* failure("invalid_request", refused);
+          }
+          // An explicit target always wins; the role only picks a default.
+          const target = yield* resolveTargetRechecking({
+            parent,
+            target:
+              input.target ?? (yield* loadoutRoleTarget(parent.thread, input.role, providers)),
+            providers,
+            skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
           });
-      const workspaceStrategy = workspace?.strategy;
-      // ThreadManagementService.dispatch is the chokepoint for this command
-      // type's own enablement check, using the same command id and its
-      // receipt-replay exemption, so no separate assert runs here.
-      const result = yield* threadManagement
-        .dispatch({
-          type: "delegated_task.request",
-          createdBy: "agent",
-          creationSource: "mcp",
-          commandId,
-          parentThreadId: scope.thread.threadId,
-          parentRunId: parentRun.id,
-          parentNodeId: parentRun.rootNodeId,
-          task: taskPrompt(input),
-          ...(input.title === undefined ? {} : { title: input.title }),
-          modelSelection: target.modelSelection,
-          runtimeMode,
-          interactionMode,
-          ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
-          // Async delegations wake the parent on every child terminal; wait
-          // delegations deliver through the blocking tool call, so a wake is
-          // only needed if the parent settled first (timeout, disconnect).
-          completionWake: input.mode === "wait" ? "settled_only" : "always",
-          // The judge delegation passes no role of its own, so the operation names it.
-          ...(operation === JUDGE_DELEGATION_OPERATION
-            ? { role: "judge" }
-            : input.role === undefined
-              ? {}
-              : { role: input.role }),
-        })
-        .pipe(
-          Effect.mapError((error) =>
-            error._tag === "ThreadManagementProviderInstanceDisabledError"
-              ? threadManagementFailure(error)
-              : failure(
-                  "orchestration_error",
-                  `Unable to create delegated task: ${errorMessage(error)}`,
-                ),
-          ),
-        );
+          const runtimeMode = yield* resolveRuntimeMode(
+            parent.thread.runtimeMode,
+            input.runtimeMode,
+            target,
+          );
+          const interactionMode = yield* resolveInteractionMode(
+            parent.thread.interactionMode,
+            input.interactionMode,
+          );
+          // Fork: editing roles get a worktree by default (see WorkerIsolation).
+          const workspace = isRetryOfAcceptedDelegation
+            ? undefined
+            : yield* resolveDelegationWorkspace({
+                delegation: input,
+                thread: parent.thread,
+                activeLoadout: loadLoadouts(parent.thread).pipe(Effect.map(({ active }) => active)),
+                requireProject,
+                git: gitDriver,
+              });
+          const workspaceStrategy = workspace?.strategy;
+          // ThreadManagementService.dispatch is the chokepoint for this command
+          // type's own enablement check, using the same command id and its
+          // receipt-replay exemption, so no separate assert runs here.
+          const result = yield* threadManagement
+            .dispatch({
+              type: "delegated_task.request",
+              createdBy: "agent",
+              creationSource: "mcp",
+              commandId,
+              parentThreadId: scope.thread.threadId,
+              parentRunId: parentRun.id,
+              parentNodeId,
+              task: taskPrompt(input),
+              ...(input.title === undefined ? {} : { title: input.title }),
+              modelSelection: target.modelSelection,
+              runtimeMode,
+              interactionMode,
+              ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
+              // Async delegations wake the parent on every child terminal; wait
+              // delegations deliver through the blocking tool call, so a wake is
+              // only needed if the parent settled first (timeout, disconnect).
+              completionWake: input.mode === "wait" ? "settled_only" : "always",
+              // The judge delegation passes no role of its own, so the operation names it, and
+              // marks it as the server's so no agent-named role can claim the judge's exemption.
+              ...(operation === JUDGE_DELEGATION_OPERATION
+                ? { role: "judge", serverJudge: true as const }
+                : input.role === undefined
+                  ? {}
+                  : { role: input.role }),
+            })
+            .pipe(
+              Effect.mapError((error) =>
+                error._tag === "ThreadManagementProviderInstanceDisabledError"
+                  ? threadManagementFailure(error)
+                  : failure(
+                      "orchestration_error",
+                      `Unable to create delegated task: ${errorMessage(error)}`,
+                    ),
+              ),
+            );
+          return { result, workspace };
+        }),
+      );
       const taskEvent = result.storedEvents.find(
         (stored) =>
           stored.event.type === "subagent.updated" && stored.event.payload.origin === "app_owned",

@@ -19,6 +19,11 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import {
+  investigationSpawnGuard,
+  investigationSpawnRefusal,
+} from "../orchestration-v2/Investigation.ts";
+import { latestUserMessageAt } from "./InvestigationSpawnGuard.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
@@ -252,18 +257,34 @@ const make = Effect.gen(function* () {
       // closed ledger being replaced joins the hash, or an identical replacement would replay the
       // first ledger's receipt and never be created.
       (ledger) => [ledger !== undefined && ledger.closedAt !== null ? ledger.id : "new", args],
-      ({ commandId, threadId, requestKey }) =>
-        Effect.succeed({
-          type: "ledger.create" as const,
-          commandId,
-          threadId,
-          // Derived from the request key, so a replayed create names the same ledger.
-          ledgerId: ledgerIdFor(threadId, requestKey),
-          title: input.title,
-          startState: input.startState ?? "",
-          checkpoints: input.checkpoints ?? [],
-          winConditions: input.winConditions ?? [],
-          items: input.items,
+      ({ commandId, threadId, requestKey, ledger }) =>
+        Effect.gen(function* () {
+          // Fork: Investigate mode's spawn rule. A new ledger would lift an ended investigation's
+          // stop, so it waits for the user's next message (a /ledger request is one).
+          const endedAt = ledger?.investigation?.endedAt ?? null;
+          if (endedAt !== null) {
+            const lock = investigationSpawnGuard(
+              ledger,
+              yield* latestUserMessageAt(threads, threadId, endedAt).pipe(
+                Effect.mapError(unavailable),
+              ),
+            );
+            const problem = investigationSpawnRefusal(lock, "ledger_create");
+            if (problem !== undefined) return yield* failure("invalid_request", problem);
+          }
+          return {
+            type: "ledger.create" as const,
+            commandId,
+            threadId,
+            // Derived from the request key, so a replayed create names the same ledger.
+            ledgerId: ledgerIdFor(threadId, requestKey),
+            title: input.title,
+            startState: input.startState ?? "",
+            checkpoints: input.checkpoints ?? [],
+            winConditions: input.winConditions ?? [],
+            items: input.items,
+            createdBy: "agent" as const,
+          };
         }),
       (ledger) => ledger !== undefined && ledger.closedAt === null,
     );
@@ -362,7 +383,7 @@ const make = Effect.gen(function* () {
       "close",
       scope,
       input,
-      (common) => ({ type: "ledger.close", ...common }),
+      (common) => ({ type: "ledger.close", ...common, createdBy: "agent" }),
       (ledger) => ledger.closedAt !== null,
     );
   });
@@ -375,7 +396,7 @@ const make = Effect.gen(function* () {
       "reopen",
       scope,
       input,
-      (common) => ({ type: "ledger.reopen", ...common }),
+      (common) => ({ type: "ledger.reopen", ...common, createdBy: "agent" }),
       (ledger) => ledger.closedAt === null,
     );
   });

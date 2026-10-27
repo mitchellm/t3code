@@ -4,7 +4,13 @@ import {
   EnvironmentId,
   EventId,
   type Ledger,
+  LedgerId,
+  LedgerItemId,
+  MessageId,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2Run,
   ProviderInstanceId,
+  RunId,
   ThreadId,
   type CommandId,
 } from "@t3tools/contracts";
@@ -81,8 +87,24 @@ const makeFakeThreads = () => {
   >();
   let sequence = 0;
   let planned = 0;
+  /** The thread's runs and user messages, for the one tool that reads them (create after an end). */
+  const runs = new Map<ThreadId, ReadonlyArray<OrchestrationV2Run>>();
+  const messages = new Map<ThreadId, ReadonlyArray<OrchestrationV2ConversationMessage>>();
   const layer = Layer.mock(ThreadManagement.ThreadManagementService)({
     getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+    getThreadRecords: ((
+      threadId: ThreadId,
+      _fields: ReadonlyArray<string>,
+      filter?: { readonly messageRunIds?: ReadonlyArray<string> },
+    ) =>
+      Effect.succeed({
+        runs: runs.get(threadId) ?? [],
+        messages: (messages.get(threadId) ?? []).filter(
+          (message) =>
+            filter?.messageRunIds === undefined ||
+            (message.runId !== null && filter.messageRunIds.includes(message.runId)),
+        ),
+      })) as unknown as ThreadManagement.ThreadManagementService["Service"]["getThreadRecords"],
     getProjectThreadRecords: ({ threadId }) => {
       const ledger = ledgers.get(threadId);
       return Effect.succeed({
@@ -131,7 +153,7 @@ const makeFakeThreads = () => {
         return { sequence, storedEvents: [] };
       }),
   });
-  return { layer, ledgers, planned: () => planned };
+  return { layer, ledgers, runs, messages, planned: () => planned };
 };
 
 const withServer = <A, E>(
@@ -210,6 +232,84 @@ it.effect("creates a ledger and reads it back compactly", () => {
     }),
   );
 });
+
+it.effect(
+  "after an investigation ends, ledger_create is refused until a user-authored message arrives",
+  () => {
+    const endedAt = DateTime.add(NOW, { minutes: 10 });
+    const investigationLedger: Ledger = {
+      id: LedgerId.make("ledger:investigation:req"),
+      threadId: ownThread,
+      title: "Why does sync drop rows",
+      startState: "",
+      checkpoints: [],
+      winConditions: ["A failing test passes with the fix."],
+      items: [],
+      requiresJudge: true,
+      investigation: {
+        goal: "Why does sync drop rows",
+        solvedWhen: "A failing test passes with the fix.",
+        budget: { minutes: 30 },
+        parallelApproaches: 2,
+        status: "solved",
+        approachesItemId: LedgerItemId.make("approaches"),
+        startedAt: NOW,
+        endedAt,
+      },
+      createdAt: NOW,
+      updatedAt: endedAt,
+      closedAt: endedAt,
+    };
+    const run = (id: string, ordinal: number, at: DateTime.Utc) =>
+      ({
+        id: RunId.make(id),
+        ordinal,
+        status: "running",
+        requestedAt: at,
+        startedAt: at,
+        completedAt: null,
+      }) as unknown as OrchestrationV2Run;
+    const message = (
+      runId: string,
+      at: DateTime.Utc,
+      from: { readonly createdBy: "user" | "agent"; readonly creationSource: "web" | "server" },
+    ) =>
+      ({
+        id: MessageId.make(`message:${runId}`),
+        runId: RunId.make(runId),
+        role: "user",
+        text: "…",
+        createdAt: at,
+        ...from,
+      }) as unknown as OrchestrationV2ConversationMessage;
+    const fake = makeFakeThreads();
+    fake.ledgers.set(ownThread, investigationLedger);
+    return withServer(fake, (call) =>
+      Effect.gen(function* () {
+        // The server queued the report turn after the end; it started after the end too, which
+        // is why run timing cannot tell it from the user's own request.
+        const reportAt = DateTime.add(endedAt, { minutes: 1 });
+        fake.runs.set(ownThread, [run("run:report", 2, reportAt)]);
+        fake.messages.set(ownThread, [
+          message("run:report", reportAt, { createdBy: "agent", creationSource: "server" }),
+        ]);
+        const escape = yield* call("ledger_create", { title: "Something else", items: twoItems });
+        expect(failureOf(escape)?.message).toContain("until the user sends a new message");
+        expect(fake.ledgers.get(ownThread)?.id).toBe(investigationLedger.id);
+        // The user's own /ledger request is a user-authored message after the end.
+        const askedAt = DateTime.add(endedAt, { minutes: 5 });
+        fake.runs.set(ownThread, [run("run:report", 2, reportAt), run("run:user", 3, askedAt)]);
+        fake.messages.set(ownThread, [
+          message("run:report", reportAt, { createdBy: "agent", creationSource: "server" }),
+          message("run:user", askedAt, { createdBy: "user", creationSource: "web" }),
+        ]);
+        const asked = yield* call("ledger_create", { title: "Follow-up", items: twoItems });
+        expect(failureOf(asked)).toBeUndefined();
+        expect(fake.ledgers.get(ownThread)?.id).not.toBe(investigationLedger.id);
+      }),
+    );
+  },
+);
 
 it.effect("reads a thread with no ledger as null", () =>
   withServer(makeFakeThreads(), (call) =>

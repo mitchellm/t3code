@@ -10,6 +10,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { LedgerInvestigation, LedgerInvestigationJson } from "./investigation.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 /** `deferred` is work found out of scope for this task: kept for later, never auto-continued. */
@@ -34,6 +35,11 @@ export const LedgerItemVerdict = Schema.Struct({
   judge: LedgerVerdictJudge,
   notes: Schema.String,
   at: Schema.DateTimeUtc,
+  /**
+   * Fork: the planner stamps this when it records a verdict on an investigation's approach, the
+   * only items judged by the refuter. Only such a pass solves an investigation.
+   */
+  refuter: Schema.optionalKey(Schema.Boolean),
 });
 export type LedgerItemVerdict = typeof LedgerItemVerdict.Type;
 
@@ -102,6 +108,8 @@ export const Ledger = Schema.Struct({
    * loadout with a judge role; absent on older records, which means false.
    */
   requiresJudge: Schema.optionalKey(Schema.Boolean),
+  /** Fork: present when the ledger runs an investigation (Investigate mode). */
+  investigation: Schema.optionalKey(LedgerInvestigation),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   closedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -141,6 +149,7 @@ export const LedgerJson = Ledger.mapFields((fields) => ({
   ...fields,
   checkpoints: Schema.Array(LedgerCheckpointJson),
   items: Schema.Array(LedgerItemJson),
+  investigation: Schema.optionalKey(LedgerInvestigationJson),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   closedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -164,6 +173,9 @@ export const LedgerCheckpointDraft = Schema.Struct({
 });
 export type LedgerCheckpointDraft = typeof LedgerCheckpointDraft.Type;
 
+/** Who sent a ledger command: absent means the user, as a client sends it. */
+const LedgerActor = Schema.Literals(["user", "agent"]);
+
 export const LedgerCommands = [
   Schema.Struct({
     type: Schema.Literal("ledger.create"),
@@ -177,6 +189,8 @@ export const LedgerCommands = [
     // No requiresJudge: the orchestrator derives it from the thread's loadout, so neither a
     // client nor the agent being judged can opt a ledger out of the gate.
     items: Schema.Array(LedgerItemDraft),
+    /** As on `ledger.item.update`: the ledger tools stamp "agent", which only narrows. */
+    createdBy: Schema.optional(LedgerActor),
   }),
   Schema.Struct({
     type: Schema.Literal("ledger.item.add"),
@@ -231,12 +245,14 @@ export const LedgerCommands = [
     commandId: CommandId,
     threadId: ThreadId,
     ledgerId: LedgerId,
+    createdBy: Schema.optional(LedgerActor),
   }),
   Schema.Struct({
     type: Schema.Literal("ledger.reopen"),
     commandId: CommandId,
     threadId: ThreadId,
     ledgerId: LedgerId,
+    createdBy: Schema.optional(LedgerActor),
   }),
 ] as const;
 

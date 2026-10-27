@@ -21,6 +21,7 @@ import { useThreadLedgerIfSupported } from "~/hooks/useThreadLedgerIfSupported";
 import { Badge } from "../ui/badge";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { ThreadTabSection } from "../thread/ThreadOverviewTab";
+import { InvestigationPanel } from "./InvestigationPanel";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { BuildModeBar } from "./BuildModeBar";
 
@@ -213,6 +214,7 @@ export function ThreadLedgerDetailsSection({ threadRef }: { threadRef: ScopedThr
   if (ledger === null) return null;
   return (
     <ThreadDetailsSection headingId="thread-details-ledger-heading" title="Task ledger">
+      <InvestigationPanel threadRef={threadRef} ledger={ledger} />
       <ThreadLedgerView ledger={ledger} />
       {/* Fork: a ledger made while planning offers the plan card's build actions. */}
       <BuildModeBar threadRef={threadRef} className="px-2.5 pt-2" />
@@ -226,6 +228,7 @@ export function ThreadLedgerOverviewSection({ threadRef }: { threadRef: ScopedTh
   if (ledger === null) return null;
   return (
     <ThreadTabSection title="Task ledger">
+      <InvestigationPanel threadRef={threadRef} ledger={ledger} />
       <ThreadLedgerView ledger={ledger} />
       <BuildModeBar threadRef={threadRef} className="px-2.5 pt-2" />
     </ThreadTabSection>

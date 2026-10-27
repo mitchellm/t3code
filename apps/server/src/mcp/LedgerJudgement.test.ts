@@ -132,6 +132,37 @@ it.effect("records the judge's pass verdict, server side, against the evidence i
   });
 });
 
+it.effect("an investigation's approach is judged by a refuter against the user's criteria", () => {
+  const { ports, delegated } = harness();
+  const approaches = LedgerItemId.make("approaches");
+  const ledger = ledgerOf(
+    {
+      investigation: {
+        goal: "Why does the CLI hang?",
+        solvedWhen: "The hang reproduces in a test that passes with the fix.",
+        budget: { minutes: 30 },
+        parallelApproaches: 2,
+        status: "running",
+        approachesItemId: approaches,
+        startedAt: at,
+        endedAt: null,
+      },
+    },
+    [item({ id: approaches, title: "Approaches" }), item({ parentItemId: approaches })],
+  );
+  return Effect.gen(function* () {
+    yield* requestJudgement({ ledger, itemId, ports });
+    expect(delegated[0]?.prompt).toContain("refuter");
+    expect(delegated[0]?.prompt).toContain(
+      "The hang reproduces in a test that passes with the fix.",
+    );
+    expect(delegated[0]?.prompt).toContain("smoke.test.ts: 3 passed");
+    // An ordinary item on the same ledger keeps the plain judge.
+    yield* requestJudgement({ ledger: ledgerOf(), itemId, ports });
+    expect(delegated[1]?.prompt).not.toContain("refuter");
+  });
+});
+
 it.effect("records a fail verdict so the item stays open", () => {
   const { ports, recorded } = harness({
     run: run({ summary: "No CLI entry exists.\nVERDICT: FAIL" }),

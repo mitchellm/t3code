@@ -419,6 +419,7 @@ export function notificationChildThreadId(
     case "monitor":
     case "background_task":
     case "ledger_continue":
+    case "investigation_report":
     case "system":
       return undefined;
     default:

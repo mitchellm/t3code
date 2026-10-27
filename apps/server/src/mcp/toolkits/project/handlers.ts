@@ -16,6 +16,7 @@ import { resolveRuntimeMode } from "../../OrchestratorMcpService.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
+import { guardInvestigationSpawn } from "../../InvestigationSpawnGuard.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -57,6 +58,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     (input) => input,
     (input, { runtimeMode, interactionMode }) =>
       Effect.gen(function* () {
+        // Fork: Investigate mode locks work-starting tools.
+        yield* guardInvestigationSpawn("t3_thread_launch");
         const context = yield* readCaller();
         const { caller } = context;
         const commandId = yield* newCommandId();

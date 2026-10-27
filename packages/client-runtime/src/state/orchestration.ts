@@ -172,6 +172,15 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:resolve-task-retro",
       tag: ORCHESTRATION_V2_WS_METHODS.resolveTaskRetro,
     }),
+    // Fork: Investigate mode. The run itself arrives on the thread's ledger.
+    startInvestigation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:start-investigation",
+      tag: ORCHESTRATION_V2_WS_METHODS.startInvestigation,
+    }),
+    stopInvestigation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:stop-investigation",
+      tag: ORCHESTRATION_V2_WS_METHODS.stopInvestigation,
+    }),
     // Fork: Build / Compact and build / Reset and build / Audit. Gate on the `buildModes` capability.
     runBuildMode: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:orchestration:run-build-mode",
