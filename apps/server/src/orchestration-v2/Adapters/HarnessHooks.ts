@@ -14,6 +14,10 @@ import type {
   ProviderAdapterV2HarnessLedgerState,
   ProviderAdapterV2HarnessThreadPolicy,
 } from "@t3tools/provider-core/server/ProviderAdapter";
+// Hooks are plain promises and must judge a Windows path whatever the host, so they need both
+// path.win32 and path.posix rather than one Effect Path layer.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as NodePath from "node:path";
 
 import { decideStopHookNudge, ledgerReplanText } from "../LedgerReplan.ts";
 
@@ -66,6 +70,8 @@ export interface HarnessHookPort {
   ) => Promise<ProviderAdapterV2HarnessThreadPolicy | undefined>;
   /** Without the T3 tools there is no ledger to write, so plan before editing would strand the agent. */
   readonly ledgerTools: boolean;
+  /** Where plan mode writes its plan file (see claudePlansDirectory); unknown exempts nothing. */
+  readonly plansDirectory?: string;
   /**
    * A delegated child runs in its own thread and works an item of its parent's ledger, so the
    * managers rule and plan before editing bind only the top level.
@@ -160,6 +166,43 @@ function planFirstReason(tool: string, ledger: Ledger | null, subagent: boolean)
       ? "this thread has no task ledger"
       : `its task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" is closed`;
   return `${denied} ${why}, so ${tool} is denied. Write the plan first with ledger_create: each item with what done means (one item is fine for a small change). If the task earns more structure than solo, propose a loadout with t3_loadout_propose. Then work through the items, closing each with evidence. Reading and searching stay allowed.`;
+}
+
+/**
+ * Where Claude's plan mode writes its plan file: the session's `plansDirectory` setting, which
+ * Claude resolves from the project root, else `plans` under the Claude home.
+ */
+export function claudePlansDirectory(input: {
+  readonly claudeHome: string;
+  readonly cwd: string | null;
+  readonly configured: string | undefined;
+}): string {
+  const configured = input.configured?.trim() ?? "";
+  return configured === ""
+    ? NodePath.join(input.claudeHome, "plans")
+    : NodePath.resolve(input.cwd ?? input.claudeHome, configured);
+}
+
+const filePathOf = (toolInput: unknown) =>
+  typeof toolInput === "object" &&
+  toolInput !== null &&
+  "file_path" in toolInput &&
+  typeof toolInput.file_path === "string"
+    ? toolInput.file_path
+    : undefined;
+
+// The directory comes from the host's path module and the file path from the model, so a Windows
+// path can arrive with either separator and any case; path.win32 compares both ways.
+function isInsideDirectory(filePath: string, directory: string): boolean {
+  const paths = /^[a-zA-Z]:[\\/]|^[\\/]{2}/.test(directory) ? NodePath.win32 : NodePath.posix;
+  if (!paths.isAbsolute(filePath)) return false;
+  const relative = paths.relative(directory, filePath);
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${paths.sep}`) &&
+    !paths.isAbsolute(relative)
+  );
 }
 
 // The SDK reports in-flight background work at a stop; a subagent there will wake the agent.
@@ -371,14 +414,22 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "PreToolUse") return {};
         const tool = input.tool_name;
+        // Plan mode writes its plan file before any plan exists; a ledger forced mid-plan would
+        // fight the Stop hook once the plan exits, and a managers thread must write it too.
+        const filePath = filePathOf(input.tool_input);
+        if (
+          input.permission_mode === "plan" &&
+          port.plansDirectory !== undefined &&
+          filePath !== undefined &&
+          FILE_EDIT_TOOLS.includes(tool) &&
+          isInsideDirectory(filePath, port.plansDirectory)
+        ) {
+          return {};
+        }
         const managersTool = input.agent_id === undefined && MANAGER_DENIED_TOOLS.includes(tool);
         // A native subagent's edit is gated too: it is the thread editing, and routing an edit
-        // through Agent is the obvious way around a denial. Claude's plan mode writes only its
-        // plan file, and a ledger forced mid-plan would fight the Stop hook once the plan exits.
-        const planTool =
-          readPlanLedger !== undefined &&
-          FILE_EDIT_TOOLS.includes(tool) &&
-          input.permission_mode !== "plan";
+        // through Agent is the obvious way around a denial.
+        const planTool = readPlanLedger !== undefined && FILE_EDIT_TOOLS.includes(tool);
         if (!managersTool && !planTool) return {};
         const policy = await readThreadPolicy(signal);
         if (policy === undefined) return {};
