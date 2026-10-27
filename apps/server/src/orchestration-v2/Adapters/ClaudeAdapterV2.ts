@@ -1443,7 +1443,7 @@ export function makeClaudeQueryOptions(input: {
   // Fork: ledger and loadout reads for the harness hooks.
   readonly harness?: Pick<
     HarnessHookPort,
-    "readLedgerState" | "readStructure" | "readPlanBeforeEditing" | "delegatedChild"
+    "readLedgerState" | "readThreadPolicy" | "delegatedChild"
   >;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
@@ -1505,6 +1505,7 @@ export function makeClaudeQueryOptions(input: {
       : { readPinnedRules: input.readCurrentPinnedRules }),
     openedWithPinnedRules: (input.pinnedRules ?? "") !== "",
     delegatedChild: input.harness?.delegatedChild ?? false,
+    ledgerTools: input.mcpServers !== undefined,
     onHookError: input.onPinnedRulesReadRejected ?? (() => {}),
   });
   const options: ClaudeAgentSdkQueryOptions = {
@@ -9820,15 +9821,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   harness: {
                     readLedgerState: (signal: AbortSignal) =>
                       runPromise(harness.readLedgerState, { signal }),
-                    readStructure: (signal: AbortSignal) =>
-                      runPromise(harness.readStructure, { signal }),
-                    // Without the T3 tools there is no ledger_create to lift the gate with.
-                    ...(mcpOverrides.mcpServers === undefined
-                      ? {}
-                      : {
-                          readPlanBeforeEditing: (signal: AbortSignal) =>
-                            runPromise(harness.readPlanBeforeEditing, { signal }),
-                        }),
+                    readThreadPolicy: (signal: AbortSignal) =>
+                      runPromise(harness.readThreadPolicy, { signal }),
                     delegatedChild: turnInput.appThread.lineage.relationshipToParent === "subagent",
                   },
                 }),

@@ -2141,8 +2141,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 userInterrupted: false,
                 delegatedWorkActive: false,
               })),
-              readStructure: Effect.succeed("solo"),
-              readPlanBeforeEditing: Effect.succeed(true),
+              readThreadPolicy: Effect.succeed({ structure: "solo", planBeforeEditing: true }),
             },
           });
           yield* harness.firstTerminal;

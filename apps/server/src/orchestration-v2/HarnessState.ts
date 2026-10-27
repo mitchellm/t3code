@@ -93,23 +93,18 @@ export function makeHarnessPort<E>(
         ),
       ),
     );
-  const threadSettings = Effect.gen(function* () {
-    const { projectId, loadoutId } = yield* reads.readThreadLoadout();
-    return { loadoutId, settings: yield* readProjectSettings(projectId) };
-  });
   return {
     readLedgerState: orUndefined(Effect.suspend(reads.readLedgerState), "ledger"),
-    readStructure: orUndefined(
-      threadSettings.pipe(
-        Effect.map(({ loadoutId, settings }) =>
-          loadoutStructure(resolveLoadout(settings.loadouts, loadoutId)),
-        ),
-      ),
-      "loadout",
-    ),
-    readPlanBeforeEditing: orUndefined(
-      threadSettings.pipe(Effect.map(({ settings }) => settings.planBeforeEditing)),
-      "plan before editing setting",
+    readThreadPolicy: orUndefined(
+      Effect.gen(function* () {
+        const { projectId, loadoutId } = yield* reads.readThreadLoadout();
+        const settings = yield* readProjectSettings(projectId);
+        return {
+          structure: loadoutStructure(resolveLoadout(settings.loadouts, loadoutId)),
+          planBeforeEditing: settings.planBeforeEditing,
+        };
+      }),
+      "loadout and plan before editing setting",
     ),
   };
 }

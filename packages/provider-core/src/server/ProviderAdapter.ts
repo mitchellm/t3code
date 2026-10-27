@@ -453,8 +453,13 @@ export interface ProviderAdapterV2TurnInput {
  */
 export interface ProviderAdapterV2HarnessPort {
   readonly readLedgerState: Effect.Effect<ProviderAdapterV2HarnessLedgerState | undefined>;
-  readonly readStructure: Effect.Effect<LoadoutStructure | undefined>;
-  readonly readPlanBeforeEditing: Effect.Effect<boolean | undefined>;
+  /** One thread and settings read, since every gated tool call needs both answers. */
+  readonly readThreadPolicy: Effect.Effect<ProviderAdapterV2HarnessThreadPolicy | undefined>;
+}
+
+export interface ProviderAdapterV2HarnessThreadPolicy {
+  readonly structure: LoadoutStructure;
+  readonly planBeforeEditing: boolean;
 }
 
 export interface ProviderAdapterV2HarnessLedgerState {

@@ -1277,7 +1277,10 @@ export const ServerSettings = Schema.Struct({
   loadouts: Schema.Array(Loadout).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LOADOUTS)),
   ),
-  /** The top-level agent writes its plan as a task ledger before it edits a file. */
+  /**
+   * Claude's enforcement only: its top-level thread cannot edit a file until the ledger has an
+   * unfinished item. Every provider's instructions ask for the plan either way.
+   */
   planBeforeEditing: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   branchNamingMode: BranchNamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("static" as const)),

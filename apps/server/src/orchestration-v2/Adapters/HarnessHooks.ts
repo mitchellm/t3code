@@ -9,8 +9,11 @@ import type {
   HookJSONOutput,
   Options as ClaudeQueryOptions,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { Ledger, LedgerItem, LoadoutStructure } from "@t3tools/contracts";
-import type { ProviderAdapterV2HarnessLedgerState } from "@t3tools/provider-core/server/ProviderAdapter";
+import type { Ledger, LedgerItem } from "@t3tools/contracts";
+import type {
+  ProviderAdapterV2HarnessLedgerState,
+  ProviderAdapterV2HarnessThreadPolicy,
+} from "@t3tools/provider-core/server/ProviderAdapter";
 
 import { decideStopHookNudge, ledgerReplanText } from "../LedgerReplan.ts";
 
@@ -58,9 +61,11 @@ export interface HarnessHookPort {
   readonly readLedgerState?: (
     signal: AbortSignal,
   ) => Promise<ProviderAdapterV2HarnessLedgerState | undefined>;
-  readonly readStructure?: (signal: AbortSignal) => Promise<LoadoutStructure | undefined>;
-  /** Absent when the session has no ledger tools, since the gate would only strand the agent. */
-  readonly readPlanBeforeEditing?: (signal: AbortSignal) => Promise<boolean | undefined>;
+  readonly readThreadPolicy?: (
+    signal: AbortSignal,
+  ) => Promise<ProviderAdapterV2HarnessThreadPolicy | undefined>;
+  /** Without the T3 tools there is no ledger to write, so plan before editing would strand the agent. */
+  readonly ledgerTools: boolean;
   /**
    * A delegated child runs in its own thread and works an item of its parent's ledger, so the
    * managers rule and plan before editing bind only the top level.
@@ -141,6 +146,11 @@ function planFirstReason(tool: string, ledger: Ledger | null, subagent: boolean)
   if (subagent) {
     return `This thread has no open or in-progress ledger item for this work, so a subagent's ${tool} is denied until the main agent plans it. Stop and report back that the plan comes first.`;
   }
+  // ledger_create is refused after an ended investigation until the user writes again, so pointing
+  // at it would only earn a second refusal. The hook cannot see whether the user has written since.
+  if ((ledger?.investigation?.endedAt ?? null) !== null) {
+    return `This thread's investigation is over, so ${tool} is denied: file edits wait for the user's next message. If the user has written since it ended, plan the work they asked for before editing.`;
+  }
   const denied = `Plan before editing is on and`;
   if (ledger !== null && ledger.closedAt === null) {
     return `${denied} the task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" has no open or in-progress item, so ${tool} is denied: nothing in the plan covers this work. Add an item for it with ledger_add_items, with what done means, then work it and close it with evidence. Reading and searching stay allowed.`;
@@ -157,12 +167,11 @@ const waitsOnBackgroundSubagent = (input: Extract<HookInput, { hook_event_name: 
   (input.background_tasks ?? []).some((task) => task.type === "subagent");
 
 export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | undefined {
-  const { readPinnedRules, readLedgerState, readStructure, readPlanBeforeEditing } = port;
+  const { readPinnedRules, readLedgerState, readThreadPolicy } = port;
   if (
     readPinnedRules === undefined &&
     readLedgerState === undefined &&
-    readStructure === undefined &&
-    readPlanBeforeEditing === undefined
+    readThreadPolicy === undefined
   ) {
     return undefined;
   }
@@ -349,12 +358,8 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     ];
   }
 
-  const managersGate = port.delegatedChild ? undefined : readStructure;
-  const planGate =
-    port.delegatedChild || readLedgerState === undefined || readPlanBeforeEditing === undefined
-      ? undefined
-      : { readLedgerState, readPlanBeforeEditing };
-  if (managersGate !== undefined || planGate !== undefined) {
+  if (readThreadPolicy !== undefined && !port.delegatedChild) {
+    const readPlanLedger = port.ledgerTools ? readLedgerState : undefined;
     const deny = (reason: string): HookJSONOutput => ({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -363,34 +368,35 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
       },
     });
     hooks.PreToolUse = [
-      matcher(
-        async (input, signal) => {
-          if (input.hook_event_name !== "PreToolUse") return {};
-          const tool = input.tool_name;
-          if (
-            managersGate !== undefined &&
-            input.agent_id === undefined &&
-            MANAGER_DENIED_TOOLS.includes(tool) &&
-            (await managersGate(signal)) === "managers"
-          ) {
-            const worker = (MANAGER_DENIED_WORKER_TOOLS as ReadonlyArray<string>).includes(tool);
-            return deny(
-              worker
-                ? `This thread runs a managers loadout, so the native ${tool} tool is denied: work goes to the loadout's roles. Use delegate_task with role "worker", "subPlanner" or "explorer".`
-                : `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${tool} is denied (shells too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
-            );
-          }
-          // Read on every call, so a ledger or item the agent adds mid-turn lifts the gate on its
-          // next edit. A native subagent's edit is gated too: it is the thread editing, and routing
-          // an edit through Agent is the obvious way around a denial.
-          if (planGate === undefined || !FILE_EDIT_TOOLS.includes(tool)) return {};
-          if ((await planGate.readPlanBeforeEditing(signal)) !== true) return {};
-          const state = await planGate.readLedgerState(signal);
-          if (state === undefined || plansCurrentWork(state.ledger)) return {};
-          return deny(planFirstReason(tool, state.ledger, input.agent_id !== undefined));
-        },
-        (managersGate === undefined ? FILE_EDIT_TOOLS : MANAGER_DENIED_TOOLS).join("|"),
-      ),
+      matcher(async (input, signal) => {
+        if (input.hook_event_name !== "PreToolUse") return {};
+        const tool = input.tool_name;
+        const managersTool = input.agent_id === undefined && MANAGER_DENIED_TOOLS.includes(tool);
+        // A native subagent's edit is gated too: it is the thread editing, and routing an edit
+        // through Agent is the obvious way around a denial. Claude's plan mode writes only its
+        // plan file, and a ledger forced mid-plan would fight the Stop hook once the plan exits.
+        const planTool =
+          readPlanLedger !== undefined &&
+          FILE_EDIT_TOOLS.includes(tool) &&
+          input.permission_mode !== "plan";
+        if (!managersTool && !planTool) return {};
+        const policy = await readThreadPolicy(signal);
+        if (policy === undefined) return {};
+        if (managersTool && policy.structure === "managers") {
+          const worker = (MANAGER_DENIED_WORKER_TOOLS as ReadonlyArray<string>).includes(tool);
+          return deny(
+            worker
+              ? `This thread runs a managers loadout, so the native ${tool} tool is denied: work goes to the loadout's roles. Use delegate_task with role "worker", "subPlanner" or "explorer".`
+              : `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${tool} is denied (shells too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
+          );
+        }
+        if (!planTool || readPlanLedger === undefined || !policy.planBeforeEditing) return {};
+        // Read on every call, so a ledger or item the agent adds mid-turn lifts the gate on its
+        // next edit.
+        const state = await readPlanLedger(signal);
+        if (state === undefined || plansCurrentWork(state.ledger)) return {};
+        return deny(planFirstReason(tool, state.ledger, input.agent_id !== undefined));
+      }, MANAGER_DENIED_TOOLS.join("|")),
     ];
   }
 

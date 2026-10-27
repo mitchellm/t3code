@@ -2,13 +2,17 @@ import type { HookInput, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import {
   type Ledger,
   LedgerId,
+  type LedgerInvestigation,
   type LedgerItem,
   LedgerItemId,
   type LoadoutStructure,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
-import type { ProviderAdapterV2HarnessLedgerState } from "@t3tools/provider-core/server/ProviderAdapter";
+import type {
+  ProviderAdapterV2HarnessLedgerState,
+  ProviderAdapterV2HarnessThreadPolicy,
+} from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -71,6 +75,7 @@ const make = (port: Partial<HarnessHookPort>) => {
   const hooks = buildClaudeHarnessHooks({
     openedWithPinnedRules: false,
     delegatedChild: false,
+    ledgerTools: false,
     onHookError: (cause) => errors.push(cause),
     ...port,
   });
@@ -420,7 +425,11 @@ const decisionOf = (output: Record<string, unknown>) =>
 
 describe("managers structure", () => {
   const structured = (structure: LoadoutStructure | undefined, delegatedChild = false) =>
-    make({ readStructure: async () => structure, delegatedChild });
+    make({
+      readThreadPolicy: async () =>
+        structure === undefined ? undefined : { structure, planBeforeEditing: false },
+      delegatedChild,
+    });
 
   it("denies the top-level thread's edits and shell, telling it to delegate", async () => {
     const { fire } = structured("managers");
@@ -471,14 +480,18 @@ describe("plan before editing", () => {
   const FILE_EDIT_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
   const gated = (
     current: Current,
-    extra: Partial<HarnessHookPort> & { planBeforeEditing?: boolean | undefined } = {},
+    extra: Partial<HarnessHookPort> & {
+      policy?: ProviderAdapterV2HarnessThreadPolicy | undefined;
+    } = {},
   ) => {
-    const { planBeforeEditing, ...port } = extra;
+    const { policy, ...port } = extra;
     // An explicit undefined is a failed read, not the default.
-    const setting = "planBeforeEditing" in extra ? planBeforeEditing : true;
+    const read =
+      "policy" in extra ? policy : { structure: "solo" as const, planBeforeEditing: true };
     return make({
       ...ledgerReader(current),
-      readPlanBeforeEditing: async () => setting,
+      readThreadPolicy: async () => read,
+      ledgerTools: true,
       ...port,
     });
   };
@@ -552,6 +565,39 @@ describe("plan before editing", () => {
     expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
   });
 
+  it("stands aside in Claude's plan mode, whose plan file is not an edit", async () => {
+    const { fire } = gated({ value: state(null) });
+    for (const tool of FILE_EDIT_TOOLS) {
+      expect(await fire("PreToolUse", preToolUse(tool, { permission_mode: "plan" }))).toEqual({});
+    }
+    const leftPlanMode = preToolUse("Write", { permission_mode: "default" });
+    expect(decisionOf(await fire("PreToolUse", leftPlanMode))?.permissionDecision).toBe("deny");
+  });
+
+  it("after an ended investigation, says edits wait for the user's next message", async () => {
+    const investigation: LedgerInvestigation = {
+      goal: "Why does the build flake",
+      solvedWhen: "A cause reproduces on demand",
+      budget: { minutes: 30 },
+      parallelApproaches: 4,
+      status: "stopped",
+      approachesItemId: LedgerItemId.make("L1"),
+      startedAt: at,
+      endedAt: at,
+    };
+    const ended = [
+      ledgerOf([item("L1", "closed")], { investigation }),
+      ledgerOf([item("L1", "closed")], { investigation, closedAt: at }),
+    ];
+    for (const ledger of ended) {
+      const reason = await reasonFor(gated({ value: state(ledger) }).fire, "Edit");
+      expect(reason).toContain("investigation");
+      expect(reason).toContain("next message");
+      expect(reason).not.toContain("ledger_create");
+      expect(reason).not.toContain("ledger_add_items");
+    }
+  });
+
   it("tells a native subagent to report back instead of planning for the thread", async () => {
     const { fire } = gated({ value: state(null) });
     const decision = decisionOf(await fire("PreToolUse", preToolUse("Edit", { agent_id: "sub" })));
@@ -568,30 +614,63 @@ describe("plan before editing", () => {
   });
 
   it("allows edits when the setting is off or a read fails", async () => {
-    expect(
-      await gated({ value: state(null) }, { planBeforeEditing: false }).fire(
-        "PreToolUse",
-        preToolUse("Edit"),
-      ),
-    ).toEqual({});
-    expect(
-      await gated({ value: state(null) }, { planBeforeEditing: undefined }).fire(
-        "PreToolUse",
-        preToolUse("Edit"),
-      ),
-    ).toEqual({});
+    const off = { structure: "solo" as const, planBeforeEditing: false };
+    for (const policy of [off, undefined]) {
+      expect(
+        await gated({ value: state(null) }, { policy }).fire("PreToolUse", preToolUse("Edit")),
+      ).toEqual({});
+    }
     expect(await gated({ value: undefined }).fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+    const { fire, errors } = gated(
+      { value: state(null) },
+      {
+        readThreadPolicy: async () => {
+          throw new Error("settings unavailable");
+        },
+      },
+    );
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+    expect(errors).toHaveLength(1);
   });
 
-  it("is off without its own reader, so a session without the T3 tools is never stranded", async () => {
-    const { fire } = make(ledgerReader({ value: state(null) }));
+  it("is off without the T3 tools, so a session that cannot write a ledger is never stranded", async () => {
+    const { fire } = gated({ value: state(null) }, { ledgerTools: false });
     expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
   });
 
   it("leaves a managers loadout's stricter denial in charge", async () => {
-    const { fire } = gated({ value: state(null) }, { readStructure: async () => "managers" });
+    const { fire } = gated(
+      { value: state(null) },
+      { policy: { structure: "managers", planBeforeEditing: true } },
+    );
     expect(await reasonFor(fire, "Edit")).toContain("delegate_task");
     expect(await reasonFor(fire, "Bash")).toContain("delegate_task");
+  });
+
+  it("reads the thread policy once per gated call, and the ledger only for an edit", async () => {
+    const reads = { policy: 0, ledger: 0 };
+    let structure: LoadoutStructure = "solo";
+    const { fire } = make({
+      readThreadPolicy: async () => {
+        reads.policy++;
+        return { structure, planBeforeEditing: true };
+      },
+      readLedgerState: async () => {
+        reads.ledger++;
+        return state(null);
+      },
+      ledgerTools: true,
+    });
+    await fire("PreToolUse", preToolUse("Read"));
+    expect(reads).toEqual({ policy: 0, ledger: 0 });
+    await fire("PreToolUse", preToolUse("Bash"));
+    expect(reads).toEqual({ policy: 1, ledger: 0 });
+    await fire("PreToolUse", preToolUse("Edit"));
+    expect(reads).toEqual({ policy: 2, ledger: 1 });
+    // A managers denial needs no ledger.
+    structure = "managers";
+    await fire("PreToolUse", preToolUse("Edit"));
+    expect(reads).toEqual({ policy: 3, ledger: 1 });
   });
 });
 
