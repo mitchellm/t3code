@@ -315,6 +315,10 @@
       "types": "./src/state/threadLedger.ts",
       "default": "./src/state/threadLedger.ts"
     },
+    "./state/ledger-panel": {
+      "types": "./src/state/ledgerPanel.ts",
+      "default": "./src/state/ledgerPanel.ts"
+    },
     "./state/thread-execution": {
       "types": "./src/state/threadExecution.ts",
       "default": "./src/state/threadExecution.ts"

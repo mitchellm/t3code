@@ -157,6 +157,14 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 60_000,
     }),
+    // Fork: the ledger's agent card. Gate on the `taskStats` capability. Read each time the card
+    // opens and dropped when it closes, so nothing polls or holds stale numbers.
+    taskStats: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:task-stats",
+      tag: ORCHESTRATION_V2_WS_METHODS.getTaskStats,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
     // Fork: the Retro part of a thread's Activity tab. Gate on the `taskRetro` capability.
     taskRetro: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:task-retro",
