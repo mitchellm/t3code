@@ -4,9 +4,9 @@
  */
 import {
   isOrchestrationV2WorkActive,
-  type Loadout,
   type OrchestrationV2Run,
   type ProjectId,
+  type ServerSettings,
   type ThreadId,
 } from "@t3tools/contracts";
 import type {
@@ -34,6 +34,9 @@ export interface HarnessThreadReads {
     ProjectionStore.ProjectionStoreV2Error
   >;
 }
+
+/** The settings the hooks act on, as resolved for the thread's project. */
+export type HarnessProjectSettings = Pick<ServerSettings, "loadouts" | "planBeforeEditing">;
 
 export function makeHarnessThreadReads(
   projectionStore: Pick<ProjectionStore.ProjectionStoreV2["Service"], "getThreadRecords">,
@@ -80,7 +83,7 @@ export function makeHarnessThreadReads(
 /** A failed read resolves undefined (logged) so a hook falls back to doing nothing. */
 export function makeHarnessPort<E>(
   reads: HarnessThreadReads,
-  readLoadouts: (projectId: ProjectId) => Effect.Effect<ReadonlyArray<Loadout>, E>,
+  readProjectSettings: (projectId: ProjectId) => Effect.Effect<HarnessProjectSettings, E>,
 ): ProviderAdapterV2HarnessPort {
   const orUndefined = <A, F>(effect: Effect.Effect<A, F>, what: string) =>
     effect.pipe(
@@ -92,12 +95,16 @@ export function makeHarnessPort<E>(
     );
   return {
     readLedgerState: orUndefined(Effect.suspend(reads.readLedgerState), "ledger"),
-    readStructure: orUndefined(
+    readThreadPolicy: orUndefined(
       Effect.gen(function* () {
         const { projectId, loadoutId } = yield* reads.readThreadLoadout();
-        return loadoutStructure(resolveLoadout(yield* readLoadouts(projectId), loadoutId));
+        const settings = yield* readProjectSettings(projectId);
+        return {
+          structure: loadoutStructure(resolveLoadout(settings.loadouts, loadoutId)),
+          planBeforeEditing: settings.planBeforeEditing,
+        };
       }),
-      "loadout",
+      "loadout and plan before editing setting",
     ),
   };
 }

@@ -2,18 +2,25 @@ import type { HookInput, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import {
   type Ledger,
   LedgerId,
+  type LedgerInvestigation,
   type LedgerItem,
   LedgerItemId,
   type LoadoutStructure,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
-import type { ProviderAdapterV2HarnessLedgerState } from "@t3tools/provider-core/server/ProviderAdapter";
+import type {
+  ProviderAdapterV2HarnessLedgerState,
+  ProviderAdapterV2HarnessThreadPolicy,
+} from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildClaudeHarnessHooks,
+  claudePlansDirectory,
   formatLedgerBlock,
   type HarnessHookPort,
   HARNESS_REMINDER_EVERY,
@@ -71,6 +78,7 @@ const make = (port: Partial<HarnessHookPort>) => {
   const hooks = buildClaudeHarnessHooks({
     openedWithPinnedRules: false,
     delegatedChild: false,
+    ledgerTools: false,
     onHookError: (cause) => errors.push(cause),
     ...port,
   });
@@ -418,9 +426,37 @@ const decisionOf = (output: Record<string, unknown>) =>
     | { permissionDecision?: string; permissionDecisionReason?: string }
     | undefined;
 
+// [plans directory, a plan file inside it, then paths that are not inside it]. The Windows rows mix
+// separators and case the way a model's tool input and the host's path module can disagree.
+const PLAN_FILES: ReadonlyArray<readonly [string, string, ...Array<string>]> = [
+  [
+    "C:\\Users\\Mitchell\\.claude\\plans",
+    "c:/users/mitchell/.claude/PLANS/quiet-otter.md",
+    "C:\\Users\\Mitchell\\workspace\\repo\\src\\app.ts",
+    "C:\\Users\\Mitchell\\.claude\\plans\\..\\settings.json",
+    "C:\\Users\\Mitchell\\.claude\\plans-old\\stale.md",
+    "D:\\Users\\Mitchell\\.claude\\plans\\other-drive.md",
+    "plans\\relative.md",
+  ],
+  [
+    "/home/mitchell/.claude/plans",
+    "/home/mitchell/.claude/plans/quiet-otter.md",
+    "/home/mitchell/repo/src/app.ts",
+    "/home/mitchell/.claude/plans/../settings.json",
+    "/home/mitchell/.claude/PLANS/case-matters-here.md",
+  ],
+];
+
+const planModeEdit = (tool: string, filePath: string) =>
+  preToolUse(tool, { permission_mode: "plan", tool_input: { file_path: filePath } });
+
 describe("managers structure", () => {
   const structured = (structure: LoadoutStructure | undefined, delegatedChild = false) =>
-    make({ readStructure: async () => structure, delegatedChild });
+    make({
+      readThreadPolicy: async () =>
+        structure === undefined ? undefined : { structure, planBeforeEditing: false },
+      delegatedChild,
+    });
 
   it("denies the top-level thread's edits and shell, telling it to delegate", async () => {
     const { fire } = structured("managers");
@@ -459,11 +495,266 @@ describe("managers structure", () => {
     expect(await structured("workers").fire("PreToolUse", preToolUse("Agent"))).toEqual({});
   });
 
+  it("in plan mode, lets a managers thread write its plan file and nothing else", async () => {
+    for (const [plansDirectory, planFile, repoFile] of PLAN_FILES) {
+      const { fire } = make({
+        readThreadPolicy: async () => ({ structure: "managers", planBeforeEditing: false }),
+        plansDirectory,
+      });
+      expect(await fire("PreToolUse", planModeEdit("Write", planFile))).toEqual({});
+      const reason = decisionOf(
+        await fire("PreToolUse", planModeEdit("Write", repoFile!)),
+      )?.permissionDecisionReason;
+      expect(reason).toContain("delegate_task");
+    }
+  });
+
   it("leaves other structures, delegated children and unreadable state alone", async () => {
     for (const structure of ["solo", "workers", undefined] as const) {
       expect(await structured(structure).fire("PreToolUse", preToolUse("Edit"))).toEqual({});
     }
     expect(await structured("managers", true).fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+  });
+});
+
+describe("plan before editing", () => {
+  const FILE_EDIT_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+  const gated = (
+    current: Current,
+    extra: Partial<HarnessHookPort> & {
+      policy?: ProviderAdapterV2HarnessThreadPolicy | undefined;
+    } = {},
+  ) => {
+    const { policy, ...port } = extra;
+    // An explicit undefined is a failed read, not the default.
+    const read =
+      "policy" in extra ? policy : { structure: "solo" as const, planBeforeEditing: true };
+    return make({
+      ...ledgerReader(current),
+      readThreadPolicy: async () => read,
+      ledgerTools: true,
+      ...port,
+    });
+  };
+  const reasonFor = async (fire: ReturnType<typeof make>["fire"], tool: string) =>
+    decisionOf(await fire("PreToolUse", preToolUse(tool)))?.permissionDecisionReason;
+
+  it("denies every file edit while the thread has no ledger, asking for the plan first", async () => {
+    const { fire } = gated({ value: state(null) });
+    for (const tool of FILE_EDIT_TOOLS) {
+      const decision = decisionOf(await fire("PreToolUse", preToolUse(tool)));
+      expect(decision?.permissionDecision).toBe("deny");
+      for (const step of [tool, "ledger_create", "t3_loadout_propose"]) {
+        expect(decision?.permissionDecisionReason).toContain(step);
+      }
+    }
+  });
+
+  it("leaves reads, searches, shells and T3 tools alone, so a question needs no ledger", async () => {
+    const { fire } = gated({ value: state(null) });
+    for (const tool of [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash",
+      "PowerShell",
+      "mcp__t3-code__ledger_create",
+    ]) {
+      expect(await fire("PreToolUse", preToolUse(tool))).toEqual({});
+    }
+  });
+
+  it("lifts on the next edit once a ledger opens, and gates again after it closes", async () => {
+    const current: Current = { value: state(null) };
+    const { fire } = gated(current);
+    expect(await reasonFor(fire, "Edit")).toContain("ledger_create");
+
+    current.value = state(ledgerOf([item("L1", "open")]));
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+    current.value = state(ledgerOf([item("L1", "in_progress")]));
+    expect(await fire("PreToolUse", preToolUse("Write"))).toEqual({});
+    // An item awaiting the judge's verdict is still the work in hand.
+    current.value = state(ledgerOf([{ ...item("L1", "in_progress"), judging: true }]));
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+
+    current.value = state(ledgerOf([item("L1", "closed")], { closedAt: at }));
+    const reason = await reasonFor(fire, "Edit");
+    expect(reason).toContain("closed");
+    expect(reason).toContain("ledger_create");
+  });
+
+  it("treats an open ledger with every item finished as no plan for the next work", async () => {
+    const current: Current = {
+      value: state(
+        ledgerOf([
+          item("L1", "closed"),
+          { ...item("L2", "dropped"), dropReason: "Not needed" },
+          { ...item("L3", "deferred"), deferReason: "Later" },
+        ]),
+      ),
+    };
+    const { fire } = gated(current);
+    const decision = decisionOf(await fire("PreToolUse", preToolUse("Edit")));
+    expect(decision?.permissionDecision).toBe("deny");
+    expect(decision?.permissionDecisionReason).toContain("ledger_add_items");
+    expect(decision?.permissionDecisionReason).not.toContain("ledger_create");
+
+    // Adding an item for the new work lifts the gate on the next edit.
+    current.value = state(
+      ledgerOf([item("L1", "closed"), item("L2", "dropped"), item("L4", "open")]),
+    );
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+  });
+
+  it("in plan mode, lets the plan file into the plans directory with no ledger", async () => {
+    for (const [plansDirectory, planFile] of PLAN_FILES) {
+      const { fire } = gated({ value: state(null) }, { plansDirectory });
+      for (const tool of ["Write", "Edit", "MultiEdit"]) {
+        expect(await fire("PreToolUse", planModeEdit(tool, planFile))).toEqual({});
+      }
+      // Outside plan mode the plans directory is an ordinary place to edit.
+      const outside = preToolUse("Write", { tool_input: { file_path: planFile } });
+      expect(decisionOf(await fire("PreToolUse", outside))?.permissionDecision).toBe("deny");
+    }
+  });
+
+  it("in plan mode, still gates an edit anywhere outside the plans directory", async () => {
+    for (const [plansDirectory, , ...elsewhere] of PLAN_FILES) {
+      const { fire } = gated({ value: state(null) }, { plansDirectory });
+      for (const filePath of elsewhere) {
+        const decision = decisionOf(await fire("PreToolUse", planModeEdit("Edit", filePath)));
+        expect(decision?.permissionDecision).toBe("deny");
+        expect(decision?.permissionDecisionReason).toContain("ledger_create");
+      }
+      // A notebook carries no file_path, and the plan file is never a notebook.
+      const notebook = preToolUse("NotebookEdit", {
+        permission_mode: "plan",
+        tool_input: { notebook_path: elsewhere[0] },
+      });
+      expect(decisionOf(await fire("PreToolUse", notebook))?.permissionDecision).toBe("deny");
+    }
+    // With no known plans directory, nothing is exempt.
+    const { fire } = gated({ value: state(null) });
+    const [, planFile] = PLAN_FILES[0]!;
+    expect(
+      decisionOf(await fire("PreToolUse", planModeEdit("Write", planFile)))?.permissionDecision,
+    ).toBe("deny");
+  });
+
+  it("after an ended investigation, says edits wait for the user's next message", async () => {
+    const investigation: LedgerInvestigation = {
+      goal: "Why does the build flake",
+      solvedWhen: "A cause reproduces on demand",
+      budget: { minutes: 30 },
+      parallelApproaches: 4,
+      status: "stopped",
+      approachesItemId: LedgerItemId.make("L1"),
+      startedAt: at,
+      endedAt: at,
+    };
+    const ended = [
+      ledgerOf([item("L1", "closed")], { investigation }),
+      ledgerOf([item("L1", "closed")], { investigation, closedAt: at }),
+    ];
+    for (const ledger of ended) {
+      const reason = await reasonFor(gated({ value: state(ledger) }).fire, "Edit");
+      expect(reason).toContain("investigation");
+      expect(reason).toContain("next message");
+      expect(reason).not.toContain("ledger_create");
+      expect(reason).not.toContain("ledger_add_items");
+    }
+  });
+
+  it("tells a native subagent to report back instead of planning for the thread", async () => {
+    const { fire } = gated({ value: state(null) });
+    const decision = decisionOf(await fire("PreToolUse", preToolUse("Edit", { agent_id: "sub" })));
+    expect(decision?.permissionDecision).toBe("deny");
+    expect(decision?.permissionDecisionReason).toContain("report");
+    expect(decision?.permissionDecisionReason).not.toContain("t3_loadout_propose");
+  });
+
+  it("never gates a delegated child thread", async () => {
+    const { fire } = gated({ value: state(null) }, { delegatedChild: true });
+    for (const tool of FILE_EDIT_TOOLS) {
+      expect(await fire("PreToolUse", preToolUse(tool))).toEqual({});
+    }
+  });
+
+  it("allows edits when the setting is off or a read fails", async () => {
+    const off = { structure: "solo" as const, planBeforeEditing: false };
+    for (const policy of [off, undefined]) {
+      expect(
+        await gated({ value: state(null) }, { policy }).fire("PreToolUse", preToolUse("Edit")),
+      ).toEqual({});
+    }
+    expect(await gated({ value: undefined }).fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+    const { fire, errors } = gated(
+      { value: state(null) },
+      {
+        readThreadPolicy: async () => {
+          throw new Error("settings unavailable");
+        },
+      },
+    );
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+    expect(errors).toHaveLength(1);
+  });
+
+  it("is off without the T3 tools, so a session that cannot write a ledger is never stranded", async () => {
+    const { fire } = gated({ value: state(null) }, { ledgerTools: false });
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+  });
+
+  it("leaves a managers loadout's stricter denial in charge", async () => {
+    const { fire } = gated(
+      { value: state(null) },
+      { policy: { structure: "managers", planBeforeEditing: true } },
+    );
+    expect(await reasonFor(fire, "Edit")).toContain("delegate_task");
+    expect(await reasonFor(fire, "Bash")).toContain("delegate_task");
+  });
+
+  it("reads the thread policy once per gated call, and the ledger only for an edit", async () => {
+    const reads = { policy: 0, ledger: 0 };
+    let structure: LoadoutStructure = "solo";
+    const { fire } = make({
+      readThreadPolicy: async () => {
+        reads.policy++;
+        return { structure, planBeforeEditing: true };
+      },
+      readLedgerState: async () => {
+        reads.ledger++;
+        return state(null);
+      },
+      ledgerTools: true,
+    });
+    await fire("PreToolUse", preToolUse("Read"));
+    expect(reads).toEqual({ policy: 0, ledger: 0 });
+    await fire("PreToolUse", preToolUse("Bash"));
+    expect(reads).toEqual({ policy: 1, ledger: 0 });
+    await fire("PreToolUse", preToolUse("Edit"));
+    expect(reads).toEqual({ policy: 2, ledger: 1 });
+    // A managers denial needs no ledger.
+    structure = "managers";
+    await fire("PreToolUse", preToolUse("Edit"));
+    expect(reads).toEqual({ policy: 3, ledger: 1 });
+  });
+});
+
+describe("claudePlansDirectory", () => {
+  it("is the session's plansDirectory from the project root, else plans under the Claude home", () => {
+    const claudeHome = NodePath.resolve("claude-home");
+    const cwd = NodePath.resolve("repo");
+    for (const configured of [undefined, "", "  "]) {
+      expect(claudePlansDirectory({ claudeHome, cwd, configured })).toBe(
+        NodePath.join(claudeHome, "plans"),
+      );
+    }
+    expect(claudePlansDirectory({ claudeHome, cwd, configured: "docs/plans" })).toBe(
+      NodePath.resolve(cwd, "docs/plans"),
+    );
+    const absolute = NodePath.resolve("elsewhere", "plans");
+    expect(claudePlansDirectory({ claudeHome, cwd, configured: absolute })).toBe(absolute);
   });
 });
 

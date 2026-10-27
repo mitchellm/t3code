@@ -1023,6 +1023,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
   "loadouts",
+  "planBeforeEditing",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1062,6 +1063,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   loadouts: Schema.optionalKey(Schema.Array(Loadout)),
+  planBeforeEditing: Schema.optionalKey(Schema.Boolean),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1275,6 +1277,11 @@ export const ServerSettings = Schema.Struct({
   loadouts: Schema.Array(Loadout).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LOADOUTS)),
   ),
+  /**
+   * Claude's enforcement only: its top-level thread cannot edit a file until the ledger has an
+   * unfinished item. Every provider's instructions ask for the plan either way.
+   */
+  planBeforeEditing: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   branchNamingMode: BranchNamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("static" as const)),
   ),
@@ -1600,6 +1607,7 @@ export const ServerSettingsPatch = Schema.Struct({
   threadTitleInstructions: Schema.optionalKey(TrimmedString),
   pinnedRules: Schema.optionalKey(TrimmedString),
   loadouts: Schema.optionalKey(Schema.Array(Loadout)),
+  planBeforeEditing: Schema.optionalKey(Schema.Boolean),
   branchNamingMode: Schema.optionalKey(BranchNamingMode),
   branchNamePrefix: Schema.optionalKey(TrimmedString),
   branchNameInstructions: Schema.optionalKey(TrimmedString),

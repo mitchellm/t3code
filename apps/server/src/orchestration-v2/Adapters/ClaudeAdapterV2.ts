@@ -1,7 +1,11 @@
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
-import { buildClaudeHarnessHooks, type HarnessHookPort } from "./HarnessHooks.ts";
+import {
+  buildClaudeHarnessHooks,
+  claudePlansDirectory,
+  type HarnessHookPort,
+} from "./HarnessHooks.ts";
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -1441,7 +1445,12 @@ export function makeClaudeQueryOptions(input: {
   /** Called when a hook read rejects (a defect or interruption), so it is not lost. */
   readonly onPinnedRulesReadRejected?: (cause: unknown) => void;
   // Fork: ledger and loadout reads for the harness hooks.
-  readonly harness?: Pick<HarnessHookPort, "readLedgerState" | "readStructure" | "delegatedChild">;
+  readonly harness?: Pick<
+    HarnessHookPort,
+    "readLedgerState" | "readThreadPolicy" | "delegatedChild"
+  >;
+  /** Fork: CLAUDE_CONFIG_DIR or ~/.claude, which holds plan mode's default plans directory. */
+  readonly claudeHome?: string;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
 }): ClaudeAgentSdkQueryOptions {
@@ -1502,6 +1511,19 @@ export function makeClaudeQueryOptions(input: {
       : { readPinnedRules: input.readCurrentPinnedRules }),
     openedWithPinnedRules: (input.pinnedRules ?? "") !== "",
     delegatedChild: input.harness?.delegatedChild ?? false,
+    ledgerTools: input.mcpServers !== undefined,
+    ...(input.claudeHome === undefined
+      ? {}
+      : {
+          plansDirectory: claudePlansDirectory({
+            claudeHome: input.claudeHome,
+            cwd: input.cwd,
+            configured:
+              typeof effectiveQuerySettings === "object"
+                ? effectiveQuerySettings.plansDirectory
+                : undefined,
+          }),
+        }),
     onHookError: input.onPinnedRulesReadRejected ?? (() => {}),
   });
   const options: ClaudeAgentSdkQueryOptions = {
@@ -9817,10 +9839,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   harness: {
                     readLedgerState: (signal: AbortSignal) =>
                       runPromise(harness.readLedgerState, { signal }),
-                    readStructure: (signal: AbortSignal) =>
-                      runPromise(harness.readStructure, { signal }),
+                    readThreadPolicy: (signal: AbortSignal) =>
+                      runPromise(harness.readThreadPolicy, { signal }),
                     delegatedChild: turnInput.appThread.lineage.relationshipToParent === "subagent",
                   },
+                  claudeHome: claudeConfigDirOf(
+                    path,
+                    adapterOptions.environment,
+                    yield* HostProcess.HomeDirectory,
+                  ),
                 }),
             ...(toolSearchOverride === undefined ? {} : { toolSearchOverride }),
           });
