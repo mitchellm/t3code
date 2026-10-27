@@ -393,23 +393,76 @@ export function followInvestigation(
   return [...planned, ...endEvents(after, investigation, { status: "solved", solvedItem }, now)];
 }
 
+/** A thread's standing under Investigate mode, for every agent tool that can start or wake work. */
+export type InvestigationSpawnLock =
+  | { readonly state: "open" }
+  | { readonly state: "running"; readonly investigation: LedgerInvestigation }
+  | { readonly state: "ended"; readonly investigation: LedgerInvestigation };
+
 /**
- * Why `delegate_task` refuses a new worker on an investigation thread. An ended investigation
- * takes none, whatever its ledger's open state (a reopen does not revive it); a running one takes
- * no more than its parallel limit. `activeWorkers` counts running non-judge children; judges are
- * exempt, as are workers of workers, which this thread's own cap does not see.
+ * The one rule. A thread is locked while an investigation runs on it, and after its latest ledger's
+ * investigation ended until a user-authored message arrives. Report and wake turns are the
+ * server's, not the user's, so they never unlock it; a reopened ledger does not either.
+ */
+export function investigationSpawnGuard(
+  ledger: Ledger | undefined,
+  latestUserMessageAt: DateTime.Utc | null,
+): InvestigationSpawnLock {
+  const investigation = ledger?.investigation;
+  if (investigation === undefined) return { state: "open" };
+  if (investigation.status === "running") return { state: "running", investigation };
+  const endedAt = investigation.endedAt;
+  if (
+    endedAt !== null &&
+    latestUserMessageAt !== null &&
+    DateTime.toEpochMillis(latestUserMessageAt) > DateTime.toEpochMillis(endedAt)
+  ) {
+    return { state: "open" };
+  }
+  return { state: "ended", investigation };
+}
+
+const endedText = (investigation: LedgerInvestigation) =>
+  `This thread's investigation has ended (${investigation.status}${investigation.endReason === undefined ? "" : `: ${investigation.endReason}`}) and its workers were stopped.`;
+
+/**
+ * Why a work-starting tool other than `delegate_task` is refused. While running, approach work
+ * goes through `delegate_task`, which the cap counts; after the end, nothing starts until the user
+ * speaks. `ledger_create` is refused only after the end: while running the planner refuses it.
+ */
+export function investigationSpawnRefusal(
+  lock: InvestigationSpawnLock,
+  tool: string,
+): string | undefined {
+  if (lock.state === "open") return undefined;
+  if (lock.state === "running") {
+    return tool === "ledger_create"
+      ? undefined
+      : `An investigation is running on this thread. Start approach work with delegate_task under the worker role, which the investigation counts; ${tool} is refused until it ends.`;
+  }
+  return `${endedText(lock.investigation)} ${tool} is refused until the user sends a new message; write the report.`;
+}
+
+/**
+ * Why `delegate_task` refuses a new worker. After the end, every worker is refused. While running,
+ * the thread takes no more than its parallel limit of running children (only the server's own
+ * judge tasks are exempt), and none under the judge role, which the server runs itself.
  */
 export function investigationDelegationProblem(input: {
-  readonly ledger: Ledger | undefined;
+  readonly lock: InvestigationSpawnLock;
   readonly activeWorkers: number;
+  readonly requestedRole?: string | undefined;
 }): string | undefined {
-  const investigation = input.ledger?.investigation;
-  if (investigation === undefined) return undefined;
-  if (investigation.status !== "running") {
-    return `This thread's investigation has ended (${investigation.status}${investigation.endReason === undefined ? "" : `: ${investigation.endReason}`}), and its workers were stopped. Do not start new ones; write the report, or ask the user before starting new work.`;
+  const { lock } = input;
+  if (lock.state === "open") return undefined;
+  if (lock.state === "ended") {
+    return `${endedText(lock.investigation)} Do not start new ones; write the report, or wait for the user's next message.`;
   }
-  if (input.activeWorkers >= investigation.parallelApproaches) {
-    return `The investigation runs at most ${investigation.parallelApproaches} workers at once and ${input.activeWorkers} are running. Wait for one to finish before starting another.`;
+  if (input.requestedRole === "judge") {
+    return "An investigation is running on this thread, and the server runs its judge itself. Delegate approach work under the worker role.";
+  }
+  if (input.activeWorkers >= lock.investigation.parallelApproaches) {
+    return `The investigation runs at most ${lock.investigation.parallelApproaches} workers at once and ${input.activeWorkers} are running. Wait for one to finish before starting another.`;
   }
   return undefined;
 }
@@ -428,49 +481,81 @@ export interface InvestigationChainRecords {
   >;
 }
 
+/** The lock that applies to a caller, found by walking up its subagent chain. */
+export interface InvestigationCallerLock {
+  readonly lock: InvestigationSpawnLock;
+  /** The lock is the caller's own thread's, not an ancestor's. */
+  readonly atCaller: boolean;
+  /** The caller's running children that count against its cap. */
+  readonly activeWorkers: number;
+}
+
 /**
- * Why `delegate_task` refuses a new worker: the caller's own investigation caps its workers, and an
- * ended one anywhere up the subagent chain refuses its workers' workers too. Accepted for v1: a
- * running investigation's workers may start uncapped helpers; the budget bounds that spend.
+ * The caller's own lock, or else the first ended investigation up its subagent chain, so a
+ * worker's workers stop when the root's investigation does. Accepted for v1: under a running
+ * investigation its workers' own helpers are not locked or capped; the budget bounds that spend.
+ * `latestUserMessageAt` is read only for an ended investigation, the one case that needs it.
  */
-export const findInvestigationDelegationRefusal = Effect.fn("Investigation.findDelegationRefusal")(
-  function* <E>(
-    callerThreadId: ThreadId,
-    read: (threadId: ThreadId) => Effect.Effect<InvestigationChainRecords, E>,
-    /** The role the agent asked for; absent for the server's own judge delegation. */
-    requestedRole?: string,
-  ): Effect.fn.Return<string | undefined, E> {
-    let threadId: ThreadId | null = callerThreadId;
-    const visited = new Set<ThreadId>();
-    while (threadId !== null && !visited.has(threadId) && visited.size < MAX_INVESTIGATION_DEPTH) {
-      visited.add(threadId);
-      const records: InvestigationChainRecords = yield* read(threadId);
-      const { thread, ledger, subagents } = records;
-      if (threadId === callerThreadId) {
-        // The server judges theses itself; an agent naming the judge role would only be a worker
-        // that the cap does not see.
-        if (requestedRole === "judge" && ledger?.investigation?.status === "running") {
-          return "An investigation is running on this thread, and the server runs its judge itself. Delegate approach work under the worker role.";
-        }
-      }
-      const activeWorkers =
-        threadId === callerThreadId
-          ? subagents.filter(
-              (task) =>
-                task.origin === "app_owned" &&
-                // Only the server's own judge is exempt; a role the agent named is not.
-                task.serverJudge !== true &&
-                isOrchestrationV2WorkActive(task.status),
-            ).length
-          : 0;
-      const problem = investigationDelegationProblem({ ledger, activeWorkers });
-      if (problem !== undefined) return problem;
-      threadId =
-        thread.lineage.relationshipToParent === "subagent" ? thread.lineage.parentThreadId : null;
+export const findInvestigationLock = Effect.fn("Investigation.findLock")(function* <E>(
+  callerThreadId: ThreadId,
+  read: (threadId: ThreadId) => Effect.Effect<InvestigationChainRecords, E>,
+  latestUserMessageAt: (
+    threadId: ThreadId,
+    since: DateTime.Utc,
+  ) => Effect.Effect<DateTime.Utc | null, E>,
+): Effect.fn.Return<InvestigationCallerLock, E> {
+  let threadId: ThreadId | null = callerThreadId;
+  let activeWorkers = 0;
+  const visited = new Set<ThreadId>();
+  while (threadId !== null && !visited.has(threadId) && visited.size < MAX_INVESTIGATION_DEPTH) {
+    visited.add(threadId);
+    const records: InvestigationChainRecords = yield* read(threadId);
+    const atCaller = threadId === callerThreadId;
+    if (atCaller) {
+      activeWorkers = records.subagents.filter(
+        (task) =>
+          task.origin === "app_owned" &&
+          // Only the server's own judge is exempt; a role the agent named is not. Clients may
+          // set the marker too, which is accepted: a client acts for the user.
+          task.serverJudge !== true &&
+          isOrchestrationV2WorkActive(task.status),
+      ).length;
     }
-    return undefined;
-  },
-);
+    const investigation = records.ledger?.investigation;
+    const endedAt = investigation?.endedAt ?? null;
+    const lock = investigationSpawnGuard(
+      records.ledger,
+      endedAt === null ? null : yield* latestUserMessageAt(threadId, endedAt),
+    );
+    if (lock.state === "ended" || (lock.state === "running" && atCaller)) {
+      return { lock, atCaller, activeWorkers };
+    }
+    threadId =
+      records.thread.lineage.relationshipToParent === "subagent"
+        ? records.thread.lineage.parentThreadId
+        : null;
+  }
+  return { lock: { state: "open" }, atCaller: true, activeWorkers };
+});
+
+/** A spawn tool's refusal for the caller: its own lock, or an ended one up its chain. */
+export const spawnRefusalFor = (found: InvestigationCallerLock, tool: string) =>
+  found.lock.state === "running" && !found.atCaller
+    ? undefined
+    : investigationSpawnRefusal(found.lock, tool);
+
+/** `delegate_task`'s refusal for the caller; only the caller's own investigation caps it. */
+export const delegationRefusalFor = (
+  found: InvestigationCallerLock,
+  requestedRole: string | undefined,
+) =>
+  found.lock.state === "running" && !found.atCaller
+    ? undefined
+    : investigationDelegationProblem({
+        lock: found.lock,
+        activeWorkers: found.atCaller ? found.activeWorkers : 0,
+        requestedRole,
+      });
 
 const delegationLeases = new Map<string, { semaphore: Semaphore.Semaphore; users: number }>();
 
@@ -499,22 +584,6 @@ export const withInvestigationDelegationLease = <A, E, R>(
       ),
     );
   });
-
-/**
- * Why the agent may not create a ledger: the thread's investigation ended during this run, so a
- * new ledger here would only lift the stop on its workers. A user's /ledger request arrives as a
- * new turn, which starts after the end, so it still goes through.
- */
-export function investigationCreateProblem(input: {
-  readonly ledger: Ledger | undefined;
-  readonly runStartedAt: DateTime.Utc | null;
-}): string | undefined {
-  const investigation = input.ledger?.investigation;
-  if (investigation?.endedAt == null || input.runStartedAt === null) return undefined;
-  return DateTime.toEpochMillis(investigation.endedAt) > DateTime.toEpochMillis(input.runStartedAt)
-    ? `This thread's investigation ended (${investigation.status}) during this turn. Write the report; start new work only when the user asks for it in a new message.`
-    : undefined;
-}
 
 /** Ending an investigation stops every delegated task under the thread, committed with the end. */
 export function investigationEffects(

@@ -163,6 +163,7 @@ it.effect("an answered question reports already answered instead of not found", 
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
             getThreadShell: () => Effect.succeed(shell),
+            getThreadRecords: () => Effect.succeed(projection),
             getProjectThreadRecords: () =>
               Effect.succeed({
                 ...projection,

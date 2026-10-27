@@ -130,9 +130,10 @@ import {
 } from "./LedgerJudgement.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
 import {
-  findInvestigationDelegationRefusal,
+  delegationRefusalFor,
   withInvestigationDelegationLease,
 } from "../orchestration-v2/Investigation.ts";
+import { investigationLockFor } from "./InvestigationSpawnGuard.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -2043,20 +2044,12 @@ const make = Effect.gen(function* () {
     return { scope, parent, ledger, ports };
   });
 
-  /**
-   * Fork: why an investigation forbids this thread a new delegated worker. The caller's own
-   * investigation caps its running workers; up the subagent chain, an ended investigation refuses
-   * its workers' workers too, so stopping the run cannot be outlived by a grandchild.
-   */
+  /** Fork: Investigate mode's spawn rule as it applies to a new delegated worker. */
   const investigationDelegationRefusal = Effect.fn(
     "OrchestratorMcpService.investigationDelegationRefusal",
   )(function* (callerThreadId: ThreadId, requestedRole: string | undefined) {
-    return yield* findInvestigationDelegationRefusal(
-      callerThreadId,
-      (threadId) =>
-        threadManagement
-          .getThreadRecords(threadId, ["ledger", "subagents"])
-          .pipe(Effect.mapError(threadManagementFailure)),
+    return delegationRefusalFor(
+      yield* investigationLockFor(threadManagement, callerThreadId),
       requestedRole,
     );
   });

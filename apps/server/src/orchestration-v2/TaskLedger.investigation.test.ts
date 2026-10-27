@@ -21,12 +21,14 @@ import * as Result from "effect/Result";
 
 import {
   APPROACHES_ITEM_ID,
-  findInvestigationDelegationRefusal,
+  delegationRefusalFor,
+  findInvestigationLock,
   type InvestigationChainRecords,
-  investigationCreateProblem,
-  withInvestigationDelegationLease,
   investigationDelegationProblem,
   investigationEffects,
+  investigationSpawnGuard,
+  investigationSpawnRefusal,
+  withInvestigationDelegationLease,
 } from "./Investigation.ts";
 import {
   type LedgerCommand,
@@ -41,6 +43,19 @@ const ledgerId = LedgerId.make("ledger:investigation");
 const commandId = CommandId.make("command:investigation");
 const id = (name: string) => LedgerItemId.make(name);
 const at = (minutes: number) => DateTime.add(start, { minutes });
+
+/** No user has written since the end: the case every refusal below is about. */
+const delegationProblem = (ledger: Ledger, activeWorkers: number) =>
+  investigationDelegationProblem({ lock: investigationSpawnGuard(ledger, null), activeWorkers });
+
+const delegationRefusal = <E>(
+  caller: ThreadId,
+  read: (threadId: ThreadId) => Effect.Effect<InvestigationChainRecords, E>,
+  requestedRole?: string,
+) =>
+  findInvestigationLock(caller, read, () => Effect.succeed(null)).pipe(
+    Effect.map((found) => delegationRefusalFor(found, requestedRole)),
+  );
 
 const verdict = (outcome: "pass" | "fail"): LedgerItemVerdict => ({
   outcome,
@@ -427,34 +442,22 @@ describe("investigation state machine", () => {
 
   it("delegate_task is refused once the investigation has ended, even on a reopened ledger", () => {
     const thesis = running();
-    assert.strictEqual(
-      investigationDelegationProblem({ ledger: thesis, activeWorkers: 0 }),
-      undefined,
-    );
+    assert.strictEqual(delegationProblem(thesis, 0), undefined);
     const solved = step(thesis, recordVerdict("a", "pass"), at(4)).ledger;
-    assert.include(
-      investigationDelegationProblem({ ledger: solved, activeWorkers: 0 }) ?? "",
-      "has ended (solved",
-    );
+    assert.include(delegationProblem(solved, 0) ?? "", "has ended (solved");
     // Reopening does not revive the investigation, so its workers stay stopped.
     const reopened = step(
       solved,
       { type: "ledger.reopen", commandId, threadId, ledgerId },
       at(5),
     ).ledger;
-    assert.isDefined(investigationDelegationProblem({ ledger: reopened, activeWorkers: 0 }));
+    assert.isDefined(delegationProblem(reopened, 0));
   });
 
   it("delegate_task refuses a worker beyond the parallel limit while it runs", () => {
     const thesis = running();
-    assert.strictEqual(
-      investigationDelegationProblem({ ledger: thesis, activeWorkers: 2 }),
-      undefined,
-    );
-    assert.include(
-      investigationDelegationProblem({ ledger: thesis, activeWorkers: 3 }) ?? "",
-      "at most 3",
-    );
+    assert.strictEqual(delegationProblem(thesis, 2), undefined);
+    assert.include(delegationProblem(thesis, 3) ?? "", "at most 3");
   });
 
   it("only a refuter's pass solves it: a plain pass on an approach item does not", () => {
@@ -510,9 +513,7 @@ describe("investigation state machine", () => {
         [child]: chainLink(undefined, threadId),
         [grandchild]: chainLink(undefined, child),
       };
-      const refusal = yield* findInvestigationDelegationRefusal(grandchild, (id) =>
-        Effect.succeed(chain[id]!),
-      );
+      const refusal = yield* delegationRefusal(grandchild, (id) => Effect.succeed(chain[id]!));
       assert.include(refusal ?? "", "has ended (solved");
       // While it runs, a worker may start its own helpers; only the root's cap applies there.
       const live: Record<string, InvestigationChainRecords> = {
@@ -520,7 +521,7 @@ describe("investigation state machine", () => {
         [threadId]: chainLink(running(), null),
       };
       assert.strictEqual(
-        yield* findInvestigationDelegationRefusal(grandchild, (id) => Effect.succeed(live[id]!)),
+        yield* delegationRefusal(grandchild, (id) => Effect.succeed(live[id]!)),
         undefined,
       );
     }),
@@ -536,9 +537,7 @@ describe("investigation state machine", () => {
         serverJudge: true,
       } as const;
       const withChildren = (subagents: InvestigationChainRecords["subagents"]) =>
-        findInvestigationDelegationRefusal(threadId, () =>
-          Effect.succeed(chainLink(running(), null, subagents)),
-        );
+        delegationRefusal(threadId, () => Effect.succeed(chainLink(running(), null, subagents)));
       assert.strictEqual(yield* withChildren([worker, worker, judge, judge]), undefined);
       assert.include((yield* withChildren([worker, worker, worker, judge])) ?? "", "at most 3");
     }),
@@ -550,7 +549,7 @@ describe("investigation state machine", () => {
       const agentJudge = { origin: "app_owned", role: "judge", status: "running" } as const;
       const serverJudge = { ...agentJudge, serverJudge: true } as const;
       const refusal = (subagents: InvestigationChainRecords["subagents"], requestedRole?: string) =>
-        findInvestigationDelegationRefusal(
+        delegationRefusal(
           threadId,
           () => Effect.succeed(chainLink(running(), null, subagents)),
           requestedRole,
@@ -571,10 +570,7 @@ describe("investigation state machine", () => {
         withInvestigationDelegationLease(
           threadId,
           Effect.gen(function* () {
-            const refused = investigationDelegationProblem({
-              ledger: running(),
-              activeWorkers: yield* Ref.get(recorded),
-            });
+            const refused = delegationProblem(running(), yield* Ref.get(recorded));
             if (refused !== undefined) return "refused" as const;
             if (isFirst) {
               // The first sits between its check and its dispatch, where the race lives, until
@@ -599,21 +595,21 @@ describe("investigation state machine", () => {
     }),
   );
 
-  it("the agent cannot create a ledger in the turn its investigation ended; a new turn can", () => {
+  it("the spawn guard locks a running thread, and an ended one until the user writes again", () => {
     const solved = step(running(), recordVerdict("a", "pass"), at(4)).ledger;
-    // The planner's turn began before the end: an unprompted escape.
+    assert.strictEqual(investigationSpawnGuard(running(), null).state, "running");
+    // No user message since the end (a report or wake turn is not one): still locked.
+    assert.strictEqual(investigationSpawnGuard(solved, null).state, "ended");
+    assert.strictEqual(investigationSpawnGuard(solved, at(3)).state, "ended");
+    // A user-authored message after the end unlocks it.
+    assert.strictEqual(investigationSpawnGuard(solved, at(5)).state, "open");
     assert.include(
-      investigationCreateProblem({ ledger: solved, runStartedAt: at(1) }) ?? "",
-      "ended (solved) during this turn",
+      investigationSpawnRefusal(investigationSpawnGuard(running(), null), "create_threads") ?? "",
+      "delegate_task",
     );
-    // The user's /ledger request starts a new turn after the end.
-    assert.strictEqual(
-      investigationCreateProblem({ ledger: solved, runStartedAt: at(10) }),
-      undefined,
-    );
-    assert.strictEqual(
-      investigationCreateProblem({ ledger: running(), runStartedAt: at(1) }),
-      undefined,
+    assert.include(
+      investigationSpawnRefusal(investigationSpawnGuard(solved, null), "ledger_create") ?? "",
+      "until the user sends a new message",
     );
   });
 });

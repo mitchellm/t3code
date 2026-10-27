@@ -19,7 +19,11 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-import { investigationCreateProblem } from "../orchestration-v2/Investigation.ts";
+import {
+  investigationSpawnGuard,
+  investigationSpawnRefusal,
+} from "../orchestration-v2/Investigation.ts";
+import { latestUserMessageAt } from "./InvestigationSpawnGuard.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { snapshotLedger } from "./ledgerSnapshot.ts";
@@ -256,20 +260,17 @@ const make = Effect.gen(function* () {
       (ledger) => [ledger !== undefined && ledger.closedAt !== null ? ledger.id : "new", args],
       ({ commandId, threadId, requestKey, ledger }) =>
         Effect.gen(function* () {
-          // Fork: replacing an investigation that ended during this very turn would only lift the
-          // stop on its workers; the user's own /ledger request arrives as a later turn.
-          if (ledger?.investigation?.endedAt != null) {
-            const { runs } = yield* threads
-              .getThreadRecords(threadId, ["runs"])
-              .pipe(Effect.mapError(unavailable));
-            const current = runs
-              .filter(ThreadManagementService.isActiveRun)
-              .toSorted((left, right) => right.ordinal - left.ordinal)[0];
-            const problem = investigationCreateProblem({
+          // Fork: Investigate mode's spawn rule. A new ledger would lift an ended investigation's
+          // stop, so it waits for the user's next message (a /ledger request is one).
+          const endedAt = ledger?.investigation?.endedAt ?? null;
+          if (endedAt !== null) {
+            const lock = investigationSpawnGuard(
               ledger,
-              runStartedAt:
-                current === undefined ? null : (current.startedAt ?? current.requestedAt),
-            });
+              yield* latestUserMessageAt(threads, threadId, endedAt).pipe(
+                Effect.mapError(unavailable),
+              ),
+            );
+            const problem = investigationSpawnRefusal(lock, "ledger_create");
             if (problem !== undefined) return yield* failure("invalid_request", problem);
           }
           return {

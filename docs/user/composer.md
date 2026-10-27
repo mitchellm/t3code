@@ -290,7 +290,7 @@ For a question with several possible answers, such as why a bug happens, Investi
 
 Your criteria are pinned to the thread word for word, so they survive compaction. The agent proposes approaches as ledger items and hands each to a worker. When an approach claims an answer, the judge tries to refute it against your criteria: a refuted approach goes back to the agent, which can strengthen it or try a variant. The first one that passes solves the investigation: the other workers are stopped and the agent writes a report. If the budget runs out first, every worker is stopped and the agent writes a best-so-far report. The time budget is checked as it passes; dollars are checked each time a turn or worker finishes, so a run can go a little over.
 
-The **Investigation** panel above the task ledger shows time used against the budget, one lane per approach (exploring, judging, refuted, passed or stopped), and **Stop all**, which stops every worker and ends the investigation without a report. An ended investigation cannot be resumed; start a new one with a larger budget instead.
+The **Investigation** panel above the task ledger shows time used against the budget, one lane per approach (exploring, judging, refuted, passed or stopped), and **Stop all**, which stops every worker and ends the investigation without a report. An ended investigation cannot be resumed; start a new one with a larger budget instead. While an investigation runs, the agent can start work only through its approach workers, and once it ends the agent starts no new work, threads or ledgers on that thread until you send your next message.
 
 ## Context in your message
 

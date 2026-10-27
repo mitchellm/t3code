@@ -13,6 +13,7 @@ import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageInt
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readThread, unavailable } from "../../threadAccess.ts";
 import { AttachmentToolkit } from "./tools.ts";
+import { guardInvestigationSpawn } from "../../InvestigationSpawnGuard.ts";
 
 export function resolveAttachmentReferences(
   requested: ReadonlyArray<ChatAttachment>,
@@ -76,6 +77,8 @@ export const layer = McpToolAccess.toLayer(
         (input) => [input.threadId],
         (input) =>
           Effect.gen(function* () {
+            // Fork: Investigate mode locks work-starting tools.
+            yield* guardInvestigationSpawn("t3_thread_send_attachments");
             const { caller, projection } = yield* readThread(input.threadId, ["messages"]);
             if (projection.thread.archivedAt !== null)
               return yield* new OrchestratorMcpFailure({
