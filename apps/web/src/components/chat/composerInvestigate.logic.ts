@@ -45,7 +45,12 @@ const parsePositive = (text: string): number | null | "invalid" => {
 /** Checks the fields the server would refuse, so the composer says why before sending. */
 export function buildInvestigateStart(draft: InvestigateDraft, prompt: string): InvestigateStart {
   const goal = prompt.trim();
-  if (goal === "") return { ok: false, problem: "Describe what to investigate in the message." };
+  if (goal === "") {
+    return {
+      ok: false,
+      problem: "Write the goal in the message box below. Solved when is how the judge checks it.",
+    };
+  }
   const solvedWhen = draft.solvedWhen.trim();
   if (solvedWhen === "") {
     return { ok: false, problem: "Say when the investigation is solved." };
@@ -65,10 +70,6 @@ export function buildInvestigateStart(draft: InvestigateDraft, prompt: string): 
   if (minutes === null && usd === null) {
     return { ok: false, problem: "Set a budget in minutes, dollars, or both." };
   }
-  const parallelApproaches = Math.min(
-    INVESTIGATION_MAX_PARALLEL_APPROACHES,
-    Math.max(INVESTIGATION_MIN_PARALLEL_APPROACHES, Math.round(draft.parallelApproaches)),
-  );
   return {
     ok: true,
     goal,
@@ -77,8 +78,16 @@ export function buildInvestigateStart(draft: InvestigateDraft, prompt: string): 
       ...(minutes === null ? {} : { minutes }),
       ...(usd === null ? {} : { usd }),
     },
-    parallelApproaches,
+    parallelApproaches: clampParallelApproaches(draft.parallelApproaches),
   };
+}
+
+export function clampParallelApproaches(value: number): number {
+  if (!Number.isFinite(value)) return INVESTIGATION_DEFAULT_PARALLEL_APPROACHES;
+  return Math.min(
+    INVESTIGATION_MAX_PARALLEL_APPROACHES,
+    Math.max(INVESTIGATION_MIN_PARALLEL_APPROACHES, Math.round(value)),
+  );
 }
 
 /** Where the goal is sent: an existing thread, or a draft whose thread the send creates. */
@@ -153,6 +162,21 @@ export function planInvestigateSend(input: {
     kind: "investigation",
     steps: [{ type: "create-thread" }, { type: "set-loadout", loadout: target.loadout }, begin],
   };
+}
+
+/**
+ * The line under the fields. It runs the same rules as Send, so what Send would refuse shows while
+ * the fields are filled in rather than as a toast after.
+ */
+export function investigateHint(input: {
+  readonly fields: InvestigateDraft;
+  readonly prompt: string;
+  readonly target: InvestigateSendTarget;
+}): { readonly tone: "info" | "warning"; readonly text: string } {
+  const plan = planInvestigateSend({ ...input, mode: "investigate", hasAttachments: false });
+  return plan.kind === "refused"
+    ? { tone: "warning", text: plan.problem }
+    : { tone: "info", text: "Send starts it. The budget ends it if nothing passes first." };
 }
 
 const isFailure = <R extends { readonly _tag: string }>(

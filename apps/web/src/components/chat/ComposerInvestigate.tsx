@@ -28,7 +28,7 @@ import {
   useComposerDraftStore,
 } from "~/composerDraftStore";
 import type { ComposerHandleRef } from "~/composerHandleContext";
-import { newMessageId } from "~/lib/utils";
+import { cn, newMessageId } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { formatEnvironmentQueryError } from "~/state/query";
 import { threadEnvironment } from "~/state/threads";
@@ -40,8 +40,10 @@ import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
 import { draftSendState } from "./chatViewSend";
 import {
+  clampParallelApproaches,
   EMPTY_INVESTIGATE_DRAFT,
   type InvestigateDraft,
+  investigateHint,
   type InvestigateSendStep,
   planInvestigateSend,
   runInvestigateSteps,
@@ -90,14 +92,23 @@ export function ComposerInvestigateFields({
   environmentId,
   threadId,
   interactionMode,
+  prompt,
+  draftId,
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
   interactionMode: ProviderInteractionMode;
+  prompt: string;
+  /** Set on a new chat, whose first send creates the thread under its loadout. */
+  draftId: DraftId | null;
 }) {
   const draft = useInvestigateDraft(environmentId, threadId);
   const id = useId();
   const investigating = draft !== null;
+  const draftSession = useComposerDraftStore((store) =>
+    draftId === null ? null : store.getDraftSession(draftId),
+  );
+  const draftLoadout = useDraftLaunchLoadout(environmentId, draftSession ? draftId : null);
   // oxlint-disable-next-line t3code/react-effect-budget -- Plan is also entered outside the composer (the proposed-plan card, the server). This component mounts once per composer, so it is where Plan is seen and the fields it outranks end, and leaving Plan lands in Build.
   useEffect(() => {
     const state = { interactionMode, investigating };
@@ -108,6 +119,20 @@ export function ComposerInvestigateFields({
   }
   const key = threadKey(environmentId, threadId);
   const update = (patch: Partial<InvestigateDraft>) => setDraft(key, { ...draft, ...patch });
+  const hint = investigateHint({
+    fields: draft,
+    prompt,
+    target:
+      draftSession === null
+        ? { kind: "thread" }
+        : {
+            kind: "draft",
+            loadout: draftLoadout.threadLoadout,
+            loadoutName: draftLoadout.active.name,
+            hasJudge: loadoutHasJudge(draftLoadout.active),
+            newWorktree: draftSession.envMode === "worktree" && !draftSession.worktreePath,
+          },
+  });
   return (
     <div data-composer-investigate className="flex flex-col gap-2 px-3 pt-2">
       <div className="flex flex-col gap-1">
@@ -153,10 +178,18 @@ export function ComposerInvestigateFields({
             max={INVESTIGATION_MAX_PARALLEL_APPROACHES}
             value={draft.parallelApproaches}
             onChange={(event) => update({ parallelApproaches: Number(event.target.value) })}
+            onBlur={() =>
+              update({ parallelApproaches: clampParallelApproaches(draft.parallelApproaches) })
+            }
           />
         </div>
-        <p className="pb-1 text-2xs text-muted-foreground">
-          Send starts it. The budget ends it if nothing passes first.
+        <p
+          className={cn(
+            "min-w-0 flex-1 pb-1 text-2xs",
+            hint.tone === "warning" ? "text-warning" : "text-muted-foreground",
+          )}
+        >
+          {hint.text}
         </p>
       </div>
     </div>

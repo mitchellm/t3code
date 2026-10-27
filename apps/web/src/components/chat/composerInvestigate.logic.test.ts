@@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildInvestigateStart,
+  clampParallelApproaches,
   EMPTY_INVESTIGATE_DRAFT,
+  investigateHint,
   type InvestigateSendTarget,
   planInvestigateSend,
   runInvestigateSteps,
@@ -80,6 +82,41 @@ describe("planInvestigateSend", () => {
       kind: "refused",
     });
     expect(send("investigate", draft(), { prompt: " " })).toMatchObject({ kind: "refused" });
+  });
+});
+
+describe("investigateHint", () => {
+  const hint = (prompt: string, target: InvestigateSendTarget) =>
+    investigateHint({ fields, prompt, target });
+
+  it("names what Send would refuse before anything is sent, goal first", () => {
+    const solo = draft({ loadout: null, loadoutName: "Solo", hasJudge: false });
+    expect(hint("", solo)).toEqual({
+      tone: "warning",
+      text: "Write the goal in the message box below. Solved when is how the judge checks it.",
+    });
+    expect(hint(goal, solo)).toEqual({
+      tone: "warning",
+      text: "Investigate needs a loadout with a judge role to refute each approach, and Solo has none. Pick one in the loadout picker.",
+    });
+  });
+
+  it("says what Send does once it can start", () => {
+    for (const target of [draft(), thread]) {
+      expect(hint(goal, target)).toEqual({
+        tone: "info",
+        text: "Send starts it. The budget ends it if nothing passes first.",
+      });
+    }
+  });
+});
+
+describe("clampParallelApproaches", () => {
+  it("snaps typed values into the range the server runs", () => {
+    expect(clampParallelApproaches(10)).toBe(8);
+    expect(clampParallelApproaches(0)).toBe(1);
+    expect(clampParallelApproaches(Number.NaN)).toBe(EMPTY_INVESTIGATE_DRAFT.parallelApproaches);
+    expect(clampParallelApproaches(3.6)).toBe(4);
   });
 });
 

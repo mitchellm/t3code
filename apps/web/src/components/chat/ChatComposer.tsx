@@ -296,7 +296,8 @@ import {
   usePreparingComposerImages,
 } from "./preparingComposerImages";
 import { ComposerControlsBar } from "./ComposerControlsBar";
-import { ComposerInvestigateFields } from "./ComposerInvestigate";
+import { ComposerInvestigateFields, useInvestigating } from "./ComposerInvestigate";
+import { resolveComposerMode } from "./composerMode.logic";
 import { composerCommandKeyHandler } from "./composerCommandKey";
 
 function consumePasteAsTextShortcut(deadline: { current: number }): boolean {
@@ -1018,6 +1019,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     provider: selectedProviderStatus,
     interactionMode: requestedInteractionMode,
   });
+  // Fork: in Investigate the message is the investigation's goal.
+  const investigating = useInvestigating(environmentId, routeThreadRef.threadId);
+  const investigateMode = resolveComposerMode({ interactionMode, investigating }) === "investigate";
   const selectedModelSelection: ModelSelection = createModelSelection(
     selectedInstanceId,
     selectedModel,
@@ -3753,6 +3757,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 environmentId={environmentId}
                 threadId={routeThreadRef.threadId}
                 interactionMode={interactionMode}
+                prompt={prompt}
+                draftId={routeKind === "draft" ? draftId : null}
               />
 
               {composerAttachmentMediaRow}
@@ -3832,7 +3838,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               ? "Choose a project above to start a thread"
                               : showProviderUnavailable
                                 ? "Enable a provider in Settings to send a message"
-                                : DEFAULT_COMPOSER_PLACEHOLDER
+                                : investigateMode
+                                  ? "The goal: what should the investigation find out or fix?"
+                                  : DEFAULT_COMPOSER_PLACEHOLDER
                     }
                     disabled={
                       isConnecting ||
