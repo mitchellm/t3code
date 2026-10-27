@@ -4,6 +4,7 @@
  * agent's own tool call or stop, and every read honours the hook's abort signal.
  */
 import type {
+  BackgroundTaskSummary,
   HookCallbackMatcher,
   HookInput,
   HookJSONOutput,
@@ -190,10 +191,15 @@ export const LOADOUT_WITHDRAWN =
 export const loadoutContext = (block: string | undefined, shownBefore: boolean) =>
   block ?? (shownBefore ? LOADOUT_WITHDRAWN : undefined);
 
+// A blocked agent may think it is waiting when the CLI sees nothing that will wake it. Marking the
+// wait is also what makes the between-turn follow-up stand aside once the stop is allowed.
+const STOP_WAIT_HINT =
+  "If you are waiting on background work, call t3_background_wait with its task id and end your turn.";
+
 function stopReason(open: ReadonlyArray<LedgerItem>): string {
   const named = open.slice(0, STOP_ITEMS_SHOWN).map(itemLabel).join(", ");
   const hidden = open.length - STOP_ITEMS_SHOWN;
-  return `Ledger has ${open.length} open ${open.length === 1 ? "item" : "items"}: ${named}${hidden > 0 ? ` and ${hidden} more` : ""}; continue, close with evidence, or drop with a reason.`;
+  return `Ledger has ${open.length} open ${open.length === 1 ? "item" : "items"}: ${named}${hidden > 0 ? ` and ${hidden} more` : ""}; continue, close with evidence, or drop with a reason. ${STOP_WAIT_HINT}`;
 }
 
 /** What counts as progress: any item changing status, evidence or drop reason. */
@@ -264,9 +270,17 @@ function isInsideDirectory(filePath: string, directory: string): boolean {
   );
 }
 
-// The SDK reports in-flight background work at a stop; a subagent there will wake the agent.
-const waitsOnBackgroundSubagent = (input: Extract<HookInput, { hook_event_name: "Stop" }>) =>
-  (input.background_tasks ?? []).some((task) => task.type === "subagent");
+// Declared on task_started and background_tasks_changed but not on this summary, so it is read
+// as an undeclared field; a CLI that omits it reports nothing ambient.
+const isAmbient = (task: BackgroundTaskSummary) => Reflect.get(task, "ambient") === true;
+
+// Fork: each task the SDK lists here wakes the session when it ends, and a cron fires a prompt, so
+// blocking the stop only burns blocks to the ceiling. T3's awaited mark is not required: the CLI
+// wakes either way. A dev server left running lets the agent stop too; the between-turn follow-up
+// applies the awaited rule and covers it.
+const waitsOnBackgroundWork = (input: Extract<HookInput, { hook_event_name: "Stop" }>) =>
+  (input.session_crons ?? []).length > 0 ||
+  (input.background_tasks ?? []).some((task) => !isAmbient(task));
 
 export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | undefined {
   const { readPinnedRules, readLedgerState, readThreadPolicy } = port;
@@ -378,7 +392,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     let lastFingerprint: string | undefined;
     const judgeReplanned = new Set<string>();
     // Giving up only allows the stop: the run then completes with items open, and
-    // LedgerAutoContinue posts the stop notice and unread mark for it, as for any provider.
+    // LedgerAutoContinue decides the follow-up as for any provider.
     hooks.Stop = [
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "Stop") return {};
@@ -388,7 +402,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           promptBlocks = 0;
           judgeReplanned.clear();
         }
-        if (waitsOnBackgroundSubagent(input)) return {};
+        if (waitsOnBackgroundWork(input)) return {};
         const state = await readLedgerState(signal);
         if (state === undefined || state.userInterrupted || state.delegatedWorkActive) return {};
         const ledger = activeLedger(state);
@@ -417,7 +431,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         if (nudge.reason === "judge") for (const item of nudge.items) judgeReplanned.add(item.id);
         return {
           decision: "block",
-          reason: ledgerReplanText({ ledger, reason: nudge.reason, items: nudge.items }),
+          reason: `${ledgerReplanText({ ledger, reason: nudge.reason, items: nudge.items })}\n\n${STOP_WAIT_HINT}`,
         };
       }),
     ];

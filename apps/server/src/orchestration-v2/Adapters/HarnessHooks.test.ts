@@ -294,6 +294,58 @@ describe("Stop hook", () => {
     expect((await fire("Stop", stop(false))).decision).toBe("block");
   });
 
+  it.each([
+    [
+      "a background shell command",
+      {
+        id: "b1",
+        type: "shell",
+        status: "running",
+        description: "Build the map",
+        command: "pwsh ./build-map.ps1",
+      },
+    ],
+    ["a Monitor", { id: "m1", type: "monitor", status: "running", description: "Watch the log" }],
+    ["a workflow", { id: "w1", type: "workflow", status: "pending", description: "spec" }],
+  ])("allows the stop while %s will wake the session", async (_case, task) => {
+    const { fire } = make(ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }));
+    expect(await fire("Stop", stop(false, { background_tasks: [task] }))).toEqual({});
+  });
+
+  it("allows the stop while a cron will wake the session", async () => {
+    const { fire } = make(ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }));
+    const scheduled = stop(false, {
+      background_tasks: [],
+      session_crons: [{ id: "c1", schedule: "30 14 * * *", recurring: false, prompt: "Check it" }],
+    });
+    expect(await fire("Stop", scheduled)).toEqual({});
+  });
+
+  it("still blocks when only an ambient watcher is in flight", async () => {
+    const { fire } = make(ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }));
+    const watching = stop(false, {
+      background_tasks: [
+        { id: "m1", type: "monitor", status: "running", description: "Live", ambient: true },
+      ],
+      session_crons: [],
+    });
+    expect((await fire("Stop", watching)).decision).toBe("block");
+  });
+
+  it("tells a blocked agent how to wait on background work, replans included", async () => {
+    const { fire } = make(ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }));
+    const reasons: Array<string> = [];
+    for (let index = 0; index <= HARNESS_STOP_BLOCK_LIMIT; index++) {
+      reasons.push(String((await fire("Stop", stop(index > 0))).reason));
+    }
+    expect(reasons.at(-1)).toContain("replan");
+    for (const reason of reasons) {
+      expect(reason).toContain(
+        "If you are waiting on background work, call t3_background_wait with its task id and end your turn.",
+      );
+    }
+  });
+
   it("never throws: a failed read allows the stop and is reported", async () => {
     const failure = new Error("database unavailable");
     const { fire, errors } = make({
