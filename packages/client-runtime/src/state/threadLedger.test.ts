@@ -24,7 +24,6 @@ import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
 import {
   deriveLedgerItemTasks,
   deriveLedgerProgress,
-  deriveLedgerView,
   formatLedgerProgress,
   ledgerItemStatusLabel,
 } from "./threadLedger.ts";
@@ -114,49 +113,7 @@ describe("formatLedgerProgress", () => {
   });
 });
 
-describe("deriveLedgerView", () => {
-  const shaped = (items: ReadonlyArray<LedgerItem>): Ledger => ({ ...ledgerOf([]), items });
-  const id = LedgerItemId.make;
-
-  it("nests children under their parent in order and keeps deferred items apart", () => {
-    const view = deriveLedgerView(
-      shaped([
-        item("P", "in_progress"),
-        item("Q", "open"),
-        { ...item("C1", "open"), parentItemId: id("P") },
-        { ...item("G", "open"), parentItemId: id("C1") },
-        { ...item("D", "deferred"), deferReason: "later", parentItemId: id("P") },
-        { ...item("C2", "closed"), parentItemId: id("P") },
-      ]),
-    );
-    expect(view.rows.map((row) => [row.item.id, row.depth])).toEqual([
-      ["P", 0],
-      ["C1", 1],
-      ["G", 2],
-      ["C2", 1],
-      ["Q", 0],
-    ]);
-    expect(view.deferred.map((entry) => entry.id)).toEqual(["D"]);
-  });
-
-  it("lists only unfinished blockers, and lifts a child whose parent is gone or deferred", () => {
-    const view = deriveLedgerView(
-      shaped([
-        item("A", "open"),
-        { ...item("B", "closed") },
-        { ...item("C", "open"), blockedBy: [id("A"), id("B")] },
-        { ...item("X", "deferred"), deferReason: "later" },
-        { ...item("Y", "open"), parentItemId: id("X") },
-        { ...item("Z", "open"), parentItemId: id("missing") },
-      ]),
-    );
-    const row = (name: string) => view.rows.find((entry) => entry.item.id === name);
-    expect(row("C")?.blockedBy).toEqual(["A"]);
-    expect(row("A")?.blockedBy).toEqual([]);
-    expect(row("Y")?.depth).toBe(0);
-    expect(row("Z")?.depth).toBe(0);
-  });
-
+describe("ledgerItemStatusLabel", () => {
   it("labels an item under judgement as judging", () => {
     expect(ledgerItemStatusLabel({ ...item("J", "in_progress"), judging: true })).toBe("Judging");
     expect(ledgerItemStatusLabel(item("J", "deferred"))).toBe("Deferred");

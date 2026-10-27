@@ -3359,6 +3359,14 @@ const layerForkWsRpc = ServerForkWsRpcGroup.toLayer(
               }),
           ),
         ),
+      [ORCHESTRATION_V2_WS_METHODS.getTaskStats]: (input) =>
+        Effect.annotateCurrentSpan({ threadId: input.threadId }).pipe(
+          Effect.andThen(taskTiming.taskStats(input.threadId)),
+          Effect.mapError(
+            (cause) =>
+              new OrchestrationGetTaskTimingError({ message: "Failed to read task stats", cause }),
+          ),
+        ),
       [ORCHESTRATION_V2_WS_METHODS.getTaskRetro]: (input) =>
         Effect.annotateCurrentSpan({ threadId: input.threadId }).pipe(
           Effect.andThen(taskRetro.get(input.threadId)),

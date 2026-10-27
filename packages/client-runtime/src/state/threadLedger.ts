@@ -5,11 +5,6 @@ import type {
   LedgerItemTask,
   OrchestrationV2Subagent,
 } from "@t3tools/contracts";
-import {
-  orderLedgerTree,
-  releasedLedgerItemIds,
-  unreleasedBlockers,
-} from "@t3tools/shared/taskLedger";
 
 export interface LedgerProgress {
   readonly total: number;
@@ -109,35 +104,4 @@ export function deriveLedgerItemTasks(
       completedAt: record?.completedAt ?? null,
     };
   });
-}
-
-export interface LedgerViewRow {
-  readonly item: LedgerItem;
-  /** Nesting below the top level; 0 for a top-level item. */
-  readonly depth: number;
-  /** Blockers not yet closed or dropped, so the row shows what it waits on. */
-  readonly blockedBy: ReadonlyArray<LedgerItem["id"]>;
-}
-
-export interface LedgerView {
-  /** Every item but deferred ones, depth first: each parent followed by its sub-items. */
-  readonly rows: ReadonlyArray<LedgerViewRow>;
-  readonly deferred: ReadonlyArray<LedgerItem>;
-}
-
-/**
- * The ledger as the panel lays it out. A sub-item whose parent is missing or deferred is lifted
- * to the top level so it stays visible with the work in scope.
- */
-export function deriveLedgerView(ledger: Ledger): LedgerView {
-  const released = releasedLedgerItemIds(ledger);
-  const inScope = ledger.items.filter((item) => item.status !== "deferred");
-  return {
-    rows: orderLedgerTree(inScope).map(({ item, depth }) => ({
-      item,
-      depth,
-      blockedBy: unreleasedBlockers(item, released),
-    })),
-    deferred: ledger.items.filter((item) => item.status === "deferred"),
-  };
 }

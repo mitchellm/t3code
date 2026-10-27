@@ -114,6 +114,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadPreviews: Schema.optionalKey(Schema.Boolean),
   /** Fork: server answers orchestration.getTaskTiming. */
   taskTiming: Schema.optionalKey(Schema.Boolean),
+  /** Fork: server answers orchestration.getTaskStats. */
+  taskStats: Schema.optionalKey(Schema.Boolean),
   /** Fork: server answers orchestration.getTaskRetro and orchestration.resolveTaskRetro. */
   taskRetro: Schema.optionalKey(Schema.Boolean),
   /** Fork: server answers orchestration.runBuildMode and honors `freshProviderThread`. */

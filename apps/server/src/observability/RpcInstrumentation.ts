@@ -20,6 +20,7 @@ const RPC_AGGREGATES = {
   [ORCHESTRATION_V2_WS_METHODS.searchThreads]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getThreadPreviews]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getTaskTiming]: "orchestration",
+  [ORCHESTRATION_V2_WS_METHODS.getTaskStats]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getTaskRetro]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.runTaskRetro]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.resolveTaskRetro]: "orchestration",
