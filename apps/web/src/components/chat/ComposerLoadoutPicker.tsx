@@ -1,3 +1,4 @@
+import type { Loadout } from "@t3tools/contracts";
 import { summarizeLoadoutRoles } from "@t3tools/shared/loadoutSummary";
 import { useNavigate } from "@tanstack/react-router";
 import { LayersIcon, SparklesIcon } from "lucide-react";
@@ -20,7 +21,13 @@ function loadoutTooltip(loadout: ComposerLoadout): string {
   if (loadout.choice?.setBy === "agent") {
     return `Proposed by the agent: ${loadout.choice.reason ?? "no reason given"}`;
   }
-  return loadout.active.description;
+  return loadout.plannerKept ?? loadout.active.description;
+}
+
+/** A summary that does not name a planner the thread is not running on. */
+function withoutPlanner(loadout: Loadout): Loadout {
+  const { planner: _notRunning, ...roles } = loadout.roles;
+  return { ...loadout, roles };
 }
 
 /**
@@ -90,23 +97,31 @@ export const ComposerLoadoutPicker = memo(function ComposerLoadoutPicker(props: 
           ) : null}
         </TooltipTrigger>
         <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-          {loadout.loadouts.map((option) => (
-            <SelectItem key={option.id} value={option.id} hideIndicator className="min-w-64">
-              <div className="grid min-w-0 gap-0.5">
-                <span className="font-medium text-foreground">
-                  {option.name}
-                  {agentProposed && option.id === loadout.active.id ? (
-                    <span className="ml-1.5 font-normal text-muted-foreground text-xs">
-                      proposed by agent
+          {loadout.loadouts.map((option) => {
+            const plannerKept = option.id === loadout.active.id ? loadout.plannerKept : null;
+            return (
+              <SelectItem key={option.id} value={option.id} hideIndicator className="min-w-64">
+                <div className="grid min-w-0 gap-0.5">
+                  <span className="font-medium text-foreground">
+                    {option.name}
+                    {agentProposed && option.id === loadout.active.id ? (
+                      <span className="ml-1.5 font-normal text-muted-foreground text-xs">
+                        proposed by agent
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="text-muted-foreground text-xs leading-4">
+                    {summarizeLoadoutRoles(plannerKept === null ? option : withoutPlanner(option))}
+                  </span>
+                  {plannerKept === null ? null : (
+                    <span className="max-w-72 text-warning-foreground text-xs leading-4">
+                      {plannerKept}
                     </span>
-                  ) : null}
-                </span>
-                <span className="text-muted-foreground text-xs leading-4">
-                  {summarizeLoadoutRoles(option)}
-                </span>
-              </div>
-            </SelectItem>
-          ))}
+                  )}
+                </div>
+              </SelectItem>
+            );
+          })}
           {loadout.choice?.setBy === "user" ? (
             <SelectItem value={CLEAR_VALUE} hideIndicator className="min-w-64">
               <div className="grid min-w-0 gap-0.5">

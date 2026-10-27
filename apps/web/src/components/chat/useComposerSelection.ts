@@ -25,6 +25,7 @@ import {
   deriveLockedProvider,
   makeModelDisabledReason,
 } from "../ChatView.logic";
+import { withOptionOverrides } from "./loadoutPlanner";
 interface ComposerSelectionInput {
   readonly environmentId: EnvironmentId;
   readonly composerDraftTarget: ComposerThreadTarget;
@@ -143,7 +144,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
   const onProviderModelSelect = (
     instanceId: ProviderInstanceId,
     model: string,
-    options?: { focusComposer?: boolean },
+    options?: { focusComposer?: boolean; optionOverrides?: ModelSelection["options"] },
   ) => {
     if (!activeThread) return;
     const entry = providerStatuses.find((snapshot) => snapshot.instanceId === instanceId);
@@ -184,8 +185,11 @@ export function useComposerSelection(input: ComposerSelectionInput) {
       if (options?.focusComposer !== false) scheduleComposerFocus();
       return;
     }
-    const rememberedOptions =
-      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
+    // Fork: a loadout pick passes its planner's effort, which wins over what this model remembers.
+    const rememberedOptions = withOptionOverrides(
+      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel],
+      options?.optionOverrides,
+    );
     const nextModelSelection: ModelSelection =
       rememberedOptions !== undefined && rememberedOptions.length > 0
         ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
