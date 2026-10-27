@@ -106,7 +106,7 @@ import {
   buildCodexChunkedContext,
   buildCodexPinnedRulesContext,
 } from "../../provider/CodexDeveloperInstructions.ts";
-import { formatLedgerBlock, formatLoadoutBlock } from "./HarnessHooks.ts";
+import { readCodexHarnessState, refreshCodexHarnessContext } from "./CodexHarnessContext.ts";
 import {
   describeMcpElicitation,
   toMcpElicitationResponse,
@@ -1681,44 +1681,27 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             NonNullable<CodexTurnStartParamsWithCollaborationMode["additionalContext"]>
           >(),
         );
-        // Fork: the ledger and the loadout move during a turn, so a mid-turn compaction re-reads
-        // them through the live turn's port rather than restoring the turn-start snapshot. A failed
-        // read keeps its snapshot. Untraced: it only runs inside restoreAdditionalContext's span.
-        const refreshHarnessContext = Effect.fnUntraced(function* (
-          threadId: string,
-          turnId: string,
-          context: NonNullable<CodexTurnStartParamsWithCollaborationMode["additionalContext"]>,
-        ) {
-          const harness = (yield* Ref.get(activeTurns)).get(turnId)?.input.harness;
-          if (harness === undefined) return context;
-          const ledger = yield* harness.readLedgerState;
-          const policy = yield* harness.readThreadPolicy;
-          const replace = (current: typeof context, key: string, text: string) => ({
-            ...Object.fromEntries(
-              Object.entries(current).filter(([name]) => !name.startsWith(key)),
-            ),
-            ...buildCodexChunkedContext(key, text),
-          });
-          let fresh = context;
-          if (ledger !== undefined) {
-            fresh = replace(fresh, "ledger_state", formatLedgerBlock(ledger.ledger) ?? "");
-          }
-          if (policy !== undefined) {
-            fresh = replace(fresh, "loadout_state", formatLoadoutBlock(policy) ?? "");
-          }
-          if (fresh === context) return context;
-          yield* Ref.update(additionalContextByThread, (current) =>
-            new Map(current).set(threadId, fresh),
-          );
-          return fresh;
-        });
         // Codex drops client developer messages during compaction but only
         // resends additionalContext when it changes.
         const restoreAdditionalContext = Effect.fn("CodexAdapterV2.restoreAdditionalContext")(
           function* (threadId: string, turnId: string) {
             const stored = (yield* Ref.get(additionalContextByThread)).get(threadId);
             if (!stored) return;
-            const context = yield* refreshHarnessContext(threadId, turnId, stored);
+            // Fork: the ledger and loadout move mid-turn, so they are re-read, not restored.
+            const turn = (yield* Ref.get(activeTurns)).get(turnId)?.input;
+            const context =
+              turn?.harness === undefined
+                ? stored
+                : yield* refreshCodexHarnessContext({
+                    harness: turn.harness,
+                    context: stored,
+                    t3Tools: (yield* mcpSessions.read(turn.threadId)) !== undefined,
+                  });
+            if (context !== stored) {
+              yield* Ref.update(additionalContextByThread, (current) =>
+                new Map(current).set(threadId, context),
+              );
+            }
             yield* client.request("thread/inject_items", {
               threadId,
               items: Object.entries(context).map(([key, entry]) =>
@@ -6361,14 +6344,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
-            const ledgerState =
-              turnInput.harness === undefined
-                ? undefined
-                : formatLedgerBlock((yield* turnInput.harness.readLedgerState)?.ledger);
-            const loadoutState =
-              turnInput.harness === undefined
-                ? undefined
-                : formatLoadoutBlock(yield* turnInput.harness.readThreadPolicy);
+            // Fork: the ledger and loadout blocks, as trusted context.
+            const harnessState = yield* readCodexHarnessState({
+              harness: turnInput.harness,
+              previous: (yield* Ref.get(additionalContextByThread)).get(threadId),
+              t3Tools: mcpSession !== undefined,
+            });
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
@@ -6382,8 +6363,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ...(turnInput.pinnedRules === undefined
                 ? {}
                 : { pinnedRules: turnInput.pinnedRules }),
-              ...(ledgerState === undefined ? {} : { ledgerState }),
-              ...(loadoutState === undefined ? {} : { loadoutState }),
+              ...harnessState,
             });
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);

@@ -103,19 +103,26 @@ export function makeHarnessPort<E>(
     readLedgerState: orUndefined(Effect.suspend(reads.readLedgerState), "ledger"),
     readThreadPolicy: orUndefined(
       Effect.gen(function* () {
-        const { projectId, loadoutId, setBy } = yield* reads.readThreadLoadout();
+        const { projectId, loadoutId } = yield* reads.readThreadLoadout();
         const settings = yield* readProjectSettings(projectId);
-        const loadout = resolveLoadout(settings.loadouts, loadoutId);
-        const structure = loadoutStructure(loadout);
         return {
-          structure,
+          structure: loadoutStructure(resolveLoadout(settings.loadouts, loadoutId)),
           planBeforeEditing: settings.planBeforeEditing,
-          // No loadout, Solo, or a deleted loadout (which resolves to Solo) has nothing to tell the
-          // agent.
-          ...(structure === "solo" || setBy === null ? {} : { loadout: { ...loadout, setBy } }),
         };
       }),
       "loadout and plan before editing setting",
+    ),
+    readLoadout: orUndefined(
+      Effect.gen(function* () {
+        const { projectId, loadoutId, setBy } = yield* reads.readThreadLoadout();
+        if (loadoutId === null || setBy === null) return null;
+        const settings = yield* readProjectSettings(projectId);
+        const loadout = resolveLoadout(settings.loadouts, loadoutId);
+        // Solo, a deleted loadout (which resolves to Solo) and a solo structure with roles all
+        // leave the agent working alone, so there is nothing to tell it.
+        return loadoutStructure(loadout) === "solo" ? null : { ...loadout, setBy };
+      }),
+      "loadout",
     ),
   };
 }

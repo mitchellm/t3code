@@ -457,14 +457,20 @@ export interface ProviderAdapterV2HarnessPort {
   readonly readLedgerState: Effect.Effect<ProviderAdapterV2HarnessLedgerState | undefined>;
   /** One thread and settings read, since every gated tool call needs both answers. */
   readonly readThreadPolicy: Effect.Effect<ProviderAdapterV2HarnessThreadPolicy | undefined>;
+  /**
+   * The loadout the agent is told about each turn; null when the thread runs solo. Every turn
+   * makes this read, so a thread with no loadout skips the settings read.
+   */
+  readonly readLoadout: Effect.Effect<ProviderAdapterV2HarnessLoadout | null | undefined>;
 }
 
 export interface ProviderAdapterV2HarnessThreadPolicy {
   readonly structure: LoadoutStructure;
   readonly planBeforeEditing: boolean;
-  /** The resolved loadout and who chose it, so each turn can tell the agent. Absent when solo. */
-  readonly loadout?: Loadout & { readonly setBy: LoadoutSetBy };
 }
+
+/** The thread's resolved loadout and who chose it. */
+export type ProviderAdapterV2HarnessLoadout = Loadout & { readonly setBy: LoadoutSetBy };
 
 export interface ProviderAdapterV2HarnessLedgerState {
   /** Null when the thread has no ledger. */

@@ -17,8 +17,10 @@ import {
 } from "@t3tools/contracts";
 import type {
   ProviderAdapterV2HarnessLedgerState,
+  ProviderAdapterV2HarnessLoadout,
   ProviderAdapterV2HarnessThreadPolicy,
 } from "@t3tools/provider-core/server/ProviderAdapter";
+import { loadoutStructure } from "@t3tools/shared/loadouts";
 // Hooks are plain promises and must judge a Windows path whatever the host, so they need both
 // path.win32 and path.posix rather than one Effect Path layer.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -73,6 +75,10 @@ export interface HarnessHookPort {
   readonly readThreadPolicy?: (
     signal: AbortSignal,
   ) => Promise<ProviderAdapterV2HarnessThreadPolicy | undefined>;
+  /** Null when the thread runs solo; undefined when the read failed. */
+  readonly readLoadout?: (
+    signal: AbortSignal,
+  ) => Promise<ProviderAdapterV2HarnessLoadout | null | undefined>;
   /** Without the T3 tools there is no ledger to write, so plan before editing would strand the agent. */
   readonly ledgerTools: boolean;
   /** Where plan mode writes its plan file (see claudePlansDirectory); unknown exempts nothing. */
@@ -140,37 +146,49 @@ const roleModel = (role: Omit<LoadoutRole, "fallback">) =>
   `${role.model} on ${role.instanceId}${role.effort === undefined ? "" : `, effort ${role.effort}`}`;
 
 /**
- * The thread's loadout as a short block for the model at the start of each turn, shared by the
- * Claude prompt hook and Codex's `loadout_state` context. The agent cannot see the loadout any
- * other way short of calling a tool. Undefined when the thread runs solo.
+ * The thread's loadout as a short block for the model, shared by the Claude prompt hook and
+ * Codex's `loadout_state` context. The agent cannot see the loadout any other way short of
+ * calling a tool. Undefined when the thread runs solo.
  */
 export function formatLoadoutBlock(
-  policy: ProviderAdapterV2HarnessThreadPolicy | undefined,
+  loadout: ProviderAdapterV2HarnessLoadout | null,
 ): string | undefined {
-  const loadout = policy?.loadout;
-  if (policy === undefined || loadout === undefined) return undefined;
+  if (loadout === null) return undefined;
+  const structure = loadoutStructure(loadout);
   const roles = LOADOUT_ROLE_NAMES.flatMap((name) => {
     const role = loadout.roles[name];
     if (role === undefined) return [];
+    // The planner is not a delegate_task role: it names the model meant for the thread itself.
+    const label = name === "planner" ? "planner (the top-level thread, you)" : name;
     const fallback =
       role.fallback === undefined ? "" : `; falls back to ${roleModel(role.fallback)}`;
-    return [`- ${name}: ${roleModel(role)}${fallback}`];
+    return [`- ${label}: ${roleModel(role)}${fallback}`];
   });
   const use =
-    policy.structure === "managers"
-      ? "You plan and review only: delegate every edit and shell command with delegate_task and a role (worker, explorer, subPlanner)."
+    structure === "managers"
+      ? "You plan and review only: delegate every edit and shell command with delegate_task and a role (worker or subPlanner)."
       : "Delegate work with delegate_task and a role (worker, explorer, subPlanner) rather than doing it all yourself.";
   const judge =
     loadout.roles.judge === undefined
       ? ""
-      : " The judge gates item closes: an item closes only after ledger_request_judgement passes.";
+      : " When ledger_read shows requiresJudge, closing an item with ledger_update_item starts the judge, and the item closes when it passes.";
   return [
-    `Loadout: "${clip(loadout.name, TITLE_MAX_CHARS)}", ${loadout.setBy === "user" ? "set by the user" : "proposed by you"}. Structure: ${policy.structure}.`,
+    `Loadout: "${clip(loadout.name, TITLE_MAX_CHARS)}", ${loadout.setBy === "user" ? "set by the user" : "proposed by you"}. Structure: ${structure}.`,
     roles.length === 0 ? "Roles: none assigned, so each role runs on your own model." : "Roles:",
     ...roles,
     `${use}${judge}`,
   ].join("\n");
 }
+
+export const LOADOUT_WITHDRAWN =
+  "This thread now runs solo; the earlier loadout no longer applies.";
+
+/**
+ * What the agent should hold about the loadout: its block, or once a block was shown, the notice
+ * that withdraws it. Saying nothing would leave the old block standing in the transcript.
+ */
+export const loadoutContext = (block: string | undefined, shownBefore: boolean) =>
+  block ?? (shownBefore ? LOADOUT_WITHDRAWN : undefined);
 
 function stopReason(open: ReadonlyArray<LedgerItem>): string {
   const named = open.slice(0, STOP_ITEMS_SHOWN).map(itemLabel).join(", ");
@@ -252,10 +270,13 @@ const waitsOnBackgroundSubagent = (input: Extract<HookInput, { hook_event_name: 
 
 export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | undefined {
   const { readPinnedRules, readLedgerState, readThreadPolicy } = port;
+  // The roles are reached only through the T3 tools, so without them the loadout goes unmentioned.
+  const readLoadout = port.ledgerTools ? port.readLoadout : undefined;
   if (
     readPinnedRules === undefined &&
     readLedgerState === undefined &&
-    readThreadPolicy === undefined
+    readThreadPolicy === undefined &&
+    readLoadout === undefined
   ) {
     return undefined;
   }
@@ -300,6 +321,19 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     rulesDeliveredByHook = true;
     return `These are the current pinned rules. They supersede any earlier version in the system prompt.\n\n${rules}`;
   };
+  // What this session last sent about the loadout. Task notifications and auto-continue arrive as
+  // prompts too, so an unchanged loadout is not repeated; the first prompt and every compaction
+  // send it. Sticky like the rules: once a block was sent, Solo withdraws it, again per compaction.
+  let loadoutSent: string | undefined;
+  const loadoutUpdate = async (signal: AbortSignal, resend: boolean) => {
+    if (readLoadout === undefined) return undefined;
+    const loadout = await readLoadout(signal);
+    if (loadout === undefined) return undefined;
+    const context = loadoutContext(formatLoadoutBlock(loadout), loadoutSent !== undefined);
+    if (context === undefined || (!resend && context === loadoutSent)) return undefined;
+    loadoutSent = context;
+    return context;
+  };
   // A failed rules read must not cost the ledger block, nor the reverse.
   const settle = async <A>(
     signal: AbortSignal,
@@ -325,9 +359,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           : settle(signal, async () =>
               formatLedgerBlock(activeLedger(await readLedgerState(signal))),
             ),
-        readThreadPolicy === undefined
-          ? Promise.resolve(undefined)
-          : settle(signal, async () => formatLoadoutBlock(await readThreadPolicy(signal))),
+        settle(signal, () => loadoutUpdate(signal, true)),
       ]);
       const parts = [rules, ledger, loadout].filter((part): part is string => part !== undefined);
       if (parts.length === 0) return {};
@@ -445,17 +477,17 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     ];
   }
 
-  if (readThreadPolicy !== undefined) {
+  if (readLoadout !== undefined) {
     // Fires once per prompt before the model starts, and reads fresh, so a loadout the user or
     // the agent changed since the last prompt is the one shown. A delegated child reads its own
     // thread, which starts with no loadout, so it hears nothing unless one was set on it.
     hooks.UserPromptSubmit = [
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "UserPromptSubmit") return {};
-        const block = formatLoadoutBlock(await readThreadPolicy(signal));
-        if (block === undefined) return {};
+        const context = await loadoutUpdate(signal, false);
+        if (context === undefined) return {};
         return {
-          hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: block },
+          hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: context },
         };
       }),
     ];
