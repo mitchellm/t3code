@@ -97,6 +97,7 @@ import {
 } from "./composerSend.logic";
 import { usePlanFollowUpSend } from "./useProposedPlanSend";
 import { useComposerInvestigateSend } from "./ComposerInvestigate";
+import { useDraftLaunchLoadout } from "./useComposerLoadout";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import {
@@ -376,6 +377,7 @@ export function useComposerSend(input: ComposerSendInput) {
     persistThreadSettingsForNextTurn,
   });
   const startComposerInvestigation = useComposerInvestigateSend();
+  const draftLoadout = useDraftLaunchLoadout(environmentId, isLocalDraftThread ? draftId : null);
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
@@ -563,12 +565,35 @@ export function useComposerSend(input: ComposerSendInput) {
     // Fork: in Investigate mode the message is the goal of an investigation, not a turn.
     if (
       !queuedRunEdit.isEditing &&
-      isServerThread &&
+      (isServerThread || (isLocalDraftThread && activeProject !== null)) &&
       (await startComposerInvestigation({
         environmentId,
         threadId: activeThread.id,
         prompt: promptForSend,
         modelSelection: ctxSelectedModelSelection,
+        interactionMode: sendInteractionMode,
+        persistThreadSettings: () =>
+          persistThreadSettingsForNextTurn({
+            threadId: activeThread.id,
+            createdAt: new Date().toISOString(),
+            ...(localCheckoutBranchMismatch
+              ? { branch: localCheckoutBranchMismatch.currentBranch }
+              : {}),
+            runtimeMode,
+            interactionMode: "default",
+          }),
+        draft:
+          isLocalDraftThread && activeProject
+            ? {
+                projectId: activeProject.id,
+                runtimeMode,
+                branch: activeThreadBranch,
+                worktreePath: activeThread.worktreePath,
+                createdAt: activeThread.createdAt,
+                newWorktree: sendEnvMode === "worktree" && !activeThread.worktreePath,
+                loadout: draftLoadout,
+              }
+            : null,
         hasAttachments:
           composerImages.length +
             composerFiles.length +
@@ -1276,6 +1301,10 @@ export function useComposerSend(input: ComposerSendInput) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      // Fork: the loadout picked on the draft, set before the first turn runs.
+                      ...(draftLoadout.threadLoadout === null
+                        ? {}
+                        : { loadout: draftLoadout.threadLoadout }),
                     },
                   }
                 : {}),

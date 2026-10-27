@@ -66,10 +66,13 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly projectionRequests?: ThreadId[];
   readonly advertiseServerResolvedCommandContext?: boolean;
   readonly advertiseThreadStop?: boolean;
+  /** Fork: every dispatched command type and launch, in the order they reached the server. */
+  readonly calls?: string[];
 }) {
   const client = {
     [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
       Effect.sync(() => {
+        input.calls?.push(command.type);
         input.commands.push(command);
         return { sequence: input.commands.length };
       }),
@@ -82,6 +85,7 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
       }),
     [ORCHESTRATION_V2_WS_METHODS.launchThread]: (launchInput: OrchestrationV2ThreadLaunchInput) =>
       Effect.sync(() => {
+        input.calls?.push("launchThread");
         input.launches?.push(launchInput);
         return {
           threadId: launchInput.threadId ?? v2ThreadId,
@@ -260,6 +264,98 @@ describe("V2 environment commands", () => {
           branch: "feature",
         },
       });
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect("puts a draft's loadout on its new thread before the first message launches", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const commands: OrchestrationV2Command[] = [];
+      const launches: OrchestrationV2ThreadLaunchInput[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], launches, calls });
+      const loadout = { id: "blitz", reason: null, setBy: "user" } as const;
+      const createThread = {
+        projectId: ProjectId.make("project-1"),
+        title: "Thread",
+        modelSelection: v2Projection.thread.modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "main",
+        worktreePath: null,
+        createdAt: "2026-06-20T00:00:00.000Z",
+        loadout,
+      } as const;
+      const launch = (commandId: string, prepareWorktree?: { readonly baseBranch: string }) =>
+        startThreadTurn({
+          commandId: CommandId.make(commandId),
+          threadId: v2ThreadId,
+          message: {
+            messageId: MessageId.make(`message-${commandId}`),
+            role: "user",
+            text: "Fix the sync bug",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          titleSeed: "Fix the sync bug",
+          bootstrap: {
+            createThread,
+            ...(prepareWorktree === undefined
+              ? {}
+              : { prepareWorktree: { projectCwd: "/workspace/project", ...prepareWorktree } }),
+          },
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      yield* launch("draft-local");
+      yield* launch("draft-worktree", { baseBranch: "main" });
+
+      expect(calls).toEqual([
+        "thread.create",
+        "thread.metadata.update",
+        "launchThread",
+        "thread.create",
+        "thread.metadata.update",
+        "launchThread",
+      ]);
+      expect(commands).toEqual([
+        {
+          type: "thread.create",
+          commandId: "draft-local:draft-create",
+          createdBy: "user",
+          creationSource: "web",
+          threadId: v2ThreadId,
+          projectId: "project-1",
+          title: "Fix the sync bug",
+          modelSelection: v2Projection.thread.modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "main",
+          worktreePath: null,
+        },
+        {
+          type: "thread.metadata.update",
+          commandId: "draft-local:draft-loadout",
+          threadId: v2ThreadId,
+          loadout,
+        },
+        // The worktree's branch and path are the launch's to record once it exists.
+        expect.objectContaining({ type: "thread.create", branch: null, worktreePath: null }),
+        expect.objectContaining({ type: "thread.metadata.update", loadout }),
+      ]);
+      expect(launches).toMatchObject([
+        {
+          commandId: "draft-local",
+          threadId: v2ThreadId,
+          reuseExistingThread: true,
+          workspaceStrategy: { type: "root", branch: "main" },
+          initialMessage: { text: "Fix the sync bug" },
+        },
+        {
+          commandId: "draft-worktree",
+          reuseExistingThread: true,
+          workspaceStrategy: { type: "worktree", baseRef: "main" },
+        },
+      ]);
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 

@@ -7,7 +7,7 @@ import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerControl, ComposerControlSeparator } from "./ComposerControl";
 import { ComposerLoadoutPicker } from "./ComposerLoadoutPicker";
 import { useComposerLoadout } from "./useComposerLoadout";
-import { ComposerInvestigateToggle } from "./ComposerInvestigate";
+import { ComposerModePicker, useComposerMode } from "./ComposerModePicker";
 import {
   ComposerFooterModeControls,
   ComposerModelPicker,
@@ -131,8 +131,20 @@ export function ComposerControlsBar(props: {
     modelPickerIconClassName,
     getModelDisabledReason,
   } = props;
-  // A draft has no thread to hold a choice yet; every thread starts solo and gets the picker.
-  const loadout = useComposerLoadout(environmentId, routeKind === "server" ? routeThreadRef : null);
+  // A draft holds its own pick until its first send creates the thread under it.
+  const loadout = useComposerLoadout(
+    environmentId,
+    routeThreadRef,
+    routeKind === "draft" ? draftId : null,
+  );
+  // Fork: Build, Plan and Investigate in one picker, on drafts as on threads.
+  const composerMode = useComposerMode({
+    environmentId,
+    threadId: routeThreadRef.threadId,
+    interactionMode,
+    planAvailable: planModeUiEnabled,
+    toggleInteractionMode,
+  });
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
     provider: selectedProvider,
     instanceId: selectedInstanceId,
@@ -180,7 +192,7 @@ export function ComposerControlsBar(props: {
       content: (
         <>
           <ComposerFooterModeControls
-            showInteractionModeToggle={planModeUiEnabled}
+            showInteractionModeToggle={planModeUiEnabled && composerMode === null}
             interactionMode={interactionMode}
             runtimeMode={compatibleRuntimeMode}
             runtimeModeOptions={compatibleRuntimeModeOptions}
@@ -189,15 +201,13 @@ export function ComposerControlsBar(props: {
             onToggleInteractionMode={toggleInteractionMode}
             onRuntimeModeChange={handleRuntimeModeChange}
           />
-          {/* Fork: Investigate mode needs a thread to hold the run, like the loadout picker. */}
-          {routeKind === "server" ? (
-            <ComposerInvestigateToggle
-              environmentId={environmentId}
-              threadId={routeThreadRef.threadId}
+          {composerMode === null ? null : (
+            <ComposerModePicker
+              mode={composerMode}
               size={composerControlsCollapsed ? "xs" : "sm"}
               hidden={composerControlsHidden || restingHiddenBlockCount > 0}
             />
-          ) : null}
+          )}
           {loadout === null ? null : (
             <>
               <ComposerControlSeparator size={composerControlsCollapsed ? "xs" : "sm"} />
@@ -344,6 +354,7 @@ export function ComposerControlsBar(props: {
             onToggleInteractionMode={toggleInteractionMode}
             onRuntimeModeChange={handleRuntimeModeChange}
             loadout={hiddenRestingBlockIds.includes("mode") ? loadout : null}
+            mode={hiddenRestingBlockIds.includes("mode") ? composerMode : null}
           />
         </div>
       </>

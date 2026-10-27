@@ -1,40 +1,52 @@
 /**
- * Fork: the composer's Investigate mode. Beside Build/Plan, it turns the next send into an
+ * Fork: the composer's Investigate mode. Chosen in the Mode picker, it turns the next send into an
  * investigation: the message is the goal, and these fields say when it is solved and what it may
- * spend. State is per thread and client-only until Start; the server owns the run after that.
+ * spend. State is per thread or draft and client-only until Start; the server owns the run after.
  */
 import { useAtomValue } from "@effect/atom-react";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
+import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
   INVESTIGATION_MAX_PARALLEL_APPROACHES,
   INVESTIGATION_MIN_PARALLEL_APPROACHES,
   type ModelSelection,
+  type ProjectId,
+  type ProviderInteractionMode,
+  type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
-import { FlaskConicalIcon } from "lucide-react";
+import { loadoutHasJudge } from "@t3tools/shared/loadouts";
+import { AsyncResult } from "effect/reactivity";
 import { useId } from "react";
 import { create } from "zustand";
 
 import { newMessageId } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { formatEnvironmentQueryError } from "~/state/query";
+import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
 import {
-  buildInvestigateStart,
   EMPTY_INVESTIGATE_DRAFT,
   type InvestigateDraft,
+  type InvestigateSendStep,
+  planInvestigateSend,
 } from "./composerInvestigate.logic";
+import { resolveComposerMode } from "./composerMode.logic";
+import type { draftLaunchLoadout } from "./draftLoadout";
 
 const threadKey = (environmentId: EnvironmentId, threadId: ThreadId) =>
   `${environmentId}:${threadId}`;
 
-/** A thread is in Investigate mode while it has a draft here. */
+/**
+ * A thread is in Investigate mode while it has a draft here. A new chat's draft thread id is the
+ * id its thread is created with, so the fields carry over when the first send creates it.
+ */
 const useInvestigateDrafts = create<{
   readonly drafts: Readonly<Record<string, InvestigateDraft>>;
 }>(() => ({ drafts: {} }));
@@ -49,63 +61,39 @@ function setDraft(key: string, draft: InvestigateDraft | null) {
 const useInvestigateDraft = (environmentId: EnvironmentId, threadId: ThreadId) =>
   useInvestigateDrafts((state) => state.drafts[threadKey(environmentId, threadId)] ?? null);
 
-export function ComposerInvestigateToggle({
-  environmentId,
-  threadId,
-  size,
-  hidden,
-}: {
-  environmentId: EnvironmentId;
-  threadId: ThreadId;
-  size: "sm" | "xs";
-  hidden: boolean;
-}) {
-  const draft = useInvestigateDraft(environmentId, threadId);
-  const canStart = useAtomValue(
-    orchestrationEnvironment.startInvestigation.permissionAtom(environmentId),
-  );
-  if (hidden || !canStart) return null;
-  const active = draft !== null;
-  const label = active
-    ? "Investigate mode. Click to send a normal message instead"
-    : "Investigate: run parallel approaches until one meets your criteria";
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <ComposerControl
-            size={size}
-            className="shrink-0 whitespace-nowrap"
-            aria-pressed={active}
-            type="button"
-            onClick={() =>
-              setDraft(threadKey(environmentId, threadId), active ? null : EMPTY_INVESTIGATE_DRAFT)
-            }
-            aria-label={label}
-          />
-        }
-      >
-        <ComposerControlIcon icon={FlaskConicalIcon} size={size} />
-        <span data-composer-control-label className="sr-only sm:not-sr-only">
-          Investigate
-        </span>
-      </TooltipTrigger>
-      <TooltipPopup side="top">{label}</TooltipPopup>
-    </Tooltip>
-  );
+export const useInvestigating = (environmentId: EnvironmentId, threadId: ThreadId) =>
+  useInvestigateDraft(environmentId, threadId) !== null;
+
+/** Opening keeps fields already typed; closing discards them. */
+export function setInvestigating(environmentId: EnvironmentId, threadId: ThreadId, on: boolean) {
+  const key = threadKey(environmentId, threadId);
+  if (!on) setDraft(key, null);
+  else if (useInvestigateDrafts.getState().drafts[key] === undefined) {
+    setDraft(key, EMPTY_INVESTIGATE_DRAFT);
+  }
 }
 
-/** The fields above the editor while the thread is in Investigate mode. */
+export const useCanInvestigate = (environmentId: EnvironmentId) =>
+  useAtomValue(orchestrationEnvironment.startInvestigation.permissionAtom(environmentId));
+
+/** The fields above the editor while the composer is in Investigate mode. */
 export function ComposerInvestigateFields({
   environmentId,
   threadId,
+  interactionMode,
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
+  interactionMode: ProviderInteractionMode;
 }) {
   const draft = useInvestigateDraft(environmentId, threadId);
   const id = useId();
-  if (draft === null) return null;
+  if (
+    draft === null ||
+    resolveComposerMode({ interactionMode, investigating: true }) !== "investigate"
+  ) {
+    return null;
+  }
   const key = threadKey(environmentId, threadId);
   const update = (patch: Partial<InvestigateDraft>) => setDraft(key, { ...draft, ...patch });
   return (
@@ -163,12 +151,31 @@ export function ComposerInvestigateFields({
   );
 }
 
+/** What a new chat's thread is created with when its first send starts an investigation. */
+export interface InvestigateDraftThread {
+  readonly projectId: ProjectId;
+  readonly runtimeMode: RuntimeMode;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+  readonly createdAt: string;
+  readonly newWorktree: boolean;
+  readonly loadout: ReturnType<typeof draftLaunchLoadout>;
+}
+
+// A second Send while the first is still creating the thread would create it twice.
+const startsInFlight = new Set<string>();
+
 /**
- * For the composer's send path: when the thread is in Investigate mode, starts the investigation
- * with the prompt as its goal and returns true, so the caller sends nothing else.
+ * For the composer's send path: in Investigate mode, starts the investigation with the prompt as
+ * its goal (creating a new chat's thread first) and returns true, so the caller sends nothing
+ * else. Returns false in Build and Plan, which send the composer's ordinary turn.
  */
 export function useComposerInvestigateSend() {
   const startInvestigation = useAtomCommand(orchestrationEnvironment.startInvestigation, {
+    reportFailure: false,
+  });
+  const createThread = useOrchestrationCommand(threadEnvironment.create, { reportFailure: false });
+  const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
   return async (input: {
@@ -176,47 +183,95 @@ export function useComposerInvestigateSend() {
     readonly threadId: ThreadId;
     readonly prompt: string;
     readonly modelSelection: ModelSelection;
+    readonly interactionMode: ProviderInteractionMode;
     /** Images, files or attached context: the goal travels as text only. */
     readonly hasAttachments: boolean;
+    /** An existing thread's runtime and interaction settings, which the kickoff turn runs under. */
+    readonly persistThreadSettings: () => Promise<AtomCommandResult<void, unknown>>;
+    /** Set for a new chat, whose thread this send creates. */
+    readonly draft: InvestigateDraftThread | null;
     readonly clearPrompt: () => void;
   }): Promise<boolean> => {
     const key = threadKey(input.environmentId, input.threadId);
-    const draft = useInvestigateDrafts.getState().drafts[key];
-    if (draft === undefined) return false;
-    if (input.hasAttachments) {
-      toastManager.add({
-        type: "warning",
-        title: "Not started yet",
-        description:
-          "An investigation's goal is text only. Remove the attachments, or turn off Investigate to send them as a normal message.",
-      });
-      return true;
-    }
-    const start = buildInvestigateStart(draft, input.prompt);
-    if (!start.ok) {
-      toastManager.add({ type: "warning", title: "Not started yet", description: start.problem });
-      return true;
-    }
-    const result = await startInvestigation({
-      environmentId: input.environmentId,
-      input: {
-        threadId: input.threadId,
-        requestId: newMessageId(),
-        goal: start.goal,
-        solvedWhen: start.solvedWhen,
-        budget: start.budget,
-        parallelApproaches: start.parallelApproaches,
-        modelSelection: input.modelSelection,
-      },
+    const fields = useInvestigateDrafts.getState().drafts[key] ?? null;
+    const { draft } = input;
+    const plan = planInvestigateSend({
+      mode: resolveComposerMode({
+        interactionMode: input.interactionMode,
+        investigating: fields !== null,
+      }),
+      fields,
+      prompt: input.prompt,
+      hasAttachments: input.hasAttachments,
+      target:
+        draft === null
+          ? { kind: "thread" }
+          : {
+              kind: "draft",
+              loadout: draft.loadout.threadLoadout,
+              loadoutName: draft.loadout.active.name,
+              hasJudge: loadoutHasJudge(draft.loadout.active),
+              newWorktree: draft.newWorktree,
+            },
     });
-    if (result._tag === "Failure") {
-      toastManager.add({
-        type: "error",
-        title: "Could not start the investigation",
-        description: formatEnvironmentQueryError(result.cause),
-      });
+    if (plan.kind === "turn") return false;
+    if (plan.kind === "refused") {
+      toastManager.add({ type: "warning", title: "Not started yet", description: plan.problem });
       return true;
     }
+    if (startsInFlight.has(key)) return true;
+    const run = (step: InvestigateSendStep): Promise<AtomCommandResult<unknown, unknown>> => {
+      const { environmentId, threadId } = input;
+      switch (step.type) {
+        case "persist-thread-settings":
+          return input.persistThreadSettings();
+        case "create-thread":
+          // Planned only for a draft; an existing thread has nothing to create.
+          return draft === null
+            ? Promise.resolve(AsyncResult.success(undefined))
+            : createThread({
+                environmentId,
+                input: {
+                  threadId,
+                  projectId: draft.projectId,
+                  title: deriveThreadTitleSeed({ text: input.prompt, attachments: [] }),
+                  modelSelection: input.modelSelection,
+                  // Investigate is a Build mode: its approaches change code.
+                  interactionMode: "default",
+                  runtimeMode: draft.runtimeMode,
+                  branch: draft.branch,
+                  worktreePath: draft.worktreePath,
+                  createdAt: draft.createdAt,
+                },
+              });
+        case "set-loadout":
+          return updateMetadata({ environmentId, input: { threadId, loadout: step.loadout } });
+        case "start-investigation":
+          return startInvestigation({
+            environmentId,
+            input: {
+              threadId,
+              requestId: newMessageId(),
+              ...step.start,
+              modelSelection: input.modelSelection,
+            },
+          });
+      }
+    };
+    startsInFlight.add(key);
+    for (const step of plan.steps) {
+      const result = await run(step);
+      if (result._tag === "Failure") {
+        startsInFlight.delete(key);
+        toastManager.add({
+          type: "error",
+          title: "Could not start the investigation",
+          description: formatEnvironmentQueryError(result.cause),
+        });
+        return true;
+      }
+    }
+    startsInFlight.delete(key);
     setDraft(key, null);
     input.clearPrompt();
     return true;
