@@ -829,7 +829,7 @@ it.effect("shows the judge its linked tasks' final reports, trimmed, as claims t
     expect(prompt).toContain("a claim to verify, not evidence");
     expect(prompt).not.toContain("TAIL-NOT-SHOWN");
     expect(prompt).toContain("[trimmed]");
-    // Only reports in by the time the item last changed, so start and settle build one prompt.
+    // Only reports in by the time the item last changed, so a retried start rejoins the same judge.
     expect(prompt).not.toContain("Finished after the claim was made.");
     expect(prompt).not.toContain("task:running");
     expect(prompt).not.toContain("A task linked to another item.");
