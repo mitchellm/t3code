@@ -74,10 +74,10 @@ export function workspaceCheckpoints(
 }
 
 /**
- * The thread's last checkpoint at or before the item first started (or was created, if it never
- * went in progress on its own). Missing and failed captures have no ref, and a rollback marks
- * checkpoints stale and deletes theirs. Later checkpoints never move the answer, so start and
- * settle build the same prompt.
+ * The thread's last ready checkpoint at or before the item first started (or was created). The
+ * answer can move after the judge starts: a checkpoint lands after its stamp (the baseline is
+ * written when the first run ends, stamped with the scope's creation), so a judge is held to the
+ * prompt recorded at start, never one rebuilt from this.
  */
 export function judgeBase(
   item: Pick<LedgerItem, "startedAt" | "createdAt">,
@@ -113,10 +113,9 @@ export interface JudgedTaskReport {
 }
 
 /**
- * The final reports of the item's linked tasks the judge is shown, latest last. Only reports in
- * by the item's own stamp count, which a link never moves and a judging close request fixes, so
- * start and settle build the same prompt; a changed prompt reads as a judge the server did not
- * start. Each is trimmed, by code point so a retry trims identically.
+ * The final reports of the item's linked tasks the judge is shown, latest last, each trimmed by
+ * code point. Only reports in by the item's own stamp count, which a link never moves and a
+ * judging close request fixes, so a retried start rebuilds its prompt and rejoins its judge.
  */
 export function judgedTaskReports(
   item: Pick<LedgerItem, "tasks" | "updatedAt">,

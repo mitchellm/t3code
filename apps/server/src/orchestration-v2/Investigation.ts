@@ -57,7 +57,7 @@ function ledgerTitle(goal: string): string {
 
 /** Drops the judge bookkeeping when the server sets an item aside. */
 function settled(item: LedgerItem): LedgerItem {
-  const { judging: _judging, judgeTaskId: _task, ...rest } = item;
+  const { judging: _judging, judgeTaskId: _task, judgePromptDigest: _digest, ...rest } = item;
   return rest;
 }
 

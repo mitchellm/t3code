@@ -102,6 +102,11 @@ export const LedgerItem = Schema.Struct({
   /** The delegated judge task for the pending close request, once the server started it. */
   judgeTaskId: Schema.optionalKey(NodeId),
   /**
+   * SHA-256 of the prompt the server delegated to `judgeTaskId`. The verdict is checked against
+   * it, since a prompt rebuilt at settle can differ (a checkpoint stamped earlier lands later).
+   */
+  judgePromptDigest: Schema.optionalKey(Schema.String),
+  /**
    * Why the last automatic judgement ended without a verdict (the judge could not start or did
    * not finish). Not a failing verdict: the work was never judged.
    */
@@ -326,6 +331,8 @@ export const LedgerJudgementStartedCommand = Schema.Struct({
   /** The item's `updatedAt` when the close request made it judging; a later request is stale. */
   requestedAt: Schema.DateTimeUtc,
   taskId: NodeId,
+  /** SHA-256 of the prompt delegated to `taskId`. */
+  promptDigest: Schema.String,
 });
 
 /**
