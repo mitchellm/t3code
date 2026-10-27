@@ -166,6 +166,22 @@ export const TaskTimingSummary = Schema.Struct({
 });
 export type TaskTimingSummary = typeof TaskTimingSummary.Type;
 
+/**
+ * Fork: what a delegated task's own thread has done, for the ledger's agent card. Read when the
+ * card opens; time is left to the client, which already holds the task's start and end.
+ */
+export const TaskStats = Schema.Struct({
+  threadId: ThreadId,
+  /** Summed over the thread's provider turns; null when no turn reported usage. */
+  tokens: Schema.NullOr(Schema.Struct({ input: NonNegativeInt, output: NonNegativeInt })),
+  toolCalls: NonNegativeInt,
+  /** The latest tool call still running; null once none is. */
+  activity: Schema.NullOr(Schema.String),
+  branch: Schema.NullOr(Schema.String),
+  worktreePath: Schema.NullOr(Schema.String),
+});
+export type TaskStats = typeof TaskStats.Type;
+
 export const OrchestrationGetTaskTimingInput = Schema.Struct({ threadId: ThreadId });
 export type OrchestrationGetTaskTimingInput = typeof OrchestrationGetTaskTimingInput.Type;
 

@@ -10,10 +10,12 @@ import {
   ProviderInstanceId,
   RunId,
   ThreadId,
+  TurnItemId,
   type LedgerItem,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -282,6 +284,71 @@ it.layer(layerTest)("TaskTimingService", (it) => {
         [["idle_between_runs", seconds(180)]],
       );
       assert.equal(record.totals.wallMs, seconds(365));
+    }),
+  );
+
+  it.effect("reads a delegated task's tool calls, activity and worktree for its card", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const timing = yield* TaskTimingService.TaskTimingService;
+      const workerId = ThreadId.make("thread:stats-worker");
+      const created = thread(workerId);
+      const turnItem = (
+        ordinal: number,
+        patch: Partial<OrchestrationV2TurnItem> & Pick<OrchestrationV2TurnItem, "type" | "status">,
+      ): OrchestrationV2DomainEvent =>
+        ({
+          ...envelope(workerId, `item:${ordinal}`, ordinal),
+          type: "turn-item.updated",
+          payload: {
+            id: TurnItemId.make(`item:${workerId}:${ordinal}`),
+            threadId: workerId,
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal,
+            title: "Bash",
+            startedAt: at(ordinal),
+            completedAt: null,
+            updatedAt: at(ordinal),
+            ...patch,
+          },
+        }) as OrchestrationV2DomainEvent;
+      yield* Effect.forEach(
+        [
+          created.type === "thread.created"
+            ? {
+                ...created,
+                payload: { ...created.payload, branch: "agent/stats", worktreePath: "/work/stats" },
+              }
+            : created,
+          turnItem(1, { type: "command_execution", status: "completed", input: "ls" }),
+          turnItem(2, {
+            type: "assistant_message",
+            status: "running",
+            messageId: MessageId.make("message:stats"),
+            text: "Labelling",
+            streaming: true,
+          }),
+          turnItem(3, { type: "command_execution", status: "running", input: "label 47" }),
+        ],
+        projections.apply,
+        { discard: true },
+      );
+
+      const stats = yield* timing.taskStats(workerId);
+
+      assert.deepEqual(stats, {
+        threadId: workerId,
+        tokens: null,
+        toolCalls: 2,
+        activity: "Bash · label 47",
+        branch: "agent/stats",
+        worktreePath: "/work/stats",
+      });
     }),
   );
 });

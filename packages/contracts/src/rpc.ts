@@ -177,6 +177,7 @@ import {
 import {
   OrchestrationGetTaskTimingError,
   OrchestrationGetTaskTimingInput,
+  TaskStats,
   TaskTimingSummary,
 } from "./taskTiming.ts";
 import {
@@ -1758,6 +1759,13 @@ const WsOrchestrationV2GetTaskTimingRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.g
   error: Schema.Union([OrchestrationGetTaskTimingError, EnvironmentAuthorizationError]),
 });
 
+/** Fork: the payload names a delegated task's own thread. */
+const WsOrchestrationV2GetTaskStatsRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.getTaskStats, {
+  payload: OrchestrationGetTaskTimingInput,
+  success: TaskStats,
+  error: Schema.Union([OrchestrationGetTaskTimingError, EnvironmentAuthorizationError]),
+});
+
 const InvestigationRpcError = Schema.Union([
   OrchestrationInvestigationError,
   EnvironmentAuthorizationError,
@@ -2271,6 +2279,7 @@ export const ForkWsRpcGroup = RpcGroup.make(
   WsVcsCommitStagedRpc,
   WsOrchestrationV2GetThreadPreviewsRpc,
   WsOrchestrationV2GetTaskTimingRpc,
+  WsOrchestrationV2GetTaskStatsRpc,
   WsOrchestrationV2GetTaskRetroRpc,
   WsOrchestrationV2RunTaskRetroRpc,
   WsOrchestrationV2ResolveTaskRetroRpc,

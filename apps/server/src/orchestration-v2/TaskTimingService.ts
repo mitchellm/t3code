@@ -1,4 +1,9 @@
-import { type TaskTiming, type TaskTimingSummary, ThreadId } from "@t3tools/contracts";
+import {
+  type TaskStats,
+  type TaskTiming,
+  type TaskTimingSummary,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -8,6 +13,7 @@ import * as Stream from "effect/Stream";
 
 import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { deriveTaskStats, TASK_STATS_TOOL_ITEM_TYPES } from "./TaskStats.ts";
 import { deriveTaskTiming, summarizeTaskTiming } from "./TaskTiming.ts";
 
 export class TaskTimingReadError extends Schema.TaggedError<TaskTimingReadError>()(
@@ -33,13 +39,15 @@ export class TaskTimingService extends Context.Service<
     readonly forThread: (threadId: ThreadId) => Effect.Effect<TaskTiming, TaskTimingReadError>;
     /** The record cut to its slowest steps, for agents and the Timing view. */
     readonly summary: (threadId: ThreadId) => Effect.Effect<TaskTimingSummary, TaskTimingReadError>;
+    /** Fork: tokens, tool calls and current activity of a delegated task's own thread. */
+    readonly taskStats: (threadId: ThreadId) => Effect.Effect<TaskStats, TaskTimingReadError>;
   }
 >()("t3/orchestration-v2/TaskTimingService") {}
 
 const CHILD_READ_CONCURRENCY = 4;
 const SUMMARY_TOP = 5;
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const events = yield* EventStore.EventStoreV2;
@@ -117,7 +125,26 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  return TaskTimingService.of({ forThread, summary });
+  const taskStats: TaskTimingService["Service"]["taskStats"] = Effect.fn(
+    "TaskTimingService.taskStats",
+  )(function* (threadId) {
+    const records = yield* projections
+      .getThreadRecords(threadId, ["providerTurns", "turnItems"], {
+        turnItemTypes: TASK_STATS_TOOL_ITEM_TYPES,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new TaskTimingReadError({ threadId, source: "projection", cause }),
+        ),
+      );
+    return deriveTaskStats({
+      thread: records.thread,
+      providerTurns: records.providerTurns,
+      toolItems: records.turnItems,
+    });
+  });
+
+  return TaskTimingService.of({ forThread, summary, taskStats });
 });
 
 export const layer = Layer.effect(TaskTimingService, make);

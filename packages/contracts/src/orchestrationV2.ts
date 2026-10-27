@@ -3598,6 +3598,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   searchThreads: "orchestration.searchThreads",
   getThreadPreviews: "orchestration.getThreadPreviews",
   getTaskTiming: "orchestration.getTaskTiming",
+  getTaskStats: "orchestration.getTaskStats",
   getTaskRetro: "orchestration.getTaskRetro",
   runTaskRetro: "orchestration.runTaskRetro",
   resolveTaskRetro: "orchestration.resolveTaskRetro",
