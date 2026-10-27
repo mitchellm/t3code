@@ -6,14 +6,21 @@ import {
   LedgerItemId,
   type LedgerItem,
   type LedgerItemVerdict,
+  LedgerJson,
   NodeId,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 
-import { type LedgerCommand, ledgerJudgeEffects, planLedgerCommand } from "./TaskLedger.ts";
+import {
+  type LedgerCommand,
+  ledgerJudgeEffects,
+  ledgerTaskLinkProblem,
+  planLedgerCommand,
+} from "./TaskLedger.ts";
 
 const earlier = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
 const now = DateTime.makeUnsafe("2026-01-01T00:05:00.000Z");
@@ -21,6 +28,8 @@ const threadId = ThreadId.make("thread:ledger-shape");
 const ledgerId = LedgerId.make("ledger:shape");
 const id = (name: string) => LedgerItemId.make(name);
 const commandId = CommandId.make("command:shape");
+const decodeLedgerJson = Schema.decodeSync(LedgerJson);
+const encodeLedgerJson = Schema.encodeSync(LedgerJson);
 
 const item = (name: string, overrides: Partial<LedgerItem> = {}): LedgerItem => ({
   id: id(name),
@@ -570,5 +579,116 @@ describe("judge start bookkeeping", () => {
       ledgerJudgeEffects(command, judgingLedger, Result.isSuccess(repeat) ? repeat.success : []),
       [],
     );
+  });
+});
+
+describe("tasks linked to an item", () => {
+  const task = (name: string) => ({
+    taskId: NodeId.make(`task:${name}`),
+    childThreadId: ThreadId.make(`thread:child:${name}`),
+    role: "worker",
+    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-sonnet-5-5",
+  });
+  const link = (name: string, taskName: string): LedgerCommand => ({
+    type: "ledger.item.task.link",
+    commandId,
+    threadId,
+    ledgerId,
+    itemId: id(name),
+    task: task(taskName),
+  });
+
+  it("appends the task to the item, stamped with the link time, in link order", () => {
+    const first = updatedItem(plan(link("L1", "explore"), ledgerOf([item("L1")])));
+    assert.deepEqual(first?.tasks, [{ ...task("explore"), createdAt: now }]);
+    const second = updatedItem(plan(link("L1", "build"), ledgerOf([first!])));
+    assert.deepEqual(
+      second?.tasks?.map(({ taskId }) => taskId),
+      [NodeId.make("task:explore"), NodeId.make("task:build")],
+    );
+  });
+
+  it("keeps the item's own stamp, so a pending close request stays the current one", () => {
+    const judgingAt = DateTime.makeUnsafe("2026-01-01T00:04:00.000Z");
+    const judging = item("L1", {
+      status: "in_progress",
+      evidence: "ok",
+      judging: true,
+      updatedAt: judgingAt,
+    });
+    const linked = updatedItem(plan(link("L1", "fix"), ledgerOf([judging], true)));
+    assert.equal(linked?.tasks?.length, 1);
+    assert.isTrue(linked?.judging);
+    assert.equal(DateTime.toEpochMillis(linked!.updatedAt), DateTime.toEpochMillis(judgingAt));
+  });
+
+  it("treats linking the same task again as already in effect, even once the item closed", () => {
+    const linked = updatedItem(plan(link("L1", "build"), ledgerOf([item("L1")])))!;
+    const retried = plan(link("L1", "build"), ledgerOf([linked]));
+    assert.deepEqual(Result.isSuccess(retried) ? retried.success : "failed", []);
+    const closed = { ...linked, status: "closed" as const, evidence: "ok", closedAt: now };
+    const late = plan(link("L1", "build"), ledgerOf([closed]));
+    assert.deepEqual(Result.isSuccess(late) ? late.success : "failed", []);
+  });
+
+  it("refuses an unknown, closed or dropped item, and a closed ledger", () => {
+    const ledger = ledgerOf([
+      item("L1", { status: "closed", evidence: "ok", closedAt: now }),
+      item("L2", { status: "dropped", dropReason: "not needed" }),
+      item("L3", { status: "deferred", deferReason: "later" }),
+    ]);
+    assert.include(failureOf(plan(link("L9", "x"), ledger)), "Unknown item L9");
+    assert.include(failureOf(plan(link("L1", "x"), ledger)), "L1 is closed");
+    assert.include(failureOf(plan(link("L2", "x"), ledger)), "L2 is dropped");
+    // Exploring a deferred item is still work on it.
+    assert.equal(updatedItem(plan(link("L3", "x"), ledger))?.tasks?.length, 1);
+    const closedLedger = { ...ledgerOf([item("L4")]), closedAt: now };
+    assert.include(failureOf(plan(link("L4", "x"), closedLedger)), "is closed");
+  });
+
+  it("names what is wrong in the words delegate_task reports before any work starts", () => {
+    const ledger = ledgerOf([item("L1", { status: "dropped", dropReason: "no" }), item("L2")]);
+    const problem = (target: Ledger | undefined, name: string) =>
+      ledgerTaskLinkProblem(target, id(name)) ?? "";
+    assert.include(problem(undefined, "L1"), "has no ledger");
+    assert.include(problem({ ...ledger, closedAt: now }, "L2"), "is closed");
+    assert.include(problem(ledger, "L7"), "Unknown ledger item L7");
+    assert.include(problem(ledger, "L1"), "L1 is dropped");
+    assert.isUndefined(ledgerTaskLinkProblem(ledger, id("L2")));
+  });
+
+  it("still decodes an item stored before tasks were linked", () => {
+    const stored = decodeLedgerJson({
+      id: ledgerId,
+      threadId,
+      title: "Older",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: [
+        {
+          id: "L1",
+          title: "Older item",
+          acceptance: "works",
+          status: "open",
+          evidence: null,
+          dropReason: null,
+          verdict: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          closedAt: null,
+        },
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      closedAt: null,
+    });
+    assert.isUndefined(stored.items[0]?.tasks);
+    const linked = updatedItem(plan(link("L1", "build"), stored));
+    const encoded = encodeLedgerJson({ ...stored, items: [linked!] });
+    assert.deepEqual(decodeLedgerJson(encoded).items[0]?.tasks, [
+      { ...task("build"), createdAt: now },
+    ]);
   });
 });

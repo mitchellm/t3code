@@ -43,6 +43,32 @@ export const LedgerItemVerdict = Schema.Struct({
 });
 export type LedgerItemVerdict = typeof LedgerItemVerdict.Type;
 
+/** Fork: the delegated task `delegate_task` was given this item for, as it was started. */
+export const LedgerItemTaskDraft = Schema.Struct({
+  taskId: NodeId,
+  childThreadId: ThreadId,
+  /** The delegate_task role, absent when the delegation named none. */
+  role: Schema.optionalKey(TrimmedNonEmptyString),
+  providerInstanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+});
+export type LedgerItemTaskDraft = typeof LedgerItemTaskDraft.Type;
+
+/**
+ * Fork: a delegated task linked to the item it works on. Only the link is stored: its status and
+ * final report are read live from the task (the thread's `subagents`, keyed by `taskId`).
+ */
+export const LedgerItemTask = Schema.Struct({
+  ...LedgerItemTaskDraft.fields,
+  createdAt: Schema.DateTimeUtc,
+});
+export type LedgerItemTask = typeof LedgerItemTask.Type;
+
+export const LedgerItemTaskJson = LedgerItemTask.mapFields((fields) => ({
+  ...fields,
+  createdAt: Schema.DateTimeUtcFromString,
+}));
+
 export const LedgerItem = Schema.Struct({
   id: LedgerItemId,
   title: TrimmedNonEmptyString,
@@ -82,6 +108,8 @@ export const LedgerItem = Schema.Struct({
   judgeError: Schema.optionalKey(Schema.String),
   /** First time the item went in progress, kept across reopening; the judge diffs from here. */
   startedAt: Schema.optionalKey(Schema.DateTimeUtc),
+  /** Fork: delegated tasks that worked this item, in link order, kept across reopening. */
+  tasks: Schema.optionalKey(Schema.Array(LedgerItemTask)),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   closedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -138,6 +166,7 @@ export const LedgerItemJson = LedgerItem.mapFields((fields) => ({
   ...fields,
   verdict: Schema.NullOr(LedgerItemVerdictJson),
   startedAt: Schema.optionalKey(Schema.DateTimeUtcFromString),
+  tasks: Schema.optionalKey(Schema.Array(LedgerItemTaskJson)),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   closedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -297,6 +326,19 @@ export const LedgerJudgementStartedCommand = Schema.Struct({
   /** The item's `updatedAt` when the close request made it judging; a later request is stale. */
   requestedAt: Schema.DateTimeUtc,
   taskId: NodeId,
+});
+
+/**
+ * Fork, server-only: links a task delegate_task started to the item it works on. Only the server
+ * sends it, after the delegation, so no client can attach work that never ran.
+ */
+export const LedgerItemTaskLinkCommand = Schema.Struct({
+  type: Schema.Literal("ledger.item.task.link"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  ledgerId: LedgerId,
+  itemId: LedgerItemId,
+  task: LedgerItemTaskDraft,
 });
 
 /** Payload of `ledger.item.added`: only the newly added items, which readers upsert. */

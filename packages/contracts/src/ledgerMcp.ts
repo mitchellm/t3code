@@ -7,6 +7,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { LedgerItemStatus } from "./ledger.ts";
+import { OrchestrationV2Subagent } from "./orchestrationV2.ts";
 
 // Agents pick these keys by hand and read them back in every tool result, so keep them short.
 const SHORT_KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
@@ -174,6 +175,21 @@ export const LedgerMcpSnapshot = Schema.Struct({
       judgements: NonNegativeInt.annotate({
         description: "How many times this item has been judged, across reopening and new evidence.",
       }),
+      /** Fork: absent when no delegated task worked the item. */
+      tasks: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            taskId: Schema.String,
+            role: Schema.NullOr(Schema.String),
+            model: Schema.String,
+            status: Schema.NullOr(OrchestrationV2Subagent.fields.status),
+            childThreadId: Schema.String,
+          }),
+        ).annotate({
+          description:
+            "Delegated tasks linked to this item with ledgerItemId, in link order. status is live; null once the task is gone. task_status reads a task's report.",
+        }),
+      ),
     }),
   ),
 });

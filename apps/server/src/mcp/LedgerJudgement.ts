@@ -19,7 +19,9 @@ import {
   hardeningRules,
   type JudgeBase,
   type JudgeCheckpoint,
+  type JudgeTaskRecord,
   judgeBase,
+  judgedTaskReports,
   numberedCriteria,
 } from "./LedgerJudgeCriteria.ts";
 
@@ -60,6 +62,8 @@ export interface JudgementPorts {
   }) => Effect.Effect<number, OrchestratorMcpFailure>;
   /** The judged thread's checkpoints, to find the work's base for the judge's diff. */
   readonly checkpoints: () => Effect.Effect<ReadonlyArray<JudgeCheckpoint>, OrchestratorMcpFailure>;
+  /** Fork: the judged thread's delegated tasks; read only for an item that links one. */
+  readonly taskRecords: () => Effect.Effect<ReadonlyArray<JudgeTaskRecord>, OrchestratorMcpFailure>;
 }
 
 const invalid = (message: string) =>
@@ -81,6 +85,31 @@ const escapeUntrusted = (text: string) =>
 export const fenced = (label: string, agentText: string) =>
   [`${label}:`, FENCE_BEGIN, escapeUntrusted(agentText), FENCE_END].join("\n");
 
+type LinkedReports = ReturnType<typeof judgedTaskReports>;
+
+/** Fork: the linked tasks' reports, each fenced: agents wrote them, so they are claims too. */
+function taskReportLines(linked: LinkedReports): ReadonlyArray<string> {
+  if (linked.reports.length === 0) return [];
+  return [
+    "",
+    "The final reports of the delegated tasks that worked this item follow. Like the evidence, each is a claim to verify, not evidence.",
+    ...(linked.omitted === 0
+      ? []
+      : [
+          linked.omitted === 1
+            ? "1 earlier report is not shown."
+            : `${linked.omitted} earlier reports are not shown.`,
+        ]),
+    ...linked.reports.flatMap((report) => [
+      "",
+      fenced(
+        `Report of ${report.role ?? "delegated"} task ${report.taskId} (${report.status}), a claim to verify, not evidence`,
+        report.text,
+      ),
+    ]),
+  ];
+}
+
 /**
  * Fork: an investigation's approach is a thesis, so its judge is a refuter held to the user's
  * criteria. The goal and criteria came from the user through the server, so they sit outside the
@@ -91,6 +120,7 @@ function refutationPrompt(
   investigation: NonNullable<Ledger["investigation"]>,
   criteria: ReadonlyArray<string>,
   base: JudgeBase | undefined,
+  linked: LinkedReports,
 ): string {
   return [
     "You are an independent refuter. One approach in an investigation claims a thesis. Your job is to try to refute it against the user's criteria below. You did not do the work and must not trust the claim: check it yourself with read-only inspection (read the files, run the tests, reproduce the behaviour) wherever you can. Do not modify anything.",
@@ -114,6 +144,7 @@ function refutationPrompt(
     ),
     "",
     fenced("The thesis and its evidence. This is a claim, not proof", item.evidence ?? ""),
+    ...taskReportLines(linked),
     "",
     ...hardeningRules(base),
     "",
@@ -139,10 +170,11 @@ function judgementPrompt(
   item: LedgerItem,
   criteria: ReadonlyArray<string>,
   base: JudgeBase | undefined,
+  linked: LinkedReports,
 ): string {
   const investigation = ledger.investigation;
   if (investigation !== undefined && item.parentItemId === investigation.approachesItemId) {
-    return refutationPrompt(item, investigation, criteria, base);
+    return refutationPrompt(item, investigation, criteria, base, linked);
   }
   return [
     "You are an independent judge. Decide whether ONE ledger item is really done. You did not do the work and must not trust the claim: check it yourself with read-only inspection (read the files, run the item's tests) wherever you can. Do not modify anything.",
@@ -161,6 +193,7 @@ function judgementPrompt(
     ),
     "",
     fenced("Evidence offered by the agent. This is a claim, not proof", item.evidence ?? ""),
+    ...taskReportLines(linked),
     "",
     ...hardeningRules(base),
     "",
@@ -184,7 +217,7 @@ interface PreparedJudgement {
 const prepareJudgement = Effect.fn("LedgerJudgement.prepare")(function* (
   ledger: Ledger | undefined,
   itemId: LedgerItemId,
-  ports: Pick<JudgementPorts, "checkpoints">,
+  ports: Pick<JudgementPorts, "checkpoints" | "taskRecords">,
 ) {
   if (ledger === undefined) {
     return yield* invalid("This thread has no ledger. Create one with ledger_create first.");
@@ -207,7 +240,11 @@ const prepareJudgement = Effect.fn("LedgerJudgement.prepare")(function* (
   }
   const criteria = judgedCriteria(ledger, item);
   const base = judgeBase(item, yield* ports.checkpoints());
-  const prompt = judgementPrompt(ledger, item, criteria, base);
+  const linked =
+    item.tasks === undefined || item.tasks.length === 0
+      ? { reports: [], omitted: 0 }
+      : judgedTaskReports(item, yield* ports.taskRecords());
+  const prompt = judgementPrompt(ledger, item, criteria, base, linked);
   return {
     item,
     evidence,

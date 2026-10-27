@@ -11,6 +11,7 @@ import {
   type LedgerMcpWriteResult,
   OrchestratorMcpFailure,
   type OrchestrationV2ServerCommand,
+  type ProjectId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -26,7 +27,7 @@ import {
 import { latestUserMessageAt } from "./InvestigationSpawnGuard.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
-import { snapshotLedger } from "./ledgerSnapshot.ts";
+import { ledgerLinksTasks, snapshotLedger } from "./ledgerSnapshot.ts";
 import { dispatchFailure, unavailable } from "./threadAccess.ts";
 
 export type LedgerMcpOperation =
@@ -137,12 +138,25 @@ const make = Effect.gen(function* () {
         "ledger",
       ])
       .pipe(Effect.mapError(unavailable));
-    return { threadId: thread.threadId, ledger: records.ledger };
+    return { threadId: thread.threadId, projectId: shell.projectId, ledger: records.ledger };
+  });
+
+  // Fork: a linked task's status is read from the thread's tasks each time, never stored.
+  const snapshotOf = Effect.fn("LedgerMcpService.snapshotOf")(function* (own: {
+    readonly threadId: ThreadId;
+    readonly projectId: ProjectId;
+    readonly ledger: Ledger | undefined;
+  }) {
+    if (own.ledger === undefined) return null;
+    if (!ledgerLinksTasks(own.ledger)) return snapshotLedger(own.ledger);
+    const { subagents } = yield* threads
+      .getProjectThreadRecords({ projectId: own.projectId, threadId: own.threadId }, ["subagents"])
+      .pipe(Effect.mapError(unavailable));
+    return snapshotLedger(own.ledger, subagents);
   });
 
   const read = Effect.fn("LedgerMcpService.read")(function* (scope: McpInvocationScope) {
-    const { ledger } = yield* loadOwnLedger(scope);
-    return { ledger: ledger === undefined ? null : snapshotLedger(ledger) };
+    return { ledger: yield* snapshotOf(yield* loadOwnLedger(scope)) };
   });
 
   const write = Effect.fn("LedgerMcpService.write")(function* (
@@ -181,11 +195,7 @@ const make = Effect.gen(function* () {
     };
     const settle = Effect.fn("LedgerMcpService.settle")(function* (sequence: number) {
       const after = yield* loadOwnLedger(scope);
-      return {
-        sequence,
-        ledger: after.ledger === undefined ? null : snapshotLedger(after.ledger),
-        applied: applied(after.ledger),
-      };
+      return { sequence, ledger: yield* snapshotOf(after), applied: applied(after.ledger) };
     });
     const toToolError = Effect.mapError(
       (error: OrchestratorMcpFailure | Parameters<typeof ledgerFailure>[0]) =>

@@ -3,10 +3,16 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
+  type Ledger,
+  LedgerId,
+  type LedgerItem,
+  LedgerItemId,
+  type LedgerItemStatus,
   MessageId,
   NodeId,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   type OrchestratorMcpCapabilitiesResult,
+  OrchestratorMcpFailure,
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
   type ScheduledTask,
@@ -21,8 +27,10 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -1618,6 +1626,190 @@ describe("OrchestratorMcpService provider resolution", () => {
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );
+
+  describe("delegating work on a ledger item", () => {
+    const ledgerId = LedgerId.make("ledger:mcp-providers");
+    const ledgerItem = (name: string, status: LedgerItemStatus): LedgerItem => ({
+      id: LedgerItemId.make(name),
+      title: `Item ${name}`,
+      acceptance: "works",
+      status,
+      evidence: status === "closed" ? "done" : null,
+      dropReason: status === "dropped" ? "not needed" : null,
+      verdict: null,
+      createdAt: DateTime.makeUnsafe("2026-10-27T00:00:00.000Z"),
+      updatedAt: DateTime.makeUnsafe("2026-10-27T00:00:00.000Z"),
+      closedAt: status === "closed" ? DateTime.makeUnsafe("2026-10-27T00:00:00.000Z") : null,
+    });
+    const ledger: Ledger = {
+      id: ledgerId,
+      threadId: parentThreadId,
+      title: "Parent ledger",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: [
+        ledgerItem("L1", "in_progress"),
+        ledgerItem("L2", "closed"),
+        ledgerItem("L3", "dropped"),
+      ],
+      createdAt: DateTime.makeUnsafe("2026-10-27T00:00:00.000Z"),
+      updatedAt: DateTime.makeUnsafe("2026-10-27T00:00:00.000Z"),
+      closedAt: null,
+    };
+    const task = {
+      id: taskId,
+      threadId: parentThreadId,
+      runId: parentRunId,
+      parentNodeId,
+      origin: "app_owned",
+      createdBy: "agent",
+      driver: ProviderDriverKind.make("codex"),
+      providerInstanceId: codexInstanceId,
+      providerThreadId: null,
+      childThreadId,
+      nativeTaskRef: null,
+      prompt: "Explore the parser.",
+      title: null,
+      model: "gpt-5.4",
+      role: "explorer",
+      status: "running",
+      result: null,
+      startedAt: null,
+      completedAt: null,
+    };
+
+    /** Runs delegate_task against a parent whose ledger is `ledger`, capturing each dispatch. */
+    const delegateOnLedger = (input: {
+      readonly ledgerItemId?: string;
+      readonly parentLedger?: Ledger;
+    }) =>
+      Effect.gen(function* () {
+        const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationV2ServerCommand>>([]);
+        let delegated = false;
+        const layerDependencies = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Effect.succeed(false),
+            getThreadRecords: (threadId) =>
+              Effect.succeed(
+                threadId === parentThreadId
+                  ? parentProjection(delegated ? [task] : [])
+                  : childProjection,
+              ),
+            getProjectThreadRecords: () =>
+              Effect.succeed({ ledger: input.parentLedger ?? ledger } as never),
+            isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+            assertProviderInstanceEnabled: () => Effect.void,
+            dispatch: (command) =>
+              Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    delegated = true;
+                  }),
+                ),
+                Effect.as({
+                  sequence: 1,
+                  storedEvents:
+                    command.type === "delegated_task.request"
+                      ? [
+                          {
+                            sequence: 1,
+                            commandId: null,
+                            event: { type: "subagent.updated", payload: task },
+                          },
+                        ]
+                      : [],
+                } as never),
+              ),
+          }),
+          providerRegistryLayer([
+            providerSnapshot({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: "gpt-5.4",
+            }),
+          ]),
+          adapterRegistryLayer([codexInstanceId]),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          ServerSettings.layerTest(),
+        );
+        const exit = yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          return yield* service
+            .delegateTask(scope, {
+              task: "Explore the parser.",
+              role: "explorer",
+              mode: "async",
+              clientRequestId: `delegate-ledger-${input.ledgerItemId ?? "none"}`,
+              ...(input.ledgerItemId === undefined
+                ? {}
+                : { ledgerItemId: LedgerItemId.make(input.ledgerItemId) }),
+            })
+            .pipe(Effect.exit);
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+        return { exit, commands: yield* Ref.get(dispatched) };
+      });
+
+    it.effect("links the started task to the item, with its role, model and child thread", () =>
+      Effect.gen(function* () {
+        const { exit, commands } = yield* delegateOnLedger({ ledgerItemId: "L1" });
+        assert.isTrue(Exit.isSuccess(exit));
+        assert.deepEqual(
+          commands.map(({ type }) => type),
+          ["delegated_task.request", "ledger.item.task.link"],
+        );
+        const link = commands[1] as Extract<
+          OrchestrationV2ServerCommand,
+          { type: "ledger.item.task.link" }
+        >;
+        assert.equal(link.threadId, parentThreadId);
+        assert.equal(link.ledgerId, ledgerId);
+        assert.equal(link.itemId, "L1");
+        assert.deepEqual(link.task, {
+          taskId,
+          childThreadId,
+          role: "explorer",
+          providerInstanceId: codexInstanceId,
+          model: "gpt-5.4",
+        });
+      }),
+    );
+
+    it.effect("writes no link when the delegation names no item", () =>
+      Effect.gen(function* () {
+        const { commands } = yield* delegateOnLedger({});
+        assert.deepEqual(
+          commands.map(({ type }) => type),
+          ["delegated_task.request"],
+        );
+      }),
+    );
+
+    it.effect("refuses an unknown, closed or dropped item before starting any work", () =>
+      Effect.gen(function* () {
+        const cases = [
+          ["L9", ledger, "Unknown ledger item L9"],
+          ["L2", ledger, "L2 is closed"],
+          ["L3", ledger, "L3 is dropped"],
+          ["L1", { ...ledger, closedAt: ledger.createdAt }, "is closed"],
+        ] as const;
+        for (const [itemId, parentLedger, message] of cases) {
+          const { exit, commands } = yield* delegateOnLedger({
+            ledgerItemId: itemId,
+            parentLedger,
+          });
+          const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
+          assert.instanceOf(error, OrchestratorMcpFailure, itemId);
+          assert.equal((error as OrchestratorMcpFailure).code, "invalid_request");
+          assert.include((error as OrchestratorMcpFailure).message, message);
+          assert.deepEqual(commands, [], itemId);
+        }
+      }),
+    );
+  });
 
   it.effect(
     "retrying an accepted driver-only delegation replays even after the project disables every candidate",

@@ -8,7 +8,7 @@ import {
   type LedgerItemVerdict,
   LedgerId,
   LedgerItemId,
-  type NodeId,
+  NodeId,
   OrchestratorMcpFailure,
   ProviderInstanceId,
   ThreadId,
@@ -25,7 +25,14 @@ import {
   planLedgerCommand,
 } from "../orchestration-v2/TaskLedger.ts";
 import {
+  type JudgeTaskRecord,
+  TASK_REPORT_MAX_CHARS,
+  TASK_REPORTS_SHOWN,
+} from "./LedgerJudgeCriteria.ts";
+import {
   type BackgroundJudgementPorts,
+  FENCE_BEGIN,
+  FENCE_END,
   type JudgeCheckpoint,
   type JudgeRun,
   type JudgementPorts,
@@ -85,6 +92,7 @@ const harness = (
     /** What the judge thread holds; defaults to exactly the prompt the server delegated. */
     messages?: ReadonlyArray<string>;
     checkpoints?: ReadonlyArray<JudgeCheckpoint>;
+    taskRecords?: ReadonlyArray<JudgeTaskRecord>;
   } = {},
 ) => {
   const delegated: Array<{ prompt: string; keySource: string }> = [];
@@ -94,7 +102,13 @@ const harness = (
     verdict: LedgerItemVerdict;
     taskId: string;
   }> = [];
+  const reads = { taskRecords: 0 };
   const ports: JudgementPorts = {
+    taskRecords: () =>
+      Effect.sync(() => {
+        reads.taskRecords += 1;
+        return options.taskRecords ?? [];
+      }),
     delegate: (input) =>
       Effect.sync(() => {
         delegated.push(input);
@@ -109,8 +123,29 @@ const harness = (
       }),
     checkpoints: () => Effect.succeed(options.checkpoints ?? []),
   };
-  return { ports, delegated, recorded };
+  return { ports, delegated, recorded, reads };
 };
+
+const linkedTask = (name: string, role?: string) => ({
+  taskId: NodeId.make(`task:${name}`),
+  childThreadId: ThreadId.make(`thread:${name}`),
+  ...(role === undefined ? {} : { role }),
+  providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  model: "claude-sonnet-5-5",
+  createdAt: at,
+});
+
+const taskRecord = (
+  name: string,
+  result: string | null,
+  completedAt: DateTime.Utc | null,
+  status: JudgeTaskRecord["status"] = "completed",
+): JudgeTaskRecord => ({
+  id: NodeId.make(`task:${name}`),
+  status,
+  result,
+  completedAt,
+});
 
 const failureOf = <A>(exit: Exit.Exit<A, OrchestratorMcpFailure>) =>
   Exit.isFailure(exit) && exit.cause.reasons[0]?._tag === "Fail"
@@ -530,8 +565,13 @@ const backgroundHarness = (options: {
   readonly ended?: JudgeRun;
   /** The judge ends between delegating and its task being recorded. */
   readonly endsBeforeRecorded?: boolean;
+  /** The judged item's linked tasks, and their records as the thread holds them. */
+  readonly tasks?: LedgerItem["tasks"];
+  readonly taskRecords?: Array<JudgeTaskRecord>;
 }) => {
-  let ledger = ledgerOf({}, [item({ judging: true })]);
+  let ledger = ledgerOf({}, [
+    item({ judging: true, ...(options.tasks === undefined ? {} : { tasks: options.tasks }) }),
+  ]);
   const requestedAt = DateTime.formatIso(ledger.items[0]!.updatedAt);
   const delegated: Array<string> = [];
   const apply = (command: LedgerCommand) => {
@@ -598,6 +638,8 @@ const backgroundHarness = (options: {
         apply({ type: "ledger.item.judgement.abandon", ...common(), itemId: abandoned, reason }),
       ),
     checkpoints: () => Effect.succeed([]),
+    // The same array the test edits in place, so a read sees the task as it stands.
+    taskRecords: () => Effect.succeed(options.taskRecords ?? []),
   };
   const start = () => startBackgroundJudgement({ ledger, itemId, requestedAt, ports });
   const settle = () =>
@@ -738,5 +780,96 @@ it.effect("refuses before delegating when there is nothing to judge", () => {
       expect(delegated, name).toEqual([]);
       expect(recorded, name).toEqual([]);
     }
+  });
+});
+
+it.effect("shows the judge its linked tasks' final reports, trimmed, as claims to verify", () => {
+  const stamp = DateTime.makeUnsafe("2026-01-01T00:30:00.000Z");
+  const later = DateTime.makeUnsafe("2026-01-01T01:00:00.000Z");
+  const { ports, delegated } = harness({
+    taskRecords: [
+      taskRecord("explore", "The parser lives in src/parse.ts.", at),
+      taskRecord("build", `${"x".repeat(TASK_REPORT_MAX_CHARS)}TAIL-NOT-SHOWN`, at),
+      taskRecord("late", "Finished after the claim was made.", later),
+      taskRecord("running", null, null, "running"),
+      taskRecord("other", "A task linked to another item.", at),
+    ],
+  });
+  const linked = item({
+    updatedAt: stamp,
+    tasks: [
+      linkedTask("explore", "explorer"),
+      linkedTask("build", "worker"),
+      linkedTask("late", "worker"),
+      linkedTask("running"),
+    ],
+  });
+  return Effect.gen(function* () {
+    yield* requestJudgement({ ledger: ledgerOf({}, [linked]), itemId, ports });
+    const prompt = delegated[0]?.prompt ?? "";
+    expect(prompt).toContain("The parser lives in src/parse.ts.");
+    expect(prompt).toContain("explorer task task:explore");
+    expect(prompt).toContain("worker task task:build");
+    expect(prompt).toContain("a claim to verify, not evidence");
+    expect(prompt).not.toContain("TAIL-NOT-SHOWN");
+    expect(prompt).toContain("[trimmed]");
+    // Only reports in by the time the item last changed, so start and settle build one prompt.
+    expect(prompt).not.toContain("Finished after the claim was made.");
+    expect(prompt).not.toContain("task:running");
+    expect(prompt).not.toContain("A task linked to another item.");
+    // Each report sits inside a fence the agents who wrote it cannot close.
+    const fence = new RegExp(`${FENCE_BEGIN}[\\s\\S]*?${FENCE_END}`, "g");
+    expect(prompt.replace(fence, "")).not.toContain("The parser lives in src/parse.ts.");
+  });
+});
+
+it.effect("shows only the latest reports when many tasks worked one item", () => {
+  const names = Array.from({ length: TASK_REPORTS_SHOWN + 2 }, (_, index) => `t${index}`);
+  const { ports, delegated } = harness({
+    taskRecords: names.map((name) => taskRecord(name, `Report ${name}.`, at)),
+  });
+  return Effect.gen(function* () {
+    yield* requestJudgement({
+      ledger: ledgerOf({}, [item({ tasks: names.map((name) => linkedTask(name, "worker")) })]),
+      itemId,
+      ports,
+    });
+    const prompt = delegated[0]?.prompt ?? "";
+    expect(prompt).not.toContain("Report t0.");
+    expect(prompt).not.toContain("Report t1.");
+    expect(prompt).toContain(`Report t${names.length - 1}.`);
+    expect(prompt).toContain("2 earlier reports are not shown");
+  });
+});
+
+it.effect("reads no task records for an item with no linked tasks", () => {
+  const { ports, reads, delegated } = harness();
+  return Effect.gen(function* () {
+    yield* requestJudgement({ ledger: ledgerOf(), itemId, ports });
+    expect(reads.taskRecords).toBe(0);
+    expect(delegated[0]?.prompt).not.toContain("claim to verify, not evidence");
+  });
+});
+
+it.effect("keeps the judge's prompt when a linked task finishes while the judge runs", () => {
+  const later = DateTime.makeUnsafe("2026-01-01T01:00:00.000Z");
+  const taskRecords = [
+    taskRecord("build", "Built the CLI entry.", at),
+    taskRecord("fix", null, null, "running"),
+  ];
+  const harnessed = backgroundHarness({
+    ended: run(),
+    tasks: [linkedTask("build", "worker"), linkedTask("fix", "worker")],
+    taskRecords,
+  });
+  return Effect.gen(function* () {
+    yield* harnessed.start();
+    expect(harnessed.delegated[0]).toContain("Built the CLI entry.");
+    taskRecords[1] = taskRecord("fix", "Fixed the flag parsing.", later);
+    yield* harnessed.settle();
+    // A changed prompt would read as a judge thread the server did not start, and fail.
+    const judged = harnessed.ledger().items[0];
+    expect(judged?.verdict?.outcome).toBe("pass");
+    expect(judged?.status).toBe("closed");
   });
 });

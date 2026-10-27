@@ -489,6 +489,23 @@ function planCoreLedgerCommand(input: {
       // `updatedAt` stays the request's stamp, which keys the judge's effects and delegation.
       return itemUpdated(ledger.id, { ...item, judgeTaskId: command.taskId }, now);
     }
+    case "ledger.item.task.link": {
+      const item = ledger.items.find(({ id }) => id === command.itemId);
+      if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
+      // A retried delegation links its task again; checked first, so a later close cannot fail it.
+      if (item.tasks?.some(({ taskId }) => taskId === command.task.taskId) === true) {
+        return Result.succeed([]);
+      }
+      const problem = itemLinkProblem(item);
+      if (problem !== undefined) return reject(problem);
+      // A link is bookkeeping, not an edit: `updatedAt` stays the item's own stamp, which keys a
+      // pending close request and bounds the reports its judge reads.
+      return itemUpdated(
+        ledger.id,
+        { ...item, tasks: [...(item.tasks ?? []), { ...command.task, createdAt: now }] },
+        now,
+      );
+    }
     case "ledger.item.update": {
       const item = ledger.items.find(({ id }) => id === command.itemId);
       if (item === undefined) return reject(`Unknown item ${command.itemId}.`);
@@ -708,6 +725,31 @@ function planCoreLedgerCommand(input: {
 
 const endJudging = (item: LedgerItem): LedgerItem =>
   withOptional(withOptional(item, "judging", undefined), "judgeTaskId", undefined);
+
+/** Finished work takes no new tasks; a deferred item may still be explored. */
+const itemLinkProblem = (item: LedgerItem) =>
+  item.status === "closed" || item.status === "dropped"
+    ? `Item ${item.id} is ${item.status}. Reopen it before delegating work on it, or omit ledgerItemId.`
+    : undefined;
+
+/**
+ * Fork: why a delegated task cannot be linked to this item of the thread's ledger, or undefined
+ * when it can. delegate_task checks it before starting any work, so a bad id costs nothing.
+ */
+export function ledgerTaskLinkProblem(
+  ledger: Ledger | undefined,
+  itemId: LedgerItem["id"],
+): string | undefined {
+  if (ledger === undefined) {
+    return "This thread has no ledger. Create one with ledger_create, or omit ledgerItemId.";
+  }
+  if (ledger.closedAt !== null) {
+    return `Ledger ${ledger.id} is closed. Reopen it before delegating work on it, or omit ledgerItemId.`;
+  }
+  const item = ledger.items.find(({ id }) => id === itemId);
+  if (item === undefined) return `Unknown ledger item ${itemId}. ledger_read lists the items.`;
+  return itemLinkProblem(item);
+}
 
 /**
  * The judge each newly judging item needs, committed with the event that made it judging, so a

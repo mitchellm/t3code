@@ -553,6 +553,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "ledger.item.verdict.record":
     case "ledger.item.judgement.abandon":
     case "ledger.item.judgement.started":
+    case "ledger.item.task.link":
     case "ledger.investigation.start":
     case "ledger.investigation.end":
     case "ledger.investigation.spend":
@@ -12532,6 +12533,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "ledger.item.verdict.record":
       case "ledger.item.judgement.abandon":
       case "ledger.item.judgement.started":
+      case "ledger.item.task.link":
       case "ledger.investigation.start":
       case "ledger.investigation.end":
       case "ledger.investigation.spend":

@@ -2,6 +2,7 @@ import type {
   LedgerItem,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
+  OrchestrationV2Subagent,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
@@ -93,6 +94,57 @@ export function judgeBase(
     }
   }
   return best === undefined ? undefined : { ref: best.ref, capturedAt: best.capturedAt };
+}
+
+/** A linked task as the judged thread holds it: its live status and final report. */
+export type JudgeTaskRecord = Pick<
+  OrchestrationV2Subagent,
+  "id" | "status" | "result" | "completedAt"
+>;
+
+export const TASK_REPORT_MAX_CHARS = 3_000;
+export const TASK_REPORTS_SHOWN = 6;
+
+export interface JudgedTaskReport {
+  readonly taskId: string;
+  readonly role: string | undefined;
+  readonly status: OrchestrationV2Subagent["status"];
+  readonly text: string;
+}
+
+/**
+ * The final reports of the item's linked tasks the judge is shown, latest last. Only reports in
+ * by the item's own stamp count, which a link never moves and a judging close request fixes, so
+ * start and settle build the same prompt; a changed prompt reads as a judge the server did not
+ * start. Each is trimmed, by code point so a retry trims identically.
+ */
+export function judgedTaskReports(
+  item: Pick<LedgerItem, "tasks" | "updatedAt">,
+  records: ReadonlyArray<JudgeTaskRecord>,
+): { readonly reports: ReadonlyArray<JudgedTaskReport>; readonly omitted: number } {
+  const cutoff = DateTime.toEpochMillis(item.updatedAt);
+  const byId = new Map(records.map((record) => [record.id as string, record]));
+  const all = (item.tasks ?? []).flatMap((task) => {
+    const record = byId.get(task.taskId);
+    if (
+      record === undefined ||
+      record.result === null ||
+      record.completedAt === null ||
+      DateTime.toEpochMillis(record.completedAt) > cutoff
+    ) {
+      return [];
+    }
+    const characters = Array.from(record.result.trim());
+    const text =
+      characters.length > TASK_REPORT_MAX_CHARS
+        ? `${characters.slice(0, TASK_REPORT_MAX_CHARS).join("")}\n[trimmed]`
+        : characters.join("");
+    return text === ""
+      ? []
+      : [{ taskId: task.taskId, role: task.role, status: record.status, text }];
+  });
+  const reports = all.slice(-TASK_REPORTS_SHOWN);
+  return { reports, omitted: all.length - reports.length };
 }
 
 /** The rules both the judge and the refuter work under, whatever the agent's text says. */
