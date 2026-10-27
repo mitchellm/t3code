@@ -144,9 +144,14 @@ export function ComposerControlsBar(props: {
         lockedProvider,
         lockedContinuationGroupKey,
         modelDisabledReason: getModelDisabledReason,
+        disabled: providerCatalogPending || isSendBusy,
+        selected: selectedModelSelection,
+        fanOut: multipleModelSelections,
       },
-      actual: selectedModelSelection,
-      onProviderModelSelect,
+      composer: {
+        select: onProviderModelSelect,
+        clearFanOut: () => onMultipleModelSelectionsChange(null),
+      },
     },
   );
   // Fork: Build, Plan and Investigate in one picker, on drafts as on threads.

@@ -2,7 +2,6 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
   type EnvironmentId,
   type Loadout,
-  type ModelSelection,
   type ProjectId,
   type ScopedThreadRef,
   type ThreadLoadout,
@@ -25,10 +24,11 @@ import {
 } from "./draftLoadout";
 import {
   applyPlannerModelSwitch,
+  loadoutAsRun,
+  type PlannerComposer,
   type PlannerPicker,
   plannerModelSwitch,
-  plannerNotRunning,
-  type SelectModel,
+  plannerRun,
 } from "./loadoutPlanner";
 
 /**
@@ -36,16 +36,17 @@ import {
  * the top-level thread itself. Without it a pick changes the loadout only.
  */
 export interface ComposerLoadoutPlanner {
+  /** What the picker offers and what the next send uses, a new chat's fan-out included. */
   readonly picker: PlannerPicker;
-  /** The selection the next turn sends, which is what says whether the planner runs. */
-  readonly actual: ModelSelection;
-  readonly onProviderModelSelect: SelectModel;
+  readonly composer: PlannerComposer;
 }
 
 export interface ComposerLoadout {
   readonly loadouts: ReadonlyArray<Loadout>;
   /** The loadout the thread runs under; solo when none was chosen or it was since deleted. */
   readonly active: Loadout;
+  /** `active` as it runs, for its summary: its planner swapped for the fallback, or dropped. */
+  readonly activeAsRun: Loadout;
   /** Why the composer is not on the active loadout's planner; null when it is or there is none. */
   readonly plannerNotRunning: string | null;
   readonly choice: ThreadLoadout | null;
@@ -107,13 +108,15 @@ export function useComposerLoadout(
     }
   };
   const active = resolveLoadout(scope.loadouts, choice?.id);
+  const run =
+    planner === undefined
+      ? ({ _tag: "unknown" } as const)
+      : plannerRun({ loadout: active, picker: planner.picker });
   return {
     loadouts: scope.loadouts,
     active,
-    plannerNotRunning:
-      planner === undefined
-        ? null
-        : plannerNotRunning({ loadout: active, picker: planner.picker, actual: planner.actual }),
+    activeAsRun: loadoutAsRun(active, run),
+    plannerNotRunning: run._tag === "notRunning" ? run.reason : null,
     choice,
     settingsScope: { environmentId, projectId, projectOverridden: scope.projectOverridden },
     // Hands the slot back so the agent may propose again; a user pick otherwise stands for good.
@@ -130,7 +133,7 @@ export function useComposerLoadout(
         loadout: resolveLoadout(scope.loadouts, loadoutId),
         picker: planner.picker,
       });
-      const notApplied = applyPlannerModelSwitch(decision, planner.onProviderModelSelect);
+      const notApplied = applyPlannerModelSwitch(decision, planner.composer);
       if (notApplied !== null) {
         toastManager.add({
           type: "warning",

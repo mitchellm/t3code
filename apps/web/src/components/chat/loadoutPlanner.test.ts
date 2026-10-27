@@ -7,6 +7,7 @@ import {
   type ThreadLoadout,
 } from "@t3tools/contracts";
 import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts/settings";
+import { summarizeLoadoutRoles } from "@t3tools/shared/loadoutSummary";
 import { describe, expect, it } from "vite-plus/test";
 
 import { getAppModelOptionsForInstance } from "../../modelSelection";
@@ -17,9 +18,10 @@ import {
 import { makeModelDisabledReason } from "../ChatView.logic";
 import {
   applyPlannerModelSwitch,
+  loadoutAsRun,
   type PlannerPicker,
   plannerModelSwitch,
-  plannerNotRunning,
+  plannerRun,
   type SelectModel,
   withOptionOverrides,
 } from "./loadoutPlanner";
@@ -112,6 +114,8 @@ function picker(input?: {
   readonly lock?: Partial<
     Pick<PlannerPicker, "lockedProvider" | "lockedContinuationGroupKey" | "modelDisabledReason">
   >;
+  /** What the composer holds; by default one model that is no planner's. */
+  readonly composer?: Partial<Pick<PlannerPicker, "disabled" | "selected" | "fanOut">>;
 }): PlannerPicker {
   const resolved = input?.settings ?? settings;
   const entries = applyProviderInstanceSettings(
@@ -130,7 +134,11 @@ function picker(input?: {
     lockedProvider: null,
     lockedContinuationGroupKey: null,
     modelDisabledReason: () => null,
+    disabled: false,
+    selected: { instanceId: claude, model: "claude-sonnet-5-5" },
+    fanOut: null,
     ...input?.lock,
+    ...input?.composer,
   };
 }
 
@@ -355,48 +363,165 @@ describe("plannerModelSwitch", () => {
       reason: "Superbot is not available here. This thread stays on its current model.",
     });
   });
+
+  it("falls to the fallback when the thread's lock refuses the planner itself", () => {
+    const loadout = withPlanner({
+      instanceId: codex,
+      model: "gpt-6.1-sol",
+      effort: "high",
+      fallback: { instanceId: claude, model: "claude-opus-5-5", effort: "xhigh" },
+    });
+    expect(
+      plannerModelSwitch({
+        pick: picked(loadout),
+        loadout,
+        picker: picker({ lock: { lockedProvider: claudeDriver } }),
+      }),
+    ).toEqual({
+      _tag: "switch",
+      selection: {
+        instanceId: claude,
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "xhigh" }],
+      },
+    });
+  });
+
+  it("is quiet when the composer already runs the planner, even on a model the picker hides", () => {
+    const hidden: UnifiedSettings = {
+      ...settings,
+      providerModelPreferences: { [superbot]: { hiddenModels: ["superbot"], modelOrder: [] } },
+    };
+    const selected = {
+      instanceId: superbot,
+      model: "superbot",
+      options: [{ id: "effort", value: "high" }],
+    };
+    expect(
+      plannerModelSwitch({
+        pick: picked(oversight),
+        loadout: oversight,
+        picker: picker({ settings: hidden, composer: { selected } }),
+      }),
+    ).toEqual({ _tag: "none" });
+  });
+
+  it("leaves the model alone while the model picker is disabled, and says so", () => {
+    expect(
+      plannerModelSwitch({
+        pick: picked(oversight),
+        loadout: oversight,
+        picker: picker({ composer: { disabled: true } }),
+      }),
+    ).toEqual({
+      _tag: "kept",
+      reason:
+        "Model picker is disabled, so this thread stays on its current model. Pick the loadout again once it is ready.",
+    });
+  });
 });
 
-describe("plannerNotRunning", () => {
-  it("is quiet while the composer is on the planner", () => {
+describe("plannerRun", () => {
+  const onPlanner = {
+    instanceId: superbot,
+    model: "superbot",
+    options: [{ id: "effort", value: "high" }],
+  };
+
+  it("runs while the composer is on the planner at its effort", () => {
     expect(
-      plannerNotRunning({
+      plannerRun({ loadout: oversight, picker: picker({ composer: { selected: onPlanner } }) }),
+    ).toEqual({ _tag: "running", onFallback: false });
+  });
+
+  it("does not run while a new chat sends to several models at once", () => {
+    const fanOut = [onPlanner, { instanceId: claude, model: "claude-opus-5-5" }];
+    expect(
+      plannerRun({
         loadout: oversight,
-        picker: picker(),
-        actual: { instanceId: superbot, model: "superbot" },
+        picker: picker({ composer: { selected: onPlanner, fanOut } }),
       }),
-    ).toBeNull();
+    ).toEqual({
+      _tag: "notRunning",
+      reason:
+        "This chat sends to 2 models at once, so the planner does not run. Pick the loadout again to send to the planner alone.",
+    });
+  });
+
+  it("reports an effort changed by hand", () => {
+    const lowered = { ...onPlanner, options: [{ id: "effort", value: "low" }] };
+    expect(
+      plannerRun({ loadout: oversight, picker: picker({ composer: { selected: lowered } }) }),
+    ).toEqual({
+      _tag: "notRunning",
+      reason:
+        "This thread runs superbot at low effort, not the planner's high. Pick the loadout again to switch.",
+    });
   });
 
   it("says so once the model was changed by hand, or the loadout came without a switch", () => {
-    expect(
-      plannerNotRunning({
-        loadout: oversight,
-        picker: picker(),
-        actual: { instanceId: claude, model: "claude-opus-5-5" },
-      }),
-    ).toBe(
-      "This thread runs on claude-opus-5-5, not its planner, superbot. Pick the loadout again to switch.",
-    );
+    expect(plannerRun({ loadout: oversight, picker: picker() })).toEqual({
+      _tag: "notRunning",
+      reason:
+        "This thread runs on claude-sonnet-5-5, not its planner, superbot. Pick the loadout again to switch.",
+    });
   });
 
   it("gives the reason when the planner cannot run on this thread", () => {
     expect(
-      plannerNotRunning({
+      plannerRun({
         loadout: oversight,
-        picker: picker({ lock: { lockedProvider: codexDriver } }),
-        actual: { instanceId: codex, model: "gpt-6.1-sol" },
+        picker: picker({
+          lock: { lockedProvider: codexDriver },
+          composer: { selected: { instanceId: codex, model: "gpt-6.1-sol" } },
+        }),
       }),
-    ).toBe("Superbot is unavailable in this thread. Start a new thread to switch providers.");
+    ).toEqual({
+      _tag: "notRunning",
+      reason: "Superbot is unavailable in this thread. Start a new thread to switch providers.",
+    });
   });
 
-  it("is quiet for a loadout without a planner and before the catalog loads", () => {
+  it("knows nothing for a loadout without a planner or before the catalog loads", () => {
     const workersOnly: Loadout = { ...oversight, roles: { worker: oversight.roles.worker! } };
-    const actual = { instanceId: claude, model: "claude-opus-5-5" };
-    expect(plannerNotRunning({ loadout: workersOnly, picker: picker(), actual })).toBeNull();
-    expect(
-      plannerNotRunning({ loadout: oversight, picker: picker({ providers: [] }), actual }),
-    ).toBeNull();
+    expect(plannerRun({ loadout: workersOnly, picker: picker() })).toEqual({ _tag: "unknown" });
+    expect(plannerRun({ loadout: oversight, picker: picker({ providers: [] }) })).toEqual({
+      _tag: "unknown",
+    });
+  });
+});
+
+describe("loadoutAsRun", () => {
+  it("names the fallback in the summary when the fallback is what runs", () => {
+    const loadout = withPlanner({
+      instanceId: codex,
+      model: "gpt-6.1-sol",
+      effort: "high",
+      fallback: { instanceId: claude, model: "claude-opus-5-5", effort: "xhigh" },
+    });
+    const run = plannerRun({
+      loadout,
+      picker: picker({
+        composer: {
+          selected: {
+            instanceId: claude,
+            model: "claude-opus-5-5",
+            options: [{ id: "effort", value: "xhigh" }],
+          },
+        },
+      }),
+    });
+    expect(run).toEqual({ _tag: "running", onFallback: true });
+    expect(summarizeLoadoutRoles(loadoutAsRun(loadout, run))).toBe(
+      "Opus xhigh plans · Haiku explores · Sonnet works · Opus high judges",
+    );
+  });
+
+  it("leaves the planner out of the summary when it does not run", () => {
+    const run = plannerRun({ loadout: oversight, picker: picker() });
+    expect(summarizeLoadoutRoles(loadoutAsRun(oversight, run))).toBe(
+      "Haiku explores · Sonnet works · Opus high judges",
+    );
   });
 });
 
@@ -410,13 +535,15 @@ describe("applyPlannerModelSwitch", () => {
     },
   } as const;
 
+  const keepFanOut = () => {};
+
   it("moves through the model picker's path with the planner's effort, and is quiet once there", () => {
     const calls: Array<Parameters<SelectModel>> = [];
     const select: SelectModel = (...args) => {
       calls.push(args);
       return { instanceId: args[0], model: args[1], options: [{ id: "effort", value: "high" }] };
     };
-    expect(applyPlannerModelSwitch(planner, select)).toBeNull();
+    expect(applyPlannerModelSwitch(planner, { select, clearFanOut: keepFanOut })).toBeNull();
     expect(calls).toEqual([
       [
         superbot,
@@ -426,21 +553,43 @@ describe("applyPlannerModelSwitch", () => {
     ]);
   });
 
+  it("clears a new chat's fan-out before selecting the planner, as the model picker does", () => {
+    const steps: Array<string> = [];
+    expect(
+      applyPlannerModelSwitch(planner, {
+        clearFanOut: () => steps.push("clear fan-out"),
+        select: (instanceId, model) => {
+          steps.push(`select ${model}`);
+          return { instanceId, model };
+        },
+      }),
+    ).toBeNull();
+    expect(steps).toEqual(["clear fan-out", "select superbot"]);
+  });
+
   it("reports a switch the model picker refused or landed elsewhere", () => {
-    expect(applyPlannerModelSwitch(planner, () => null)).toBe(
+    expect(applyPlannerModelSwitch(planner, { select: () => null, clearFanOut: keepFanOut })).toBe(
       "The model picker did not switch to superbot. This thread stays on its current model.",
     );
     expect(
-      applyPlannerModelSwitch(planner, () => ({ instanceId: superbot, model: "superbot-mini" })),
+      applyPlannerModelSwitch(planner, {
+        select: () => ({ instanceId: superbot, model: "superbot-mini" }),
+        clearFanOut: keepFanOut,
+      }),
     ).toBe("The model picker chose superbot-mini instead of the planner, superbot.");
   });
 
   it("passes a kept reason through without touching the model, and stays quiet for none", () => {
-    const select: SelectModel = () => {
-      throw new Error("the model must not move");
+    const untouched = {
+      select: () => {
+        throw new Error("the model must not move");
+      },
+      clearFanOut: () => {
+        throw new Error("the fan-out must stay");
+      },
     };
-    expect(applyPlannerModelSwitch({ _tag: "kept", reason: "Locked." }, select)).toBe("Locked.");
-    expect(applyPlannerModelSwitch({ _tag: "none" }, select)).toBeNull();
+    expect(applyPlannerModelSwitch({ _tag: "kept", reason: "Locked." }, untouched)).toBe("Locked.");
+    expect(applyPlannerModelSwitch({ _tag: "none" }, untouched)).toBeNull();
   });
 });
 

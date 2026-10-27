@@ -1,4 +1,3 @@
-import type { Loadout } from "@t3tools/contracts";
 import { summarizeLoadoutRoles } from "@t3tools/shared/loadoutSummary";
 import { useNavigate } from "@tanstack/react-router";
 import { LayersIcon, SparklesIcon } from "lucide-react";
@@ -23,12 +22,6 @@ function loadoutTooltip(loadout: ComposerLoadout): string {
       ? `Proposed by the agent: ${loadout.choice.reason ?? "no reason given"}`
       : loadout.active.description;
   return [about, loadout.plannerNotRunning ?? ""].filter((part) => part !== "").join(" ");
-}
-
-/** A summary that does not name a planner the thread is not running on. */
-function withoutPlanner(loadout: Loadout): Loadout {
-  const { planner: _notRunning, ...roles } = loadout.roles;
-  return { ...loadout, roles };
 }
 
 /** Says the active loadout's planner is not what runs, wherever its entry is listed. */
@@ -106,22 +99,22 @@ export const ComposerLoadoutPicker = memo(function ComposerLoadoutPicker(props: 
         </TooltipTrigger>
         <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
           {loadout.loadouts.map((option) => {
-            const notRunning = option.id === loadout.active.id ? loadout.plannerNotRunning : null;
+            const isActive = option.id === loadout.active.id;
             return (
               <SelectItem key={option.id} value={option.id} hideIndicator className="min-w-64">
                 <div className="grid min-w-0 gap-0.5">
                   <span className="font-medium text-foreground">
                     {option.name}
-                    {agentProposed && option.id === loadout.active.id ? (
+                    {agentProposed && isActive ? (
                       <span className="ml-1.5 font-normal text-muted-foreground text-xs">
                         proposed by agent
                       </span>
                     ) : null}
                   </span>
                   <span className="text-muted-foreground text-xs leading-4">
-                    {summarizeLoadoutRoles(notRunning === null ? option : withoutPlanner(option))}
+                    {summarizeLoadoutRoles(isActive ? loadout.activeAsRun : option)}
                   </span>
-                  <LoadoutPlannerNote reason={notRunning} />
+                  <LoadoutPlannerNote reason={isActive ? loadout.plannerNotRunning : null} />
                 </div>
               </SelectItem>
             );
