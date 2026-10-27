@@ -29,7 +29,7 @@ import {
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
   ProviderOptionSelections,
 } from "./model.ts";
-import { DEFAULT_LOADOUTS, Loadout } from "./loadout.ts";
+import { DEFAULT_LOADOUTS, Loadout, SavedLoadouts } from "./loadout.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { ProjectScript, type ProjectMutation } from "./project.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./providerPolicy.ts";
@@ -1062,7 +1062,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
-  loadouts: Schema.optionalKey(Schema.Array(Loadout)),
+  loadouts: Schema.optionalKey(SavedLoadouts),
   planBeforeEditing: Schema.optionalKey(Schema.Boolean),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
@@ -1274,9 +1274,7 @@ export const ServerSettings = Schema.Struct({
    */
   pinnedRules: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** Replaced whole when edited; a thread whose loadout is not in the list runs solo. */
-  loadouts: Schema.Array(Loadout).pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LOADOUTS)),
-  ),
+  loadouts: SavedLoadouts.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_LOADOUTS))),
   /**
    * Claude's enforcement only: its top-level thread cannot edit a file until the ledger has an
    * unfinished item. Every provider's instructions ask for the plan either way.

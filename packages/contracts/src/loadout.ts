@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
@@ -156,3 +157,42 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
     },
   },
 ];
+
+/** Presets the fork once shipped, exactly as shipped, so a saved list can be told apart from them. */
+const RETIRED_LOADOUTS: ReadonlyArray<Loadout> = [
+  {
+    id: "planner-workers-judge",
+    name: "Planner + workers + judge",
+    description:
+      "A strong planner splits the task, cheaper workers implement, and a separate judge must pass each ledger item before it closes.",
+    roles: {
+      planner: claude("claude-opus-5-5", "xhigh"),
+      worker: claude("claude-sonnet-5-5"),
+      judge: claude("claude-opus-5-5", "high"),
+    },
+  },
+  {
+    id: "read-only-sweep",
+    name: "Read-only sweep",
+    description: "Cheap explorers read and report across the codebase. Nothing is implemented.",
+    roles: { explorer: claude("claude-haiku-5-5") },
+  },
+];
+
+const sameLoadout = Schema.toEquivalence(Loadout);
+
+/**
+ * Fork: a stored loadout list. Saving replaces the list whole, so anyone who saved once froze a
+ * copy of every preset of that day. An untouched copy of a since-retired preset is dropped as it
+ * is read; any edit makes it the user's own, and it stays.
+ */
+export const SavedLoadouts = Schema.Array(Loadout).pipe(
+  Schema.decodeTo(
+    Schema.Array(Schema.toType(Loadout)),
+    SchemaTransformation.transform<ReadonlyArray<Loadout>, ReadonlyArray<Loadout>>({
+      decode: (loadouts) =>
+        loadouts.filter((loadout) => !RETIRED_LOADOUTS.some((old) => sameLoadout(old, loadout))),
+      encode: (loadouts) => loadouts,
+    }),
+  ),
+);

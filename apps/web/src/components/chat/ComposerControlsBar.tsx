@@ -131,11 +131,28 @@ export function ComposerControlsBar(props: {
     modelPickerIconClassName,
     getModelDisabledReason,
   } = props;
-  // A draft holds its own pick until its first send creates the thread under it.
+  // A draft holds its own pick until its first send creates the thread under it. Fork: a pick also
+  // moves the model picker onto the loadout's planner, held to the picker's own locks.
   const loadout = useComposerLoadout(
     environmentId,
     routeThreadRef,
     routeKind === "draft" && draftId ? { draftId, sending: isSendBusy } : null,
+    {
+      picker: {
+        entries: providerInstanceEntries,
+        modelOptionsByInstance,
+        lockedProvider,
+        lockedContinuationGroupKey,
+        modelDisabledReason: getModelDisabledReason,
+        disabled: providerCatalogPending || isSendBusy,
+        selected: selectedModelSelection,
+        fanOut: multipleModelSelections,
+      },
+      composer: {
+        select: onProviderModelSelect,
+        clearFanOut: () => onMultipleModelSelectionsChange(null),
+      },
+    },
   );
   // Fork: Build, Plan and Investigate in one picker, on drafts as on threads.
   const composerMode = useComposerMode({

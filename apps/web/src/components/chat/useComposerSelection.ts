@@ -25,6 +25,7 @@ import {
   deriveLockedProvider,
   makeModelDisabledReason,
 } from "../ChatView.logic";
+import { withOptionOverrides } from "./loadoutPlanner";
 interface ComposerSelectionInput {
   readonly environmentId: EnvironmentId;
   readonly composerDraftTarget: ComposerThreadTarget;
@@ -143,9 +144,9 @@ export function useComposerSelection(input: ComposerSelectionInput) {
   const onProviderModelSelect = (
     instanceId: ProviderInstanceId,
     model: string,
-    options?: { focusComposer?: boolean },
-  ) => {
-    if (!activeThread) return;
+    options?: { focusComposer?: boolean; optionOverrides?: ModelSelection["options"] },
+  ): ModelSelection | null => {
+    if (!activeThread) return null;
     const entry = providerStatuses.find((snapshot) => snapshot.instanceId === instanceId);
     const resolvedDriverKind = entry?.driver ?? null;
     if (
@@ -155,7 +156,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
       resolvedDriverKind !== lockedProvider
     ) {
       if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
+      return null;
     }
     if (
       !supportsProviderSwitchingViaHandoff &&
@@ -171,7 +172,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
         currentEntry.continuation.groupKey !== entry.continuation.groupKey
       ) {
         if (options?.focusComposer !== false) scheduleComposerFocus();
-        return;
+        return null;
       }
     }
     const resolvedModel = resolveAppModelSelectionForInstance(
@@ -182,10 +183,13 @@ export function useComposerSelection(input: ComposerSelectionInput) {
     );
     if (!resolvedModel) {
       if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
+      return null;
     }
-    const rememberedOptions =
-      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
+    // Fork: a loadout pick passes its planner's effort, which wins over what this model remembers.
+    const rememberedOptions = withOptionOverrides(
+      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel],
+      options?.optionOverrides,
+    );
     const nextModelSelection: ModelSelection =
       rememberedOptions !== undefined && rememberedOptions.length > 0
         ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
@@ -205,7 +209,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
         description: modelChangeBlockReason.description,
       });
       if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
+      return null;
     }
     setComposerDraftModelSelection(
       scopeThreadRef(activeThread.environmentId, activeThread.id),
@@ -214,6 +218,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
     );
     setStickyComposerModelSelection(nextModelSelection);
     if (options?.focusComposer !== false) scheduleComposerFocus();
+    return nextModelSelection;
   };
   const onProviderModelSelectStable = useStableCallback(onProviderModelSelect);
   const onEnvModeChange = (mode: DraftThreadEnvMode) => {

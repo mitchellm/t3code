@@ -519,8 +519,8 @@ export interface ChatComposerProps {
   onProviderModelSelect: (
     instanceId: ProviderInstanceId,
     model: string,
-    options?: { focusComposer?: boolean },
-  ) => void;
+    options?: { focusComposer?: boolean; optionOverrides?: ModelSelection["options"] },
+  ) => ModelSelection | null;
   onOpenProviderSetup: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
   toggleInteractionMode: () => void;
