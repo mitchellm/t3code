@@ -19,6 +19,7 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { LEDGER_AUTO_CONTINUE_CAP } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
@@ -894,7 +895,11 @@ it.effect("waits for a running delegated task instead of nudging the agent", () 
 );
 
 /** Puts the latest run on a provider session whose adapter keeps the agent going itself. */
-const runOnSessionThatBlocksStops = (threadId: ThreadId, blocksStops: boolean) =>
+const runOnSessionThatBlocksStops = (
+  threadId: ThreadId,
+  blocksStops: boolean,
+  pendingBackgroundTasks: OrchestrationV2ProviderThread["pendingBackgroundTasks"] = [],
+) =>
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
     const now = yield* DateTime.now;
@@ -946,7 +951,7 @@ const runOnSessionThatBlocksStops = (threadId: ThreadId, blocksStops: boolean) =
             lastRunOrdinal: null,
             handoffIds: [],
             forkedFrom: null,
-            pendingBackgroundTasks: [],
+            pendingBackgroundTasks,
             contextUsage: null,
             nativeMetadata: null,
             goal: null,
@@ -990,6 +995,82 @@ it.effect("posts no stop notice for a self-blocking provider waiting on a delega
     assert.equal((yield* stopNotices(threadId)).length, 0);
     assert.isFalse(yield* isMarkedStuck(threadId));
   }).pipe(Effect.provide(layerTest)),
+);
+
+/** The provider's own subagent row in the parent's timeline, which the composer reads as waiting. */
+const setNativeSubagentItem = (threadId: ThreadId, runId: RunId, status: "running" | "completed") =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(nextId("event:native-subagent")),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:native-subagent:${threadId}`),
+            threadId,
+            runId,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            status,
+            title: "Audit the API",
+            startedAt: now,
+            completedAt: status === "completed" ? now : null,
+            updatedAt: now,
+            type: "subagent",
+            subagentId: NodeId.make(`node:native-subagent:${threadId}`),
+            origin: "provider_native",
+            driver: adapter.driver,
+            providerInstanceId: instanceId,
+            childThreadId: null,
+            prompt: "Audit the API",
+            result: status === "completed" ? "Done" : null,
+          },
+        },
+      ],
+    });
+  });
+
+it.effect.each([
+  { source: "roster", blocksStops: true },
+  { source: "roster", blocksStops: false },
+  { source: "turn item", blocksStops: true },
+  { source: "turn item", blocksStops: false },
+] as const)(
+  "waits for the provider's own background subagent ($source, blocks: $blocksStops)",
+  ({ source, blocksStops }) =>
+    Effect.gen(function* () {
+      const threadId = yield* setup(`native-subagent-${source}-${blocksStops}`);
+      yield* sendUserMessage(threadId);
+      const launchRun = yield* latestRun(threadId);
+      if (source === "turn item") yield* setNativeSubagentItem(threadId, launchRun.id, "running");
+      yield* runOnSessionThatBlocksStops(
+        threadId,
+        blocksStops,
+        source === "roster"
+          ? [{ taskId: "agent-1", kind: "subagent", description: "Audit the API" }]
+          : [],
+      );
+      // The provider wakes the agent when the subagent reports, so this stop is not giving up.
+      assert.equal((yield* autoContinues(threadId)).length, 0);
+      assert.deepEqual(yield* stopNotices(threadId), []);
+      assert.isFalse(yield* isMarkedStuck(threadId));
+
+      // The report wakes the agent; a turn after that which moves nothing is judged as usual.
+      yield* serverWake(threadId);
+      if (source === "turn item") yield* setNativeSubagentItem(threadId, launchRun.id, "completed");
+      yield* runOnSessionThatBlocksStops(threadId, blocksStops);
+      assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), blocksStops ? [] : [1]);
+      assert.equal((yield* stopNotices(threadId)).length, blocksStops ? 1 : 0);
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("truncates a long item title in the stop notice", () =>
