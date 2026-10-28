@@ -5,8 +5,10 @@ import {
   INVESTIGATION_MIN_PARALLEL_APPROACHES,
   INVESTIGATION_SOLVED_WHEN_MAX_LENGTH,
   type InvestigationBudget,
+  type Loadout,
   type ThreadLoadout,
 } from "@t3tools/contracts";
+import { loadoutRequiresJudge } from "@t3tools/shared/loadouts";
 
 import type { ComposerMode } from "./composerMode.logic";
 
@@ -46,10 +48,7 @@ const parsePositive = (text: string): number | null | "invalid" => {
 export function buildInvestigateStart(draft: InvestigateDraft, prompt: string): InvestigateStart {
   const goal = prompt.trim();
   if (goal === "") {
-    return {
-      ok: false,
-      problem: "Write the goal in the message box below. Solved when is how the judge checks it.",
-    };
+    return { ok: false, problem: "Write the goal above. Solved when is how the judge checks it." };
   }
   const solvedWhen = draft.solvedWhen.trim();
   if (solvedWhen === "") {
@@ -90,14 +89,47 @@ export function clampParallelApproaches(value: number): number {
   );
 }
 
-/** Where the goal is sent: an existing thread, or a draft whose thread the send creates. */
+/** Whether the loadout's judge could run, as the server decides it when the investigation starts. */
+export type InvestigateJudge =
+  | { readonly kind: "none" }
+  | { readonly kind: "off"; readonly provider: string }
+  | { readonly kind: "ready" };
+
+/** The composer's provider list: registered instances, with project enablement applied. */
+export type InvestigateProviders = ReadonlyArray<{
+  readonly instanceId: string;
+  readonly displayName: string;
+  readonly enabled: boolean;
+}>;
+
+/**
+ * The server's gate: one of the judge's models must be on a registered provider enabled for the
+ * project. Before the list arrives nothing is known to be off, so the server is left to decide.
+ */
+export function investigateJudge(
+  loadout: Loadout,
+  providers: InvestigateProviders,
+): InvestigateJudge {
+  const judge = loadout.roles.judge;
+  if (judge === undefined) return { kind: "none" };
+  const canRun = (instanceId: string) =>
+    providers.some((provider) => provider.instanceId === instanceId && provider.enabled);
+  if (providers.length === 0 || loadoutRequiresJudge(loadout, canRun)) return { kind: "ready" };
+  const own = providers.find(({ instanceId }) => instanceId === judge.instanceId);
+  return { kind: "off", provider: own?.displayName ?? judge.instanceId };
+}
+
+/**
+ * Where the goal is sent: an existing thread, or a draft whose thread the send creates. Either
+ * way the loadout it runs under is named, since the server refuses one whose judge cannot run.
+ */
 export type InvestigateSendTarget =
-  | { readonly kind: "thread" }
+  | { readonly kind: "thread"; readonly loadoutName: string; readonly judge: InvestigateJudge }
   | {
       readonly kind: "draft";
       readonly loadout: ThreadLoadout | null;
       readonly loadoutName: string;
-      readonly hasJudge: boolean;
+      readonly judge: InvestigateJudge;
       /** The draft is set to start in a new worktree, which only a first message prepares. */
       readonly newWorktree: boolean;
     };
@@ -116,11 +148,30 @@ export type InvestigateSendPlan =
   | { readonly kind: "refused"; readonly problem: string }
   | { readonly kind: "investigation"; readonly steps: ReadonlyArray<InvestigateSendStep> };
 
+const needsJudge = (loadoutName: string): InvestigateSendPlan => ({
+  kind: "refused",
+  problem: `Investigate needs a loadout with a judge role to refute each approach, and ${loadoutName} has none. Pick one in the loadout picker.`,
+});
+
+const judgeRefusal = (target: InvestigateSendTarget): InvestigateSendPlan | null => {
+  switch (target.judge.kind) {
+    case "none":
+      return needsJudge(target.loadoutName);
+    case "off":
+      return {
+        kind: "refused",
+        problem: `${target.loadoutName}'s judge runs on ${target.judge.provider}, which is off for this project. Enable it in Settings → Providers or pick another loadout.`,
+      };
+    case "ready":
+      return null;
+  }
+};
+
 /**
  * What Send does in each mode. Build and Plan are the composer's ordinary turn. Investigate on a
  * thread saves the thread's settings, since the investigation's kickoff runs under them, then
- * starts it. On a draft it creates the thread and sets its loadout first, and refuses up front
- * what could not start, so a refusal leaves no empty thread behind.
+ * starts it. On a draft it creates the thread and sets its loadout first. Either way it refuses up
+ * front what could not start, so a refusal saves nothing and leaves no empty thread behind.
  */
 export function planInvestigateSend(input: {
   readonly mode: ComposerMode;
@@ -142,15 +193,12 @@ export function planInvestigateSend(input: {
   const { ok: _ok, ...start } = built;
   const begin = { type: "start-investigation", start } as const;
   const { target } = input;
+  const refused = judgeRefusal(target);
+  if (refused !== null) return refused;
   if (target.kind === "thread") {
     return { kind: "investigation", steps: [{ type: "persist-thread-settings" }, begin] };
   }
-  if (!target.hasJudge || target.loadout === null) {
-    return {
-      kind: "refused",
-      problem: `Investigate needs a loadout with a judge role to refute each approach, and ${target.loadoutName} has none. Pick one in the loadout picker.`,
-    };
-  }
+  if (target.loadout === null) return needsJudge(target.loadoutName);
   if (target.newWorktree) {
     return {
       kind: "refused",

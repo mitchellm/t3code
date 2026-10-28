@@ -296,7 +296,11 @@ import {
   usePreparingComposerImages,
 } from "./preparingComposerImages";
 import { ComposerControlsBar } from "./ComposerControlsBar";
-import { ComposerInvestigateFields, useInvestigating } from "./ComposerInvestigate";
+import {
+  ComposerInvestigateFields,
+  ComposerInvestigateGoalLabel,
+  useInvestigating,
+} from "./ComposerInvestigate";
 import { resolveComposerMode } from "./composerMode.logic";
 import { composerCommandKeyHandler } from "./composerCommandKey";
 
@@ -2384,7 +2388,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerSubmissionError !== null ||
     providerInputSubmissionError !== null ||
     hasImageAttachmentAttention ||
-    preparingComposerImages.length > 0;
+    preparingComposerImages.length > 0 ||
+    // Fork: Investigate's fields sit under the editor, where a resting row puts its actions.
+    investigateMode;
+  // Fork: the editor holds the goal in the states its Investigate placeholder shows in.
+  const editorHoldsInvestigateGoal =
+    investigateMode &&
+    !isComposerApprovalState &&
+    !activePendingProgress &&
+    !(showPlanFollowUpPrompt && activeProposedPlan) &&
+    !projectSelectionRequired &&
+    !showProviderUnavailable;
   const isComposerResting = shouldUseRestingComposerLayout({
     isExistingThread: routeKind === "server" && activeThreadId !== null,
     isMobileViewport,
@@ -3753,17 +3767,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   />
                 )}
 
-              <ComposerInvestigateFields
-                environmentId={environmentId}
-                threadId={routeThreadRef.threadId}
-                interactionMode={interactionMode}
-                prompt={prompt}
-                draftId={routeKind === "draft" ? draftId : null}
-              />
-
               {composerAttachmentMediaRow}
 
               {composerAttachmentFileList}
+
+              {editorHoldsInvestigateGoal ? (
+                <ComposerInvestigateGoalLabel
+                  focusGoal={() => composerEditorRef.current?.focusAtEnd()}
+                />
+              ) : null}
 
               <div
                 className={cn("relative", isComposerResting && "flex min-w-0 items-center gap-1")}
@@ -3784,7 +3796,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <ComposerPromptEditor
                     draftKey={composerDraftTargetKey}
                     // Switching threads lands focus here, so the label names the thread.
-                    ariaLabel={activeThread ? `Message ${activeThread.title}` : "Message"}
+                    ariaLabel={
+                      // Fork: matches the visible label while the editor holds the goal.
+                      editorHoldsInvestigateGoal
+                        ? "Goal"
+                        : activeThread
+                          ? `Message ${activeThread.title}`
+                          : "Message"
+                    }
                     suggestionListId={composerSuggestionListId}
                     activeSuggestionId={
                       composerSuggestionListVisible && activeComposerMenuItem
@@ -3839,7 +3858,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               : showProviderUnavailable
                                 ? "Enable a provider in Settings to send a message"
                                 : investigateMode
-                                  ? "The goal: what should the investigation find out or fix?"
+                                  ? "What should the investigation find out or fix?"
                                   : DEFAULT_COMPOSER_PLACEHOLDER
                     }
                     disabled={
@@ -3882,6 +3901,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   </div>
                 ) : null}
               </div>
+
+              <ComposerInvestigateFields
+                environmentId={environmentId}
+                threadId={routeThreadRef.threadId}
+                interactionMode={interactionMode}
+                prompt={prompt}
+                draftId={routeKind === "draft" ? draftId : null}
+                providers={providerInstanceEntries}
+              />
             </div>
 
             <ComposerPromptLengthValidation

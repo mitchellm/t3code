@@ -4,6 +4,7 @@
  * spend. State is per thread or draft and client-only until Start; the server owns the run after.
  */
 import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
@@ -16,7 +17,6 @@ import {
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
-import { loadoutHasJudge } from "@t3tools/shared/loadouts";
 import { AsyncResult } from "effect/reactivity";
 import { useEffect, useId } from "react";
 import { create } from "zustand";
@@ -44,12 +44,14 @@ import {
   EMPTY_INVESTIGATE_DRAFT,
   type InvestigateDraft,
   investigateHint,
+  investigateJudge,
+  type InvestigateProviders,
   type InvestigateSendStep,
   planInvestigateSend,
   runInvestigateSteps,
 } from "./composerInvestigate.logic";
 import { resolveComposerMode, settleComposerMode } from "./composerMode.logic";
-import { useDraftLaunchLoadout } from "./useComposerLoadout";
+import { useDraftLaunchLoadout, useThreadLoadout } from "./useComposerLoadout";
 
 const threadKey = (environmentId: EnvironmentId, threadId: ThreadId) =>
   `${environmentId}:${threadId}`;
@@ -87,13 +89,26 @@ export function setInvestigating(environmentId: EnvironmentId, threadId: ThreadI
 export const useCanInvestigate = (environmentId: EnvironmentId) =>
   useAtomValue(orchestrationEnvironment.startInvestigation.permissionAtom(environmentId));
 
-/** The fields above the editor while the composer is in Investigate mode. */
+/**
+ * Names the editor while it holds the goal, so it reads as the first field rather than a hint. The
+ * editor is no form control a label can point at, so a click focuses it as a label's would.
+ */
+export function ComposerInvestigateGoalLabel({ focusGoal }: { focusGoal: () => void }) {
+  return (
+    <div className="pb-1">
+      <Label onClick={focusGoal}>Goal</Label>
+    </div>
+  );
+}
+
+/** The fields under the goal while the composer is in Investigate mode. */
 export function ComposerInvestigateFields({
   environmentId,
   threadId,
   interactionMode,
   prompt,
   draftId,
+  providers,
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
@@ -101,6 +116,7 @@ export function ComposerInvestigateFields({
   prompt: string;
   /** Set on a new chat, whose first send creates the thread under its loadout. */
   draftId: DraftId | null;
+  providers: InvestigateProviders;
 }) {
   const draft = useInvestigateDraft(environmentId, threadId);
   const id = useId();
@@ -109,6 +125,10 @@ export function ComposerInvestigateFields({
     draftId === null ? null : store.getDraftSession(draftId),
   );
   const draftLoadout = useDraftLaunchLoadout(environmentId, draftSession ? draftId : null);
+  const threadLoadout = useThreadLoadout(
+    environmentId,
+    investigating && draftSession === null ? scopeThreadRef(environmentId, threadId) : null,
+  );
   // oxlint-disable-next-line t3code/react-effect-budget -- Plan is also entered outside the composer (the proposed-plan card, the server). This component mounts once per composer, so it is where Plan is seen and the fields it outranks end, and leaving Plan lands in Build.
   useEffect(() => {
     const state = { interactionMode, investigating };
@@ -124,17 +144,21 @@ export function ComposerInvestigateFields({
     prompt,
     target:
       draftSession === null
-        ? { kind: "thread" }
+        ? {
+            kind: "thread",
+            loadoutName: threadLoadout.name,
+            judge: investigateJudge(threadLoadout, providers),
+          }
         : {
             kind: "draft",
             loadout: draftLoadout.threadLoadout,
             loadoutName: draftLoadout.active.name,
-            hasJudge: loadoutHasJudge(draftLoadout.active),
+            judge: investigateJudge(draftLoadout.active, providers),
             newWorktree: draftSession.envMode === "worktree" && !draftSession.worktreePath,
           },
   });
   return (
-    <div data-composer-investigate className="flex flex-col gap-2 px-3 pt-2">
+    <div data-composer-investigate className="flex flex-col gap-2 pt-3">
       <div className="flex flex-col gap-1">
         <Label htmlFor={`${id}-solved`}>Solved when</Label>
         <Textarea
@@ -214,6 +238,7 @@ export interface InvestigateSendContext {
   readonly runtimeMode: RuntimeMode;
   readonly sendEnvMode: DraftThreadEnvMode;
   readonly localCheckoutBranchMismatch: { readonly currentBranch: string } | null;
+  readonly providerInstanceEntries: InvestigateProviders;
   readonly composerRef: ComposerHandleRef;
   readonly composerDraftTarget: ComposerThreadTarget;
   readonly promptRef: { current: string };
@@ -248,6 +273,18 @@ export function useComposerInvestigateSend(context: InvestigateSendContext) {
     environmentId,
     isLocalDraftThread ? context.draftId : null,
   );
+  // Outside Investigate a send never reads the thread's loadout, so it is not watched.
+  const investigating = useInvestigateDrafts(
+    (state) =>
+      activeThread !== undefined &&
+      state.drafts[threadKey(environmentId, activeThread.id)] !== undefined,
+  );
+  const threadLoadout = useThreadLoadout(
+    environmentId,
+    investigating && context.isServerThread && activeThread !== undefined
+      ? scopeThreadRef(environmentId, activeThread.id)
+      : null,
+  );
   return async (send: {
     readonly prompt: string;
     readonly modelSelection: ModelSelection;
@@ -273,12 +310,16 @@ export function useComposerInvestigateSend(context: InvestigateSendContext) {
       hasAttachments: send.hasAttachments,
       target:
         draftProject === null
-          ? { kind: "thread" }
+          ? {
+              kind: "thread",
+              loadoutName: threadLoadout.name,
+              judge: investigateJudge(threadLoadout, context.providerInstanceEntries),
+            }
           : {
               kind: "draft",
               loadout: draftLoadout.threadLoadout,
               loadoutName: draftLoadout.active.name,
-              hasJudge: loadoutHasJudge(draftLoadout.active),
+              judge: investigateJudge(draftLoadout.active, context.providerInstanceEntries),
               newWorktree: context.sendEnvMode === "worktree" && !activeThread.worktreePath,
             },
     });
