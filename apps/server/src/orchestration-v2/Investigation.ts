@@ -524,20 +524,16 @@ export function investigationSpawnRefusal(
 /**
  * Why `delegate_task` refuses a new worker. After the end, every worker is refused. While running,
  * the thread takes no more than its parallel limit of running children (only the server's own
- * judge tasks are exempt), and none under the judge role, which the server runs itself.
+ * judge tasks are exempt).
  */
 export function investigationDelegationProblem(input: {
   readonly lock: InvestigationSpawnLock;
   readonly activeWorkers: number;
-  readonly requestedRole?: string | undefined;
 }): string | undefined {
   const { lock } = input;
   if (lock.state === "open") return undefined;
   if (lock.state === "ended") {
     return `${endedText(lock.investigation)} Do not start new ones; write the report, or wait for the user's next message.`;
-  }
-  if (input.requestedRole === "judge") {
-    return "An investigation is running on this thread, and the server runs its judge itself. Delegate approach work under the worker role.";
   }
   if (input.activeWorkers >= lock.investigation.parallelApproaches) {
     return `The investigation runs at most ${lock.investigation.parallelApproaches} workers at once and ${input.activeWorkers} are running. Wait for one to finish before starting another.`;
@@ -621,16 +617,12 @@ export const spawnRefusalFor = (found: InvestigationCallerLock, tool: string) =>
  * `delegate_task`'s refusal for the caller. Only the investigation thread itself is capped; a
  * worker may start helpers while it runs, but nobody in the tree may once it has ended.
  */
-export const delegationRefusalFor = (
-  found: InvestigationCallerLock,
-  requestedRole: string | undefined,
-) =>
+export const delegationRefusalFor = (found: InvestigationCallerLock) =>
   found.lock.state === "running" && !found.atCaller
     ? undefined
     : investigationDelegationProblem({
         lock: found.lock,
         activeWorkers: found.atCaller ? found.activeWorkers : 0,
-        requestedRole,
       });
 
 const delegationLeases = new Map<string, { semaphore: Semaphore.Semaphore; users: number }>();

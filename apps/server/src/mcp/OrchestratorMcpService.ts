@@ -2099,11 +2099,8 @@ const make = Effect.gen(function* () {
   /** Fork: Investigate mode's spawn rule as it applies to a new delegated worker. */
   const investigationDelegationRefusal = Effect.fn(
     "OrchestratorMcpService.investigationDelegationRefusal",
-  )(function* (callerThreadId: ThreadId, requestedRole: string | undefined) {
-    return delegationRefusalFor(
-      yield* investigationLockFor(threadManagement, callerThreadId),
-      requestedRole,
-    );
+  )(function* (callerThreadId: ThreadId) {
+    return delegationRefusalFor(yield* investigationLockFor(threadManagement, callerThreadId));
   });
 
   /**
@@ -2526,10 +2523,7 @@ const make = Effect.gen(function* () {
         scope.thread.threadId,
         Effect.gen(function* () {
           if (!isRetryOfAcceptedDelegation && operation !== JUDGE_DELEGATION_OPERATION) {
-            const refused = yield* investigationDelegationRefusal(
-              scope.thread.threadId,
-              input.role,
-            );
+            const refused = yield* investigationDelegationRefusal(scope.thread.threadId);
             if (refused !== undefined) return yield* failure("invalid_request", refused);
           }
           // An explicit target always wins; the role only picks a default.

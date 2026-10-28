@@ -164,7 +164,7 @@ export function resetSeedText(input: {
       : [
           "",
           `## Loadout: ${input.loadout.name}`,
-          `${input.loadout.roles}. Hand role work to delegate_task with its role.`,
+          `${input.loadout.roles}. Hand worker, explorer and subPlanner work to delegate_task with its role; the server runs the judge on gated ledger items.`,
         ]),
     "",
     "## Now",

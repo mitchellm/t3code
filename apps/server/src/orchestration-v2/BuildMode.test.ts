@@ -92,7 +92,7 @@ describe("resetSeedText", () => {
         "Already settled: 1 closed, 1 dropped.",
         "",
         "## Loadout: Deep",
-        "Opus xhigh plans · Haiku works · Opus judges. Hand role work to delegate_task with its role.",
+        "Opus xhigh plans · Haiku works · Opus judges. Hand worker, explorer and subPlanner work to delegate_task with its role; the server runs the judge on gated ledger items.",
         "",
         "## Now",
         BUILD_LEDGER_TEXT,

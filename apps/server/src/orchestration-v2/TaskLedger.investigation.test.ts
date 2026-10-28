@@ -51,10 +51,9 @@ const delegationProblem = (ledger: Ledger, activeWorkers: number) =>
 const delegationRefusal = <E>(
   caller: ThreadId,
   read: (threadId: ThreadId) => Effect.Effect<InvestigationChainRecords, E>,
-  requestedRole?: string,
 ) =>
   findInvestigationLock(caller, read, () => Effect.succeed(null)).pipe(
-    Effect.map((found) => delegationRefusalFor(found, requestedRole)),
+    Effect.map(delegationRefusalFor),
   );
 
 const verdict = (outcome: "pass" | "fail"): LedgerItemVerdict => ({
@@ -548,21 +547,17 @@ describe("investigation state machine", () => {
     }),
   );
 
-  it.effect("an agent naming the judge role neither dodges the cap nor starts while it runs", () =>
+  it.effect("a recorded agent-started judge does not dodge the cap", () =>
     Effect.gen(function* () {
       const worker = { origin: "app_owned", role: "worker", status: "running" } as const;
       const agentJudge = { origin: "app_owned", role: "judge", status: "running" } as const;
       const serverJudge = { ...agentJudge, serverJudge: true } as const;
-      const refusal = (subagents: InvestigationChainRecords["subagents"], requestedRole?: string) =>
-        delegationRefusal(
-          threadId,
-          () => Effect.succeed(chainLink(running(), null, subagents)),
-          requestedRole,
-        );
-      // A child the agent started as "judge" is a worker to the cap; the server's judge is not.
+      const refusal = (subagents: InvestigationChainRecords["subagents"]) =>
+        delegationRefusal(threadId, () => Effect.succeed(chainLink(running(), null, subagents)));
+      // delegate_task now refuses an agent-named judge, but one recorded before that still counts
+      // as a worker; the server's judge does not.
       assert.include((yield* refusal([worker, worker, agentJudge])) ?? "", "at most 3");
       assert.strictEqual(yield* refusal([worker, worker, serverJudge, serverJudge]), undefined);
-      assert.include((yield* refusal([], "judge")) ?? "", "runs its judge itself");
     }),
   );
 
