@@ -11,7 +11,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
 import { type DraftId, useComposerDraftStore } from "../../composerDraftStore";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
-import { useProject, useThreadShell } from "../../state/entities";
+import { useProject, useQuietThreadShell, useThreadShell } from "../../state/entities";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { toastManager } from "../ui/toast";
@@ -143,6 +143,17 @@ export function useComposerLoadout(
       }
     },
   };
+}
+
+/**
+ * The loadout an existing thread runs under, resolved against its project's list, for checks a
+ * send makes before the server does. Solo while the thread is unknown, as a deleted pick resolves.
+ * The quiet shell, because a streaming run bumps the full one several times a second.
+ */
+export function useThreadLoadout(environmentId: EnvironmentId, threadRef: ScopedThreadRef | null) {
+  const shell = useQuietThreadShell(threadRef);
+  const scope = useProjectLoadouts(environmentId, shell?.projectId ?? null);
+  return resolveLoadout(scope?.loadouts ?? withSolo([]), shell?.loadout?.id);
 }
 
 /** The loadout a draft's first send creates its thread with, resolved against today's list. */

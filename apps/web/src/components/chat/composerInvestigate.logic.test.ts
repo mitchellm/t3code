@@ -19,7 +19,11 @@ const start = {
   parallelApproaches: EMPTY_INVESTIGATE_DRAFT.parallelApproaches,
 };
 const judged = { id: "judged", reason: null, setBy: "user" } as const;
-const thread: InvestigateSendTarget = { kind: "thread" };
+const noJudge =
+  "Investigate needs a loadout with a judge role to refute each approach, and Solo has none. Pick one in the loadout picker.";
+const thread = (
+  patch: Partial<Extract<InvestigateSendTarget, { kind: "thread" }>> = {},
+): InvestigateSendTarget => ({ kind: "thread", loadoutName: "Judged", hasJudge: true, ...patch });
 const draft = (
   patch: Partial<Extract<InvestigateSendTarget, { kind: "draft" }>> = {},
 ): InvestigateSendTarget => ({
@@ -47,14 +51,21 @@ describe("planInvestigateSend", () => {
   it("leaves Build and Plan to the composer's turn, on a draft and on a thread", () => {
     for (const mode of ["build", "plan"] as const) {
       expect(send(mode, draft())).toEqual({ kind: "turn" });
-      expect(send(mode, thread)).toEqual({ kind: "turn" });
+      expect(send(mode, thread())).toEqual({ kind: "turn" });
     }
   });
 
-  it("starts an investigation on a thread after saving the thread's settings", () => {
-    expect(send("investigate", thread)).toEqual({
+  it("starts an investigation on a thread with a judge after saving the thread's settings", () => {
+    expect(send("investigate", thread())).toEqual({
       kind: "investigation",
       steps: [{ type: "persist-thread-settings" }, { type: "start-investigation", start }],
+    });
+  });
+
+  it("refuses a thread whose loadout has no judge, as the server would", () => {
+    expect(send("investigate", thread({ loadoutName: "Solo", hasJudge: false }))).toEqual({
+      kind: "refused",
+      problem: noJudge,
     });
   });
 
@@ -72,11 +83,7 @@ describe("planInvestigateSend", () => {
   it("refuses a draft before creating anything when nothing could start", () => {
     expect(
       send("investigate", draft({ loadout: null, loadoutName: "Solo", hasJudge: false })),
-    ).toEqual({
-      kind: "refused",
-      problem:
-        "Investigate needs a loadout with a judge role to refute each approach, and Solo has none. Pick one in the loadout picker.",
-    });
+    ).toEqual({ kind: "refused", problem: noJudge });
     expect(send("investigate", draft({ newWorktree: true }))).toMatchObject({ kind: "refused" });
     expect(send("investigate", draft(), { hasAttachments: true })).toMatchObject({
       kind: "refused",
@@ -90,19 +97,20 @@ describe("investigateHint", () => {
     investigateHint({ fields, prompt, target });
 
   it("names what Send would refuse before anything is sent, goal first", () => {
-    const solo = draft({ loadout: null, loadoutName: "Solo", hasJudge: false });
-    expect(hint("", solo)).toEqual({
-      tone: "warning",
-      text: "Write the goal in the message box below. Solved when is how the judge checks it.",
-    });
-    expect(hint(goal, solo)).toEqual({
-      tone: "warning",
-      text: "Investigate needs a loadout with a judge role to refute each approach, and Solo has none. Pick one in the loadout picker.",
-    });
+    for (const solo of [
+      draft({ loadout: null, loadoutName: "Solo", hasJudge: false }),
+      thread({ loadoutName: "Solo", hasJudge: false }),
+    ]) {
+      expect(hint("", solo)).toEqual({
+        tone: "warning",
+        text: "Write the goal above. Solved when is how the judge checks it.",
+      });
+      expect(hint(goal, solo)).toEqual({ tone: "warning", text: noJudge });
+    }
   });
 
   it("says what Send does once it can start", () => {
-    for (const target of [draft(), thread]) {
+    for (const target of [draft(), thread()]) {
       expect(hint(goal, target)).toEqual({
         tone: "info",
         text: "Send starts it. The budget ends it if nothing passes first.",

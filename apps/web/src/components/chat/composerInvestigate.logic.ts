@@ -46,10 +46,7 @@ const parsePositive = (text: string): number | null | "invalid" => {
 export function buildInvestigateStart(draft: InvestigateDraft, prompt: string): InvestigateStart {
   const goal = prompt.trim();
   if (goal === "") {
-    return {
-      ok: false,
-      problem: "Write the goal in the message box below. Solved when is how the judge checks it.",
-    };
+    return { ok: false, problem: "Write the goal above. Solved when is how the judge checks it." };
   }
   const solvedWhen = draft.solvedWhen.trim();
   if (solvedWhen === "") {
@@ -90,9 +87,12 @@ export function clampParallelApproaches(value: number): number {
   );
 }
 
-/** Where the goal is sent: an existing thread, or a draft whose thread the send creates. */
+/**
+ * Where the goal is sent: an existing thread, or a draft whose thread the send creates. Either
+ * way the loadout it runs under is named, since the server refuses one without a judge.
+ */
 export type InvestigateSendTarget =
-  | { readonly kind: "thread" }
+  | { readonly kind: "thread"; readonly loadoutName: string; readonly hasJudge: boolean }
   | {
       readonly kind: "draft";
       readonly loadout: ThreadLoadout | null;
@@ -116,11 +116,16 @@ export type InvestigateSendPlan =
   | { readonly kind: "refused"; readonly problem: string }
   | { readonly kind: "investigation"; readonly steps: ReadonlyArray<InvestigateSendStep> };
 
+const needsJudge = (loadoutName: string): InvestigateSendPlan => ({
+  kind: "refused",
+  problem: `Investigate needs a loadout with a judge role to refute each approach, and ${loadoutName} has none. Pick one in the loadout picker.`,
+});
+
 /**
  * What Send does in each mode. Build and Plan are the composer's ordinary turn. Investigate on a
  * thread saves the thread's settings, since the investigation's kickoff runs under them, then
- * starts it. On a draft it creates the thread and sets its loadout first, and refuses up front
- * what could not start, so a refusal leaves no empty thread behind.
+ * starts it. On a draft it creates the thread and sets its loadout first. Either way it refuses up
+ * front what could not start, so a refusal saves nothing and leaves no empty thread behind.
  */
 export function planInvestigateSend(input: {
   readonly mode: ComposerMode;
@@ -143,14 +148,10 @@ export function planInvestigateSend(input: {
   const begin = { type: "start-investigation", start } as const;
   const { target } = input;
   if (target.kind === "thread") {
+    if (!target.hasJudge) return needsJudge(target.loadoutName);
     return { kind: "investigation", steps: [{ type: "persist-thread-settings" }, begin] };
   }
-  if (!target.hasJudge || target.loadout === null) {
-    return {
-      kind: "refused",
-      problem: `Investigate needs a loadout with a judge role to refute each approach, and ${target.loadoutName} has none. Pick one in the loadout picker.`,
-    };
-  }
+  if (!target.hasJudge || target.loadout === null) return needsJudge(target.loadoutName);
   if (target.newWorktree) {
     return {
       kind: "refused",
