@@ -119,8 +119,8 @@ export type OrchestratorMcpInteractionMode = typeof OrchestratorMcpInteractionMo
 /**
  * The last four are loadout roles: without an explicit target, the child runs on the model the
  * thread's loadout assigns that role, or inherits the thread's own when the loadout has none.
- * `judge` stays in the schema for recorded tasks, but delegate_task refuses it from an agent: the
- * ledger's judge is the only one, and the server starts it.
+ * `judge` stays in the schema so a retry of an accepted delegation still decodes, but delegate_task
+ * refuses it from an agent: the ledger's judge is the only one, and the server starts it.
  */
 export const OrchestratorMcpTaskRole = Schema.Literals([
   "implementation",

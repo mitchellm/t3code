@@ -554,8 +554,7 @@ describe("investigation state machine", () => {
       const serverJudge = { ...agentJudge, serverJudge: true } as const;
       const refusal = (subagents: InvestigationChainRecords["subagents"]) =>
         delegationRefusal(threadId, () => Effect.succeed(chainLink(running(), null, subagents)));
-      // delegate_task now refuses an agent-named judge, but one recorded before that still counts
-      // as a worker; the server's judge does not.
+      // Only the server's judge is exempt from the cap; any other judge-role child counts.
       assert.include((yield* refusal([worker, worker, agentJudge])) ?? "", "at most 3");
       assert.strictEqual(yield* refusal([worker, worker, serverJudge, serverJudge]), undefined);
     }),
