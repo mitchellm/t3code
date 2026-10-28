@@ -890,7 +890,7 @@ describe("loadout context", () => {
         "- planner (the top-level thread, you): superbot-1 on superbot, effort high",
         "- explorer: claude-haiku-5-5 on claudeAgent",
         "- worker: claude-sonnet-5-5 on claudeAgent",
-        "- judge: gpt-6.1-sol on codex, effort high; falls back to claude-opus-5-5 on claudeAgent, effort high",
+        "- judge (run by the server on each gated ledger item): gpt-6.1-sol on codex, effort high; falls back to claude-opus-5-5 on claudeAgent, effort high",
         "How far to fan out is your call. Write the ledger and plan each item, small ones yourself and unclear ones through an explorer; add, split or drop items as you learn. Send independent items to workers in parallel with delegate_task, a role and the item's ledgerItemId, and do small ones yourself. When ledger_read shows requiresJudge, closing an item with ledger_update_item starts the judge, and the item closes when it passes.",
       ].join("\n"),
     );

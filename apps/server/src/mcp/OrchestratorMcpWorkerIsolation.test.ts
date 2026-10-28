@@ -235,7 +235,7 @@ describe("delegate_task default isolation", () => {
 
   it.effect("leaves read-only roles in the shared checkout", () =>
     Effect.gen(function* () {
-      for (const delegation of [{ role: "explorer" }, { role: "judge" }, {}] as const) {
+      for (const delegation of [{ role: "explorer" }, { role: "review" }, {}] as const) {
         const { command } = yield* delegate({ loadoutId: "org", delegation });
         assert.isDefined(command);
         assert.isUndefined(command?.workspaceStrategy);
@@ -310,6 +310,18 @@ describe("delegate_task default isolation", () => {
       });
       assert.isUndefined(command);
       assert.include(JSON.stringify(exit), "Unable to resolve the parent checkout commit");
+    }),
+  );
+});
+
+describe("delegate_task judge role", () => {
+  it.effect("refuses an agent naming the judge role, so the ledger's judge is the only one", () =>
+    Effect.gen(function* () {
+      for (const loadoutId of ["org", null]) {
+        const { command, exit } = yield* delegate({ loadoutId, delegation: { role: "judge" } });
+        assert.isUndefined(command);
+        assert.include(JSON.stringify(exit), "ledger_request_judgement");
+      }
     }),
   );
 });

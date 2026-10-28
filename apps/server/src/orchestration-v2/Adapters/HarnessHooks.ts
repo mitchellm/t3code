@@ -163,8 +163,13 @@ export function formatLoadoutBlock(
   const roles = LOADOUT_ROLE_NAMES.flatMap((name) => {
     const role = loadout.roles[name];
     if (role === undefined) return [];
-    // The planner is not a delegate_task role: it names the model meant for the thread itself.
-    const label = name === "planner" ? "planner (the top-level thread, you)" : name;
+    // Neither is a delegate_task role: the planner is the thread itself, the judge the server's.
+    const label =
+      name === "planner"
+        ? "planner (the top-level thread, you)"
+        : name === "judge"
+          ? "judge (run by the server on each gated ledger item)"
+          : name;
     const fallback =
       role.fallback === undefined ? "" : `; falls back to ${roleModel(role.fallback)}`;
     return [`- ${label}: ${roleModel(role)}${fallback}`];

@@ -2500,6 +2500,17 @@ const make = Effect.gen(function* () {
         operation,
       });
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
+      // Fork: a judge an agent starts would be a second reviewer whose verdict closes nothing.
+      if (
+        input.role === "judge" &&
+        operation !== JUDGE_DELEGATION_OPERATION &&
+        !isRetryOfAcceptedDelegation
+      ) {
+        return yield* failure(
+          "invalid_request",
+          "The judge role is the ledger's own judge, which the server starts. Close the item with evidence or call ledger_request_judgement. For a second opinion of your own, delegate under another role.",
+        );
+      }
       // Fork: the ledger item this task works on is checked before any work starts.
       const ledgerLink = yield* resolveLedgerLink(threadManagement, {
         projectId: parent.thread.projectId,
