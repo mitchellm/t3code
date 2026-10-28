@@ -358,9 +358,11 @@ describe("Stop hook", () => {
       ...ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }),
       onSessionCrons: (crons) => recorded.push(crons),
     });
-    expect(
-      await fire("StopFailure", { ...base, hook_event_name: "StopFailure", error: "server_error" }),
-    ).toEqual({});
+    const failed = { ...base, hook_event_name: "StopFailure", error: "server_error" } as const;
+    // A native subagent's API error ends its own turn, not the thread's, whose crons still stand.
+    expect(await fire("StopFailure", { ...failed, agent_id: "subagent-1" })).toEqual({});
+    expect(recorded).toEqual([]);
+    expect(await fire("StopFailure", failed)).toEqual({});
     expect(recorded).toEqual([[]]);
   });
 

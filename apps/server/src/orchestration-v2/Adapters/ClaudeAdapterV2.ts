@@ -9717,6 +9717,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ) {
             return true;
           }
+          // Fork: a restart kills the CLI's crons too. The goal check mirrors Claude Code's own
+          // goal Stop hook, which does not defer for them.
+          if (
+            options?.forGoalCheck !== true &&
+            sessionWaits.cronTasks(live.nativeThreadId).length > 0
+          ) {
+            return true;
+          }
           const buffered = (yield* Ref.get(wakeBuffers)).get(live.nativeThreadId)?.messages ?? [];
           for (const [taskId, subagent] of yield* Ref.get(sessionSubagentsByTaskId)) {
             if (
@@ -10716,6 +10724,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 return true;
               }
             }
+            // Fork: releasing the session kills the CLI's crons with it.
+            if (sessionWaits.hasAnyCrons()) return true;
             for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
               if (subagent.task.status === "running") {
                 return true;
@@ -10747,7 +10757,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               rosterForNativeThread(
                 yield* Ref.get(pendingBackgroundTasksByNativeThread),
                 nativeThreadId,
-              ).size > 0
+              ).size > 0 ||
+              // Fork: unloading the thread kills its crons too.
+              sessionWaits.cronTasks(nativeThreadId).length > 0
             );
           }),
           ensureThread: Effect.fn("ClaudeAdapterV2.ensureThread")(

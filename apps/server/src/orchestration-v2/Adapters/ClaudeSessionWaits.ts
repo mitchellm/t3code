@@ -16,6 +16,7 @@ export interface ClaudeSessionWaits {
   readonly cronTasks: (
     nativeThreadId: string | null,
   ) => ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
+  readonly hasAnyCrons: () => boolean;
   readonly clear: (nativeThreadId: string) => void;
 }
 
@@ -74,6 +75,8 @@ export function makeClaudeSessionWaits(): ClaudeSessionWaits {
     },
     cronTasks: (nativeThreadId) =>
       nativeThreadId === null ? [] : (cronsByThread.get(nativeThreadId) ?? []),
+    // recordCrons drops a thread whose report is empty, so any entry is a live cron.
+    hasAnyCrons: () => cronsByThread.size > 0,
     clear: (nativeThreadId) => {
       ambientByThread.delete(nativeThreadId);
       cronsByThread.delete(nativeThreadId);

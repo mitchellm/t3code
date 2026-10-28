@@ -455,7 +455,10 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     if (onSessionCrons !== undefined) {
       hooks.StopFailure = [
         matcher(async (input) => {
-          if (input.hook_event_name === "StopFailure") onSessionCrons([]);
+          // A native subagent's failure ends only its own turn.
+          if (input.hook_event_name === "StopFailure" && input.agent_id === undefined) {
+            onSessionCrons([]);
+          }
           return {};
         }),
       ];

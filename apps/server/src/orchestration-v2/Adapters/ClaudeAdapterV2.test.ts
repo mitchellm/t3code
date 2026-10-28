@@ -8251,6 +8251,74 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  it.effect("keeps the session loaded while a cron is recorded, and lets it go once none is", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const hasPendingWorkForThread = harness.runtime.hasPendingBackgroundWorkForThread;
+        if (hasPendingWorkForThread === undefined) {
+          throw new Error("Claude adapter runtime must expose hasPendingBackgroundWorkForThread.");
+        }
+        yield* startLedgerTurn(harness, "attempt-claude-cron-holds-session");
+        yield* fireHook(harness, "Stop", stopReporting([SESSION_CRON]));
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* harness.awaitTerminal(1);
+        // Idle release checks the session and thread unload checks the thread; releasing either
+        // kills the CLI, and its cron with it.
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        assert.isTrue(yield* hasPendingWorkForThread(harness.providerThread));
+
+        yield* startLedgerTurn(harness, "attempt-claude-cron-holds-session-2", 2);
+        yield* fireHook(harness, "Stop", stopReporting([]));
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000353", result: "Checked it." }),
+        );
+        yield* harness.awaitTerminal(2);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        assert.isFalse(yield* hasPendingWorkForThread(harness.providerThread));
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("refuses a selection change that would restart the CLI while a cron is recorded", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* startLedgerTurn(harness, "attempt-claude-cron-blocks-restart");
+        yield* fireHook(harness, "Stop", stopReporting([SESSION_CRON]));
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* harness.awaitTerminal(1);
+        const refused = yield* harness.runtime
+          .startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-claude-cron-blocks-restart-2"),
+              text: "Switch models.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              modelSelection: CLAUDE_TEST_RESTART_MODEL_SELECTION,
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.equal(
+          makeProviderFailure({ cause: refused, class: "provider_error" }).message,
+          new ClaudeAdapterV2.ClaudeBackgroundWorkBlocksQueryReplacementError().message,
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("keeps a running Claude monitor typed after many newer monitors end", () =>
     Effect.scoped(
       Effect.gen(function* () {

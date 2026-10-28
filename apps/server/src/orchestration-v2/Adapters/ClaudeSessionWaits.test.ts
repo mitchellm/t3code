@@ -66,8 +66,11 @@ describe("session crons", () => {
     // A fired one-shot or a deleted cron is gone from the next stop's list.
     waits.recordCrons("native", [{ ...cron, id: "loop", recurring: true }]);
     expect(waits.cronTasks("native").map(({ taskId }) => taskId)).toEqual(["cron:loop"]);
+    // Releasing the session would kill the CLI and its crons, so any thread's cron holds it.
+    expect(waits.hasAnyCrons()).toBe(true);
     waits.recordCrons("native", []);
     expect(waits.cronTasks("native")).toEqual([]);
+    expect(waits.hasAnyCrons()).toBe(false);
   });
 
   it("forgets crons and ambient tasks when the session's CLI process is replaced", () => {
