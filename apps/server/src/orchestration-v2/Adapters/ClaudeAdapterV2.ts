@@ -569,7 +569,7 @@ export class ClaudeBackgroundWorkBlocksQueryReplacementError extends Schema.Tagg
   {},
 ) {
   override get message(): string {
-    return "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
+    return "Claude is still running background agents, commands or scheduled wakeups, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
   }
 }
 
@@ -10760,7 +10760,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 yield* Ref.get(pendingBackgroundTasksByNativeThread),
                 nativeThreadId,
               ).size > 0 ||
-              // Fork: unloading the thread kills its crons too.
+              // Fork: a listed cron keeps the run's consumer open and Stop's settle waiting, as a shell does.
               sessionWaits.cronTasks(nativeThreadId).length > 0
             );
           }),
