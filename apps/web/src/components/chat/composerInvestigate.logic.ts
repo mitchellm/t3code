@@ -5,8 +5,10 @@ import {
   INVESTIGATION_MIN_PARALLEL_APPROACHES,
   INVESTIGATION_SOLVED_WHEN_MAX_LENGTH,
   type InvestigationBudget,
+  type Loadout,
   type ThreadLoadout,
 } from "@t3tools/contracts";
+import { loadoutRequiresJudge } from "@t3tools/shared/loadouts";
 
 import type { ComposerMode } from "./composerMode.logic";
 
@@ -87,17 +89,47 @@ export function clampParallelApproaches(value: number): number {
   );
 }
 
+/** Whether the loadout's judge could run, as the server decides it when the investigation starts. */
+export type InvestigateJudge =
+  | { readonly kind: "none" }
+  | { readonly kind: "off"; readonly provider: string }
+  | { readonly kind: "ready" };
+
+/** The composer's provider list: registered instances, with project enablement applied. */
+export type InvestigateProviders = ReadonlyArray<{
+  readonly instanceId: string;
+  readonly displayName: string;
+  readonly enabled: boolean;
+}>;
+
+/**
+ * The server's gate: one of the judge's models must be on a registered provider enabled for the
+ * project. Before the list arrives nothing is known to be off, so the server is left to decide.
+ */
+export function investigateJudge(
+  loadout: Loadout,
+  providers: InvestigateProviders,
+): InvestigateJudge {
+  const judge = loadout.roles.judge;
+  if (judge === undefined) return { kind: "none" };
+  const canRun = (instanceId: string) =>
+    providers.some((provider) => provider.instanceId === instanceId && provider.enabled);
+  if (providers.length === 0 || loadoutRequiresJudge(loadout, canRun)) return { kind: "ready" };
+  const own = providers.find(({ instanceId }) => instanceId === judge.instanceId);
+  return { kind: "off", provider: own?.displayName ?? judge.instanceId };
+}
+
 /**
  * Where the goal is sent: an existing thread, or a draft whose thread the send creates. Either
- * way the loadout it runs under is named, since the server refuses one without a judge.
+ * way the loadout it runs under is named, since the server refuses one whose judge cannot run.
  */
 export type InvestigateSendTarget =
-  | { readonly kind: "thread"; readonly loadoutName: string; readonly hasJudge: boolean }
+  | { readonly kind: "thread"; readonly loadoutName: string; readonly judge: InvestigateJudge }
   | {
       readonly kind: "draft";
       readonly loadout: ThreadLoadout | null;
       readonly loadoutName: string;
-      readonly hasJudge: boolean;
+      readonly judge: InvestigateJudge;
       /** The draft is set to start in a new worktree, which only a first message prepares. */
       readonly newWorktree: boolean;
     };
@@ -120,6 +152,20 @@ const needsJudge = (loadoutName: string): InvestigateSendPlan => ({
   kind: "refused",
   problem: `Investigate needs a loadout with a judge role to refute each approach, and ${loadoutName} has none. Pick one in the loadout picker.`,
 });
+
+const judgeRefusal = (target: InvestigateSendTarget): InvestigateSendPlan | null => {
+  switch (target.judge.kind) {
+    case "none":
+      return needsJudge(target.loadoutName);
+    case "off":
+      return {
+        kind: "refused",
+        problem: `${target.loadoutName}'s judge runs on ${target.judge.provider}, which is off for this project. Enable it in Settings → Providers or pick another loadout.`,
+      };
+    case "ready":
+      return null;
+  }
+};
 
 /**
  * What Send does in each mode. Build and Plan are the composer's ordinary turn. Investigate on a
@@ -147,11 +193,12 @@ export function planInvestigateSend(input: {
   const { ok: _ok, ...start } = built;
   const begin = { type: "start-investigation", start } as const;
   const { target } = input;
+  const refused = judgeRefusal(target);
+  if (refused !== null) return refused;
   if (target.kind === "thread") {
-    if (!target.hasJudge) return needsJudge(target.loadoutName);
     return { kind: "investigation", steps: [{ type: "persist-thread-settings" }, begin] };
   }
-  if (!target.hasJudge || target.loadout === null) return needsJudge(target.loadoutName);
+  if (target.loadout === null) return needsJudge(target.loadoutName);
   if (target.newWorktree) {
     return {
       kind: "refused",

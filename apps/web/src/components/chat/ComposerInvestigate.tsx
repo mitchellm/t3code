@@ -17,7 +17,6 @@ import {
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
-import { loadoutHasJudge } from "@t3tools/shared/loadouts";
 import { AsyncResult } from "effect/reactivity";
 import { useEffect, useId } from "react";
 import { create } from "zustand";
@@ -45,6 +44,8 @@ import {
   EMPTY_INVESTIGATE_DRAFT,
   type InvestigateDraft,
   investigateHint,
+  investigateJudge,
+  type InvestigateProviders,
   type InvestigateSendStep,
   planInvestigateSend,
   runInvestigateSteps,
@@ -94,7 +95,7 @@ export const useCanInvestigate = (environmentId: EnvironmentId) =>
  */
 export function ComposerInvestigateGoalLabel({ focusGoal }: { focusGoal: () => void }) {
   return (
-    <div className="pb-1.5">
+    <div className="pb-1">
       <Label onClick={focusGoal}>Goal</Label>
     </div>
   );
@@ -107,6 +108,7 @@ export function ComposerInvestigateFields({
   interactionMode,
   prompt,
   draftId,
+  providers,
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
@@ -114,6 +116,7 @@ export function ComposerInvestigateFields({
   prompt: string;
   /** Set on a new chat, whose first send creates the thread under its loadout. */
   draftId: DraftId | null;
+  providers: InvestigateProviders;
 }) {
   const draft = useInvestigateDraft(environmentId, threadId);
   const id = useId();
@@ -144,13 +147,13 @@ export function ComposerInvestigateFields({
         ? {
             kind: "thread",
             loadoutName: threadLoadout.name,
-            hasJudge: loadoutHasJudge(threadLoadout),
+            judge: investigateJudge(threadLoadout, providers),
           }
         : {
             kind: "draft",
             loadout: draftLoadout.threadLoadout,
             loadoutName: draftLoadout.active.name,
-            hasJudge: loadoutHasJudge(draftLoadout.active),
+            judge: investigateJudge(draftLoadout.active, providers),
             newWorktree: draftSession.envMode === "worktree" && !draftSession.worktreePath,
           },
   });
@@ -235,6 +238,7 @@ export interface InvestigateSendContext {
   readonly runtimeMode: RuntimeMode;
   readonly sendEnvMode: DraftThreadEnvMode;
   readonly localCheckoutBranchMismatch: { readonly currentBranch: string } | null;
+  readonly providerInstanceEntries: InvestigateProviders;
   readonly composerRef: ComposerHandleRef;
   readonly composerDraftTarget: ComposerThreadTarget;
   readonly promptRef: { current: string };
@@ -269,9 +273,15 @@ export function useComposerInvestigateSend(context: InvestigateSendContext) {
     environmentId,
     isLocalDraftThread ? context.draftId : null,
   );
+  // Outside Investigate a send never reads the thread's loadout, so it is not watched.
+  const investigating = useInvestigateDrafts(
+    (state) =>
+      activeThread !== undefined &&
+      state.drafts[threadKey(environmentId, activeThread.id)] !== undefined,
+  );
   const threadLoadout = useThreadLoadout(
     environmentId,
-    context.isServerThread && activeThread !== undefined
+    investigating && context.isServerThread && activeThread !== undefined
       ? scopeThreadRef(environmentId, activeThread.id)
       : null,
   );
@@ -303,13 +313,13 @@ export function useComposerInvestigateSend(context: InvestigateSendContext) {
           ? {
               kind: "thread",
               loadoutName: threadLoadout.name,
-              hasJudge: loadoutHasJudge(threadLoadout),
+              judge: investigateJudge(threadLoadout, context.providerInstanceEntries),
             }
           : {
               kind: "draft",
               loadout: draftLoadout.threadLoadout,
               loadoutName: draftLoadout.active.name,
-              hasJudge: loadoutHasJudge(draftLoadout.active),
+              judge: investigateJudge(draftLoadout.active, context.providerInstanceEntries),
               newWorktree: context.sendEnvMode === "worktree" && !activeThread.worktreePath,
             },
     });

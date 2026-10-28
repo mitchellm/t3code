@@ -3796,7 +3796,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <ComposerPromptEditor
                     draftKey={composerDraftTargetKey}
                     // Switching threads lands focus here, so the label names the thread.
-                    ariaLabel={activeThread ? `Message ${activeThread.title}` : "Message"}
+                    ariaLabel={
+                      // Fork: matches the visible label while the editor holds the goal.
+                      editorHoldsInvestigateGoal
+                        ? "Goal"
+                        : activeThread
+                          ? `Message ${activeThread.title}`
+                          : "Message"
+                    }
                     suggestionListId={composerSuggestionListId}
                     activeSuggestionId={
                       composerSuggestionListVisible && activeComposerMenuItem
@@ -3901,6 +3908,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 interactionMode={interactionMode}
                 prompt={prompt}
                 draftId={routeKind === "draft" ? draftId : null}
+                providers={providerInstanceEntries}
               />
             </div>
 

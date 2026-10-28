@@ -1,3 +1,4 @@
+import { type Loadout, type LoadoutRole, ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -5,6 +6,7 @@ import {
   clampParallelApproaches,
   EMPTY_INVESTIGATE_DRAFT,
   investigateHint,
+  investigateJudge,
   type InvestigateSendTarget,
   planInvestigateSend,
   runInvestigateSteps,
@@ -21,16 +23,23 @@ const start = {
 const judged = { id: "judged", reason: null, setBy: "user" } as const;
 const noJudge =
   "Investigate needs a loadout with a judge role to refute each approach, and Solo has none. Pick one in the loadout picker.";
+const soloJudge = { loadoutName: "Solo", judge: { kind: "none" } } as const;
+const judgeOff = { judge: { kind: "off", provider: "Codex" } } as const;
 const thread = (
   patch: Partial<Extract<InvestigateSendTarget, { kind: "thread" }>> = {},
-): InvestigateSendTarget => ({ kind: "thread", loadoutName: "Judged", hasJudge: true, ...patch });
+): InvestigateSendTarget => ({
+  kind: "thread",
+  loadoutName: "Judged",
+  judge: { kind: "ready" },
+  ...patch,
+});
 const draft = (
   patch: Partial<Extract<InvestigateSendTarget, { kind: "draft" }>> = {},
 ): InvestigateSendTarget => ({
   kind: "draft",
   loadout: judged,
   loadoutName: "Judged",
-  hasJudge: true,
+  judge: { kind: "ready" },
   newWorktree: false,
   ...patch,
 });
@@ -63,10 +72,17 @@ describe("planInvestigateSend", () => {
   });
 
   it("refuses a thread whose loadout has no judge, as the server would", () => {
-    expect(send("investigate", thread({ loadoutName: "Solo", hasJudge: false }))).toEqual({
-      kind: "refused",
-      problem: noJudge,
-    });
+    expect(send("investigate", thread(soloJudge))).toEqual({ kind: "refused", problem: noJudge });
+  });
+
+  it("refuses a thread or a draft whose judge's provider is off for the project", () => {
+    for (const target of [thread(judgeOff), draft(judgeOff)]) {
+      expect(send("investigate", target)).toEqual({
+        kind: "refused",
+        problem:
+          "Judged's judge runs on Codex, which is off for this project. Enable it in Settings → Providers or pick another loadout.",
+      });
+    }
   });
 
   it("creates a draft's thread under its loadout before starting the investigation", () => {
@@ -81,9 +97,10 @@ describe("planInvestigateSend", () => {
   });
 
   it("refuses a draft before creating anything when nothing could start", () => {
-    expect(
-      send("investigate", draft({ loadout: null, loadoutName: "Solo", hasJudge: false })),
-    ).toEqual({ kind: "refused", problem: noJudge });
+    expect(send("investigate", draft({ loadout: null, ...soloJudge }))).toEqual({
+      kind: "refused",
+      problem: noJudge,
+    });
     expect(send("investigate", draft({ newWorktree: true }))).toMatchObject({ kind: "refused" });
     expect(send("investigate", draft(), { hasAttachments: true })).toMatchObject({
       kind: "refused",
@@ -97,10 +114,7 @@ describe("investigateHint", () => {
     investigateHint({ fields, prompt, target });
 
   it("names what Send would refuse before anything is sent, goal first", () => {
-    for (const solo of [
-      draft({ loadout: null, loadoutName: "Solo", hasJudge: false }),
-      thread({ loadoutName: "Solo", hasJudge: false }),
-    ]) {
+    for (const solo of [draft({ loadout: null, ...soloJudge }), thread(soloJudge)]) {
       expect(hint("", solo)).toEqual({
         tone: "warning",
         text: "Write the goal above. Solved when is how the judge checks it.",
@@ -116,6 +130,56 @@ describe("investigateHint", () => {
         text: "Send starts it. The budget ends it if nothing passes first.",
       });
     }
+  });
+});
+
+describe("investigateJudge", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const claude = ProviderInstanceId.make("claudeAgent");
+  const loadout = (judge?: LoadoutRole): Loadout => ({
+    id: "judged",
+    name: "Judged",
+    description: "",
+    roles: judge === undefined ? {} : { judge },
+  });
+  const providers = [
+    { instanceId: codex, displayName: "Codex", enabled: false },
+    { instanceId: claude, displayName: "Claude", enabled: true },
+  ];
+
+  it("runs a judge when its model or fallback is on a provider enabled for the project", () => {
+    expect(investigateJudge(loadout(), providers)).toEqual({ kind: "none" });
+    expect(investigateJudge(loadout({ instanceId: claude, model: "opus" }), providers)).toEqual({
+      kind: "ready",
+    });
+    expect(
+      investigateJudge(
+        loadout({
+          instanceId: codex,
+          model: "gpt",
+          fallback: { instanceId: claude, model: "opus" },
+        }),
+        providers,
+      ),
+    ).toEqual({ kind: "ready" });
+  });
+
+  it("names the judge's own provider when neither it nor the fallback can run", () => {
+    expect(investigateJudge(loadout({ instanceId: codex, model: "gpt" }), providers)).toEqual({
+      kind: "off",
+      provider: "Codex",
+    });
+    const gone = ProviderInstanceId.make("gone");
+    expect(investigateJudge(loadout({ instanceId: gone, model: "gpt" }), providers)).toEqual({
+      kind: "off",
+      provider: "gone",
+    });
+  });
+
+  it("refuses nothing on provider grounds before the provider list arrives", () => {
+    expect(investigateJudge(loadout({ instanceId: codex, model: "gpt" }), [])).toEqual({
+      kind: "ready",
+    });
   });
 });
 
