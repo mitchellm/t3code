@@ -219,23 +219,31 @@ function LoadoutEditor(props: {
           <span className="shrink-0 text-muted-foreground text-xs">Built-in</span>
         ) : null}
         <Button
-          size="icon-sm"
+          size="sm"
           variant="ghost"
           aria-label={`Duplicate ${loadout.name}`}
           onClick={props.onDuplicate}
         >
           <CopyIcon className="size-4" />
+          Duplicate
         </Button>
         {/* Solo is the way back to no roles, so it stays. */}
         {loadout.id === SOLO_LOADOUT_ID ? null : (
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            aria-label={`Remove ${loadout.name}`}
-            onClick={props.onRemove}
-          >
-            <Trash2Icon className="size-4" />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label={`Remove ${loadout.name}`}
+                  onClick={props.onRemove}
+                >
+                  <Trash2Icon className="size-4" />
+                </Button>
+              }
+            />
+            <TooltipPopup side="top">Remove</TooltipPopup>
+          </Tooltip>
         )}
       </div>
       <Input
