@@ -11,7 +11,7 @@ import * as Predicate from "effect/Predicate";
 
 import { resolveT3McpToolId } from "./t3McpToolPresentation.ts";
 
-const BACKGROUND_TURN_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
+export const BACKGROUND_TURN_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
   "command_execution",
   "dynamic_tool",
   "subagent",
@@ -287,11 +287,16 @@ export function derivePendingBackgroundWork(input: {
   return Array.from(byTaskId.values());
 }
 
+/** A watch the thread can see wakes it when checks or reviews land. */
+export const isWatchedPullRequest = (
+  link: Pick<PendingBackgroundWorkPullRequest, "source" | "watch">,
+): boolean => link.watch !== undefined && link.source !== "stack-dismissed";
+
 function pullRequestWatchTasks(
   pullRequests: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined,
 ): Array<PendingBackgroundWorkTask> {
   return (pullRequests ?? []).flatMap((link) =>
-    link.watch === undefined || link.source === "stack-dismissed"
+    !isWatchedPullRequest(link)
       ? []
       : [
           {

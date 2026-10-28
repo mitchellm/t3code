@@ -15,6 +15,7 @@ import type {
   ProviderAdapterV2HarnessPort,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import { loadoutStructure, resolveLoadout } from "@t3tools/shared/loadouts";
+import { isWatchedPullRequest } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Effect from "effect/Effect";
 
 import type * as ProjectionStore from "./ProjectionStore.ts";
@@ -56,7 +57,7 @@ export function makeHarnessThreadReads(
           turnItemTypes: ["run_interrupt_request"],
         })
         .pipe(
-          Effect.map(({ ledger, subagents, runs, turnItems }) => {
+          Effect.map(({ thread, ledger, subagents, runs, turnItems }) => {
             const liveRunIds = new Set(
               runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).map(({ id }) => id),
             );
@@ -72,6 +73,7 @@ export function makeHarnessThreadReads(
               delegatedWorkActive: subagents.some((subagent) =>
                 isOrchestrationV2WorkActive(subagent.status),
               ),
+              pullRequestWatched: (thread.pullRequests ?? []).some(isWatchedPullRequest),
             };
           }),
         ),

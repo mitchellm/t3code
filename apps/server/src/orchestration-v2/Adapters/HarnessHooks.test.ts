@@ -71,6 +71,7 @@ const state = (
   ledger,
   userInterrupted: false,
   delegatedWorkActive: false,
+  pullRequestWatched: false,
   ...extra,
 });
 
@@ -292,6 +293,98 @@ describe("Stop hook", () => {
     });
     expect(await fire("Stop", waiting)).toEqual({});
     expect((await fire("Stop", stop(false))).decision).toBe("block");
+  });
+
+  it.each([
+    [
+      "a background shell command",
+      {
+        id: "b1",
+        type: "shell",
+        status: "running",
+        description: "Build the map",
+        command: "pwsh ./build-map.ps1",
+      },
+    ],
+    ["a Monitor", { id: "m1", type: "monitor", status: "running", description: "Watch the log" }],
+    ["a workflow", { id: "w1", type: "workflow", status: "pending", description: "spec" }],
+  ])("allows the stop while %s will wake the session", async (_case, task) => {
+    const { fire } = make(ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }));
+    expect(await fire("Stop", stop(false, { background_tasks: [task] }))).toEqual({});
+  });
+
+  it("allows the stop while a cron will wake the session", async () => {
+    const { fire } = make(ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }));
+    const scheduled = stop(false, {
+      background_tasks: [],
+      session_crons: [{ id: "c1", schedule: "30 14 * * *", recurring: false, prompt: "Check it" }],
+    });
+    expect(await fire("Stop", scheduled)).toEqual({});
+  });
+
+  it("still blocks when only an ambient watcher is in flight", async () => {
+    // The CLI's stop list carries no ambient flag; only its task frames do, so the port answers.
+    const { fire } = make({
+      ...ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }),
+      isAmbientTask: (taskId) => taskId === "dream",
+    });
+    const dreaming = (tasks: ReadonlyArray<Record<string, unknown>>) =>
+      stop(false, { background_tasks: tasks, session_crons: [] });
+    const dream = { id: "dream", type: "dream", status: "running", description: "Memory" };
+    expect((await fire("Stop", dreaming([dream]))).decision).toBe("block");
+    const build = { id: "b1", type: "shell", status: "running", description: "Build" };
+    expect(await fire("Stop", dreaming([dream, build]))).toEqual({});
+  });
+
+  it("records the crons every stop reports, so the follow-up waits on them too", async () => {
+    const recorded: Array<ReadonlyArray<{ readonly id: string }>> = [];
+    const current: Current = { value: state(ledgerOf([item("L1", "open")])) };
+    const { fire } = make({
+      ...ledgerReader(current),
+      onSessionCrons: (crons) => recorded.push(crons),
+    });
+    const cron = { id: "c1", schedule: "30 14 * * *", recurring: false, prompt: "Check it" };
+    await fire("Stop", stop(false, { session_crons: [cron] }));
+    // Recorded on a stop the hook stands aside from too, and an older CLI's missing list is none.
+    current.value = state(null);
+    await fire("Stop", stop(false, { session_crons: [] }));
+    await fire("Stop", stop(false));
+    expect(recorded).toEqual([[cron], [], []]);
+  });
+
+  it("forgets the crons when a turn ends through StopFailure, which no Stop follows", async () => {
+    const recorded: Array<ReadonlyArray<unknown>> = [];
+    const { fire } = make({
+      ...ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }),
+      onSessionCrons: (crons) => recorded.push(crons),
+    });
+    const failed = { ...base, hook_event_name: "StopFailure", error: "server_error" } as const;
+    // A native subagent's API error ends its own turn, not the thread's, whose crons still stand.
+    expect(await fire("StopFailure", { ...failed, agent_id: "subagent-1" })).toEqual({});
+    expect(recorded).toEqual([]);
+    expect(await fire("StopFailure", failed)).toEqual({});
+    expect(recorded).toEqual([[]]);
+  });
+
+  it("allows the stop while a watched pull request will wake the thread", async () => {
+    const { fire } = make(
+      ledgerReader({ value: state(ledgerOf([item("L1", "open")]), { pullRequestWatched: true }) }),
+    );
+    expect(await fire("Stop", stop(false))).toEqual({});
+  });
+
+  it("tells a blocked agent how to wait on background work, replans included", async () => {
+    const { fire } = make(ledgerReader({ value: state(ledgerOf([item("L1", "open")])) }));
+    const reasons: Array<string> = [];
+    for (let index = 0; index <= HARNESS_STOP_BLOCK_LIMIT; index++) {
+      reasons.push(String((await fire("Stop", stop(index > 0))).reason));
+    }
+    expect(reasons.at(-1)).toContain("replan");
+    for (const reason of reasons) {
+      expect(reason).toContain(
+        "If you are waiting on background work, call t3_background_wait with its task id and end your turn.",
+      );
+    }
   });
 
   it("never throws: a failed read allows the stop and is reported", async () => {

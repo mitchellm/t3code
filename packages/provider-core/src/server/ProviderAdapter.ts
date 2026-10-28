@@ -479,6 +479,8 @@ export interface ProviderAdapterV2HarnessLedgerState {
   readonly userInterrupted: boolean;
   /** A delegated task is still working, so the agent is legitimately waiting. */
   readonly delegatedWorkActive: boolean;
+  /** A watched pull request will wake the thread, so the agent may be waiting on it. */
+  readonly pullRequestWatched: boolean;
 }
 
 export interface ProviderAdapterV2SteerInput {

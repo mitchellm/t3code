@@ -8,6 +8,7 @@ import type {
   HookInput,
   HookJSONOutput,
   Options as ClaudeQueryOptions,
+  SessionCronSummary,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   LOADOUT_ROLE_NAMES,
@@ -88,6 +89,10 @@ export interface HarnessHookPort {
    * managers rule and plan before editing bind only the top level.
    */
   readonly delegatedChild: boolean;
+  /** The Stop hook's task list omits the CLI's ambient flag, which only its task frames carry. */
+  readonly isAmbientTask?: (taskId: string) => boolean;
+  /** Each stop's crons, so the between-turn follow-up waits on them too. */
+  readonly onSessionCrons?: (crons: ReadonlyArray<SessionCronSummary>) => void;
   readonly onHookError: (cause: unknown) => void;
 }
 
@@ -193,10 +198,15 @@ export const LOADOUT_WITHDRAWN =
 export const loadoutContext = (block: string | undefined, shownBefore: boolean) =>
   block ?? (shownBefore ? LOADOUT_WITHDRAWN : undefined);
 
+// A blocked agent may think it is waiting when the CLI sees nothing that will wake it. Marking the
+// wait is also what makes the between-turn follow-up stand aside once the stop is allowed.
+const STOP_WAIT_HINT =
+  "If you are waiting on background work, call t3_background_wait with its task id and end your turn.";
+
 function stopReason(open: ReadonlyArray<LedgerItem>): string {
   const named = open.slice(0, STOP_ITEMS_SHOWN).map(itemLabel).join(", ");
   const hidden = open.length - STOP_ITEMS_SHOWN;
-  return `Ledger has ${open.length} open ${open.length === 1 ? "item" : "items"}: ${named}${hidden > 0 ? ` and ${hidden} more` : ""}; continue, close with evidence, or drop with a reason.`;
+  return `Ledger has ${open.length} open ${open.length === 1 ? "item" : "items"}: ${named}${hidden > 0 ? ` and ${hidden} more` : ""}; continue, close with evidence, or drop with a reason. ${STOP_WAIT_HINT}`;
 }
 
 /** What counts as progress: any item changing status, evidence or drop reason. */
@@ -267,9 +277,16 @@ function isInsideDirectory(filePath: string, directory: string): boolean {
   );
 }
 
-// The SDK reports in-flight background work at a stop; a subagent there will wake the agent.
-const waitsOnBackgroundSubagent = (input: Extract<HookInput, { hook_event_name: "Stop" }>) =>
-  (input.background_tasks ?? []).some((task) => task.type === "subagent");
+// Fork: each non-ambient task the SDK lists here wakes the session when it ends, and a cron fires a
+// prompt, so blocking the stop only burns blocks to the ceiling. T3's awaited mark is not required:
+// the CLI wakes either way. A dev server left running lets the agent stop too; the between-turn
+// follow-up applies the awaited rule and covers it.
+const waitsOnBackgroundWork = (
+  input: Extract<HookInput, { hook_event_name: "Stop" }>,
+  isAmbientTask: ((taskId: string) => boolean) | undefined,
+) =>
+  (input.session_crons ?? []).length > 0 ||
+  (input.background_tasks ?? []).some((task) => isAmbientTask?.(task.id) !== true);
 
 export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | undefined {
   const { readPinnedRules, readLedgerState, readThreadPolicy } = port;
@@ -381,7 +398,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     let lastFingerprint: string | undefined;
     const judgeReplanned = new Set<string>();
     // Giving up only allows the stop: the run then completes with items open, and
-    // LedgerAutoContinue posts the stop notice and unread mark for it, as for any provider.
+    // LedgerAutoContinue decides the follow-up as for any provider.
     hooks.Stop = [
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "Stop") return {};
@@ -391,9 +408,19 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           promptBlocks = 0;
           judgeReplanned.clear();
         }
-        if (waitsOnBackgroundSubagent(input)) return {};
+        // First, so every stop's report replaces the last, whatever this hook decides.
+        port.onSessionCrons?.(input.session_crons ?? []);
+        if (waitsOnBackgroundWork(input, port.isAmbientTask)) return {};
         const state = await readLedgerState(signal);
-        if (state === undefined || state.userInterrupted || state.delegatedWorkActive) return {};
+        // A watched pull request wakes the thread when checks or reviews land.
+        if (
+          state === undefined ||
+          state.userInterrupted ||
+          state.delegatedWorkActive ||
+          state.pullRequestWatched
+        ) {
+          return {};
+        }
         const ledger = activeLedger(state);
         if (ledger === undefined) return {};
         const open = openItems(ledger);
@@ -420,10 +447,25 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         if (nudge.reason === "judge") for (const item of nudge.items) judgeReplanned.add(item.id);
         return {
           decision: "block",
-          reason: ledgerReplanText({ ledger, reason: nudge.reason, items: nudge.items }),
+          reason: `${ledgerReplanText({ ledger, reason: nudge.reason, items: nudge.items })}\n\n${STOP_WAIT_HINT}`,
         };
       }),
     ];
+
+    // An API error or usage limit ends the turn through StopFailure, which carries no crons and no
+    // Stop follows, so the last report would outlive a one-shot that already fired.
+    const { onSessionCrons } = port;
+    if (onSessionCrons !== undefined) {
+      hooks.StopFailure = [
+        matcher(async (input) => {
+          // A native subagent's failure ends only its own turn.
+          if (input.hook_event_name === "StopFailure" && input.agent_id === undefined) {
+            onSessionCrons([]);
+          }
+          return {};
+        }),
+      ];
+    }
 
     // Best effort: the SDK has no PreCompact output field, and whether Claude Code folds this
     // message into the compaction instructions is unverified. SessionStart(compact) above is the

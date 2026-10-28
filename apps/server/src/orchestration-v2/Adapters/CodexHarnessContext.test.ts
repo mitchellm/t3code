@@ -46,6 +46,7 @@ const port = (loadout: ProviderAdapterV2HarnessLoadout | null): ProviderAdapterV
     ledger: null,
     userInterrupted: false,
     delegatedWorkActive: false,
+    pullRequestWatched: false,
   }),
   readThreadPolicy: Effect.die("not read for the turn context"),
   readLoadout: Effect.succeed(loadout),

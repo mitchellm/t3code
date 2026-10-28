@@ -8,6 +8,7 @@ import * as ClaudeSdk from "@anthropic-ai/claude-agent-sdk";
 import { beforeEach, vi } from "vite-plus/test";
 
 import type {
+  HookInput,
   Query as ClaudeQuery,
   SDKMessage,
   SDKResultMessage,
@@ -32,6 +33,8 @@ import {
   CheckpointId,
   ClaudeSettings,
   EnvironmentId,
+  LedgerId,
+  LedgerItemId,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -8042,6 +8045,271 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ["dev-server", false],
             [WAKE_TASK_ID, false],
           ],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  const SESSION_CRON = {
+    id: "c1",
+    schedule: "30 14 27 10 *",
+    recurring: false,
+    prompt: "Check it",
+  };
+
+  /** A turn on a thread whose ledger has an open item, so the Stop hook has something to block. */
+  const startLedgerTurn = Effect.fn("startLedgerTurn")(function* (
+    harness: Effect.Success<typeof makeWakeHarness>,
+    attempt: string,
+    providerTurnOrdinal = 1,
+  ) {
+    const now = yield* DateTime.now;
+    const attemptId = RunAttemptId.make(attempt);
+    yield* harness.runtime.startTurn({
+      ...makeClaudeTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now,
+        attemptId,
+        text: "Build the map and check back later.",
+        attachments: [],
+        providerTurnOrdinal,
+        ...(providerTurnOrdinal > 1 ? { nativeThreadHasTurns: true } : {}),
+      }),
+      harness: {
+        readLedgerState: Effect.succeed({
+          ledger: {
+            id: LedgerId.make("ledger:waits"),
+            threadId: harness.threadId,
+            title: "Ship the map",
+            startState: "",
+            checkpoints: [],
+            winConditions: [],
+            items: [
+              {
+                id: LedgerItemId.make("L1"),
+                title: "Build the map",
+                acceptance: "The map renders",
+                status: "open",
+                evidence: null,
+                dropReason: null,
+                verdict: null,
+                createdAt: now,
+                updatedAt: now,
+                closedAt: null,
+              },
+            ],
+            createdAt: now,
+            updatedAt: now,
+            closedAt: null,
+          },
+          userInterrupted: false,
+          delegatedWorkActive: false,
+          pullRequestWatched: false,
+        }),
+        readThreadPolicy: Effect.die("not read by a stop"),
+        readLoadout: Effect.succeed(null),
+      },
+    });
+    return (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+      driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+      nativeTurnId: `turn:${attemptId}`,
+    });
+  });
+
+  const fireHook = (
+    harness: Effect.Success<typeof makeWakeHarness>,
+    event: "Stop" | "StopFailure",
+    input: HookInput,
+  ) => {
+    const hook = harness.getOpenedOptions()?.hooks?.[event]?.[0]?.hooks[0];
+    if (hook === undefined) throw new Error(`The harness must register a ${event} hook.`);
+    return Effect.promise(() => hook(input, undefined, { signal: new AbortController().signal }));
+  };
+
+  const hookBase = { session_id: WAKE_NATIVE_SESSION, transcript_path: "transcript", cwd: "/w" };
+
+  const stopReporting = (
+    sessionCrons: ReadonlyArray<typeof SESSION_CRON>,
+    backgroundTasks: ReadonlyArray<{
+      readonly id: string;
+      readonly type: string;
+      readonly status: string;
+      readonly description: string;
+    }> = [],
+  ): HookInput => ({
+    ...hookBase,
+    hook_event_name: "Stop",
+    stop_hook_active: false,
+    background_tasks: [...backgroundTasks],
+    session_crons: [...sessionCrons],
+  });
+
+  /** The roster the adapter emitted with a turn's end, which comes just before its terminal. */
+  const rosterAtTerminal = (harness: Effect.Success<typeof makeWakeHarness>, index: number) => {
+    const terminal = harness.terminalEvents()[index];
+    if (terminal === undefined) throw new Error(`No terminal event at index ${index}.`);
+    const before = harness.events.slice(0, harness.events.indexOf(terminal));
+    return providerThreadRosterEvents(before).at(-1)?.providerThread.pendingBackgroundTasks ?? [];
+  };
+
+  it.effect("lets the Stop hook skip ambient tasks and lists the crons it reports as waits", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* startLedgerTurn(harness, "attempt-claude-session-waits");
+        // Only the CLI's task frames flag a task ambient; its stop list never does.
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "background_tasks_changed",
+            tasks: [
+              { task_id: "dream-1", task_type: "dream", description: "Memory", ambient: true },
+            ],
+            uuid: "00000000-0000-4000-8000-000000000351",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        const dream = { id: "dream-1", type: "dream", status: "running", description: "Memory" };
+        const blocked = yield* fireHook(harness, "Stop", stopReporting([], [dream]));
+        assert.strictEqual(Reflect.get(blocked, "decision"), "block");
+        assert.deepStrictEqual(
+          yield* fireHook(harness, "Stop", stopReporting([SESSION_CRON], [dream])),
+          {},
+        );
+
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* harness.awaitTerminal(1);
+        assert.deepStrictEqual(rosterAtTerminal(harness, 0), [
+          { taskId: "cron:c1", kind: "background_task", description: "Scheduled wakeup: Check it" },
+        ]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each(["the CLI exits", "the user stops it", "a StopFailure ends it"] as const)(
+    "forgets the crons when a later turn ends because %s",
+    (ending) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarnessWithOptions({
+            close: (sdkMessages) => Queue.shutdown(sdkMessages),
+          });
+          const attempt = `attempt-claude-cron-${ending.replaceAll(" ", "-")}`;
+          yield* startLedgerTurn(harness, attempt);
+          yield* fireHook(harness, "Stop", stopReporting([SESSION_CRON]));
+          yield* Queue.offer(harness.sdkMessages, turnOneResult);
+          yield* harness.awaitTerminal(1);
+          assert.deepStrictEqual(
+            rosterAtTerminal(harness, 0).map(({ taskId }) => taskId),
+            ["cron:c1"],
+          );
+
+          const providerTurnId = yield* startLedgerTurn(harness, `${attempt}-2`, 2);
+          if (ending === "the CLI exits") {
+            yield* Queue.shutdown(harness.sdkMessages);
+          } else if (ending === "the user stops it") {
+            yield* harness.runtime.interruptTurn({
+              providerThread: harness.providerThread,
+              providerTurnId,
+            });
+          } else {
+            // An API error ends the turn through StopFailure, so no Stop reports the crons again.
+            yield* fireHook(harness, "StopFailure", {
+              ...hookBase,
+              hook_event_name: "StopFailure",
+              error: "server_error",
+            });
+            yield* Queue.offer(
+              harness.sdkMessages,
+              makeResultFrame({
+                uuid: "00000000-0000-4000-8000-000000000352",
+                result: "API Error: 500",
+                isError: true,
+                apiErrorStatus: 500,
+              }),
+            );
+          }
+          yield* harness.awaitTerminal(2);
+          assert.deepStrictEqual(
+            rosterAtTerminal(harness, 1).filter(({ taskId }) => taskId.startsWith("cron:")),
+            [],
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("keeps the session loaded while a cron is recorded, and lets it go once none is", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const hasPendingWorkForThread = harness.runtime.hasPendingBackgroundWorkForThread;
+        if (hasPendingWorkForThread === undefined) {
+          throw new Error("Claude adapter runtime must expose hasPendingBackgroundWorkForThread.");
+        }
+        yield* startLedgerTurn(harness, "attempt-claude-cron-holds-session");
+        yield* fireHook(harness, "Stop", stopReporting([SESSION_CRON]));
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* harness.awaitTerminal(1);
+        // Idle release checks the session and thread unload checks the thread; releasing either
+        // kills the CLI, and its cron with it.
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        assert.isTrue(yield* hasPendingWorkForThread(harness.providerThread));
+
+        yield* startLedgerTurn(harness, "attempt-claude-cron-holds-session-2", 2);
+        yield* fireHook(harness, "Stop", stopReporting([]));
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000353", result: "Checked it." }),
+        );
+        yield* harness.awaitTerminal(2);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        assert.isFalse(yield* hasPendingWorkForThread(harness.providerThread));
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("refuses a selection change that would restart the CLI while a cron is recorded", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* startLedgerTurn(harness, "attempt-claude-cron-blocks-restart");
+        yield* fireHook(harness, "Stop", stopReporting([SESSION_CRON]));
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* harness.awaitTerminal(1);
+        const refused = yield* harness.runtime
+          .startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-claude-cron-blocks-restart-2"),
+              text: "Switch models.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              modelSelection: CLAUDE_TEST_RESTART_MODEL_SELECTION,
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.equal(
+          makeProviderFailure({ cause: refused, class: "provider_error" }).message,
+          new ClaudeAdapterV2.ClaudeBackgroundWorkBlocksQueryReplacementError().message,
         );
       }).pipe(
         Effect.provide(

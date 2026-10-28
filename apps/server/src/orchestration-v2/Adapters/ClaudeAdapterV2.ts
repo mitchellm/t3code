@@ -18,6 +18,7 @@ import {
   claudePlansDirectory,
   type HarnessHookPort,
 } from "./HarnessHooks.ts";
+import { makeClaudeSessionWaits } from "./ClaudeSessionWaits.ts";
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -445,7 +446,6 @@ export const ClaudeProviderCapabilitiesV2 = {
     supportsFullThreadHandoff: true,
     maxRecommendedHandoffChars: null,
     deliversPinnedRules: true,
-    blocksStopWithOpenLedger: true,
     enforcesManagersStructure: true,
   },
   checkpointing: {
@@ -1461,7 +1461,12 @@ export function makeClaudeQueryOptions(input: {
   // Fork: ledger and loadout reads for the harness hooks.
   readonly harness?: Pick<
     HarnessHookPort,
-    "readLedgerState" | "readThreadPolicy" | "readLoadout" | "delegatedChild"
+    | "readLedgerState"
+    | "readThreadPolicy"
+    | "readLoadout"
+    | "delegatedChild"
+    | "isAmbientTask"
+    | "onSessionCrons"
   >;
   /** Fork: CLAUDE_CONFIG_DIR or ~/.claude, which holds plan mode's default plans directory. */
   readonly claudeHome?: string;
@@ -4608,6 +4613,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         );
         const goalsByNativeThread = new Map<string, OrchestrationV2ProviderGoal | null>();
         const goalCheckedTurns = new Set<string>();
+        // Fork: ambient tasks and crons for the Stop hook (HarnessHooks).
+        const sessionWaits = makeClaudeSessionWaits();
         // Background subagents can finish after root settlement; retain their registry for wake evidence and hydration.
         const sessionSubagentsByTaskId = yield* Ref.make(new Map<string, ActiveClaudeSubagent>());
         const sessionSubagentTaskIdsByToolUseId = yield* Ref.make(new Map<string, string>());
@@ -5061,7 +5068,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...input.providerThread,
             providerSessionId: session.id,
             ...(input.status === undefined ? {} : { status: input.status }),
-            pendingBackgroundTasks: claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds),
+            pendingBackgroundTasks: [
+              ...claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds),
+              ...sessionWaits.cronTasks(input.nativeThreadId),
+            ],
             ...(goalsByNativeThread.has(input.nativeThreadId)
               ? { goal: goalsByNativeThread.get(input.nativeThreadId) ?? null }
               : {}),
@@ -5264,6 +5274,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             bufferedTaskNotificationIds.has(taskId),
           );
           yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
+          sessionWaits.clear(nativeThreadId);
           yield* clearNativeThreadTaskIdSet(
             wakeEligibleBackgroundTasksByNativeThread,
             nativeThreadId,
@@ -7307,6 +7318,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   input.context.input.providerThread.nativeThreadRef?.nativeId ?? null;
                 if (nativeThreadId !== null) {
                   if (input.status !== "completed") {
+                    // Fork: forget the crons too: a dead CLI took them along, and no Stop hook
+                    // reported them for a turn the user stopped or that failed.
+                    sessionWaits.recordCrons(nativeThreadId, []);
                     yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
                     yield* clearNativeThreadTaskIdSet(
                       wakeEligibleBackgroundTasksByNativeThread,
@@ -7369,10 +7383,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     input.context.input.providerThread.firstRunOrdinal ??
                     input.context.input.runOrdinal,
                   lastRunOrdinal: input.context.input.runOrdinal,
-                  pendingBackgroundTasks: claudePendingBackgroundTasksFromRoster(
-                    roster,
-                    awaitedTaskIds,
-                  ),
+                  pendingBackgroundTasks: [
+                    ...claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds),
+                    ...sessionWaits.cronTasks(nativeThreadId),
+                  ],
                   status: input.status === "completed" ? "active" : "idle",
                   updatedAt: input.completedAt,
                 };
@@ -7781,6 +7795,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly activeContext: ActiveClaudeTurnContext | null;
         }) {
           const message = input.message;
+          sessionWaits.observeTaskFrame(input.nativeThreadId, message);
           let rosterChanged = false;
 
           if (isClaudeBackgroundTasksChangedMessage(message)) {
@@ -9708,6 +9723,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ) {
             return true;
           }
+          // Fork: a restart kills the CLI's crons too. The goal check mirrors Claude Code's own
+          // goal Stop hook, which does not defer for them.
+          if (
+            options?.forGoalCheck !== true &&
+            sessionWaits.cronTasks(live.nativeThreadId).length > 0
+          ) {
+            return true;
+          }
           const buffered = (yield* Ref.get(wakeBuffers)).get(live.nativeThreadId)?.messages ?? [];
           for (const [taskId, subagent] of yield* Ref.get(sessionSubagentsByTaskId)) {
             if (
@@ -9894,6 +9917,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     readLoadout: (signal: AbortSignal) =>
                       runPromise(harness.readLoadout, { signal }),
                     delegatedChild: turnInput.appThread.lineage.relationshipToParent === "subagent",
+                    isAmbientTask: (taskId: string) =>
+                      sessionWaits.isAmbient(nativeThreadId, taskId),
+                    onSessionCrons: (crons) => sessionWaits.recordCrons(nativeThreadId, crons),
                   },
                   claudeHome: claudeConfigDirOf(
                     path,
@@ -10700,6 +10726,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 return true;
               }
             }
+            // Fork: releasing the session kills the CLI's crons with it.
+            if (sessionWaits.hasAnyCrons()) return true;
             for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
               if (subagent.task.status === "running") {
                 return true;
@@ -10731,7 +10759,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               rosterForNativeThread(
                 yield* Ref.get(pendingBackgroundTasksByNativeThread),
                 nativeThreadId,
-              ).size > 0
+              ).size > 0 ||
+              // Fork: unloading the thread kills its crons too.
+              sessionWaits.cronTasks(nativeThreadId).length > 0
             );
           }),
           ensureThread: Effect.fn("ClaudeAdapterV2.ensureThread")(

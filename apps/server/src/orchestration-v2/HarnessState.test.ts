@@ -1,8 +1,60 @@
 import { expect, it } from "@effect/vitest";
-import { DEFAULT_LOADOUTS, type Loadout, type LoadoutSetBy, ProjectId } from "@t3tools/contracts";
+import {
+  DEFAULT_LOADOUTS,
+  type Loadout,
+  type LoadoutSetBy,
+  ProjectId,
+  ThreadId,
+  type ThreadPullRequestLink,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import { type HarnessThreadReads, makeHarnessPort } from "./HarnessState.ts";
+import {
+  type HarnessThreadReads,
+  makeHarnessPort,
+  makeHarnessThreadReads,
+} from "./HarnessState.ts";
+
+const pullRequest = (
+  number: number,
+  extra: { readonly source?: ThreadPullRequestLink["source"]; readonly watched?: boolean } = {},
+) =>
+  ({
+    host: "github.com",
+    repository: "acme/app",
+    number,
+    url: `https://github.com/acme/app/pull/${number}`,
+    source: extra.source ?? "agent",
+    ...(extra.watched === false ? {} : { watch: { startedAt: "2026-10-27T00:00:00.000Z" } }),
+  }) as unknown as ThreadPullRequestLink;
+
+const ledgerStateWith = (pullRequests: ReadonlyArray<ThreadPullRequestLink>) =>
+  makeHarnessThreadReads(
+    {
+      getThreadRecords: () =>
+        Effect.succeed({
+          thread: { pullRequests },
+          ledger: undefined,
+          subagents: [],
+          runs: [],
+          turnItems: [],
+        }),
+    } as unknown as Parameters<typeof makeHarnessThreadReads>[0],
+    ThreadId.make("thread"),
+    "Stopped by the user",
+  ).readLedgerState();
+
+it.effect("reads a watched pull request as a wait, but not an unwatched or dismissed link", () =>
+  Effect.gen(function* () {
+    expect((yield* ledgerStateWith([pullRequest(1)])).pullRequestWatched).toBe(true);
+    expect(
+      (yield* ledgerStateWith([
+        pullRequest(2, { watched: false }),
+        pullRequest(3, { source: "stack-dismissed" }),
+      ])).pullRequestWatched,
+    ).toBe(false);
+  }),
+);
 
 const split: Loadout = {
   id: "split",

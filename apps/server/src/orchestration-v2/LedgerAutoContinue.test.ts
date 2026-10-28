@@ -30,6 +30,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { makeClaudeSessionWaits } from "./Adapters/ClaudeSessionWaits.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
@@ -341,6 +342,9 @@ it.effect("does nothing when the user stopped a run that still completed", () =>
     });
     yield* completeLatest(threadId);
     assert.equal((yield* autoContinues(threadId)).length, 0);
+    // A user's Stop ends everything: no notice and no unread mark either.
+    assert.deepEqual(yield* stopNotices(threadId), []);
+    assert.isFalse(yield* isMarkedStuck(threadId));
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -894,17 +898,19 @@ it.effect("waits for a running delegated task instead of nudging the agent", () 
   }).pipe(Effect.provide(layerTest)),
 );
 
-/** Puts the latest run on a provider session whose adapter keeps the agent going itself. */
-const runOnSessionThatBlocksStops = (
-  threadId: ThreadId,
-  blocksStops: boolean,
-  pendingBackgroundTasks: OrchestrationV2ProviderThread["pendingBackgroundTasks"] = [],
-) =>
+/**
+ * A Claude session as stored before its capabilities dropped `blocksStopWithOpenLedger`, which
+ * made auto-continue post a notice for its run instead of following up.
+ */
+const attachSessionThatBlockedStops = (threadId: ThreadId) =>
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
     const now = yield* DateTime.now;
     const providerSessionId = ProviderSessionId.make(`provider-session:${threadId}`);
-    const providerThreadId = ProviderThreadId.make(`provider-thread:${threadId}`);
+    const storedContext = {
+      ...CodexProviderCapabilitiesV2.context,
+      blocksStopWithOpenLedger: true,
+    };
     yield* eventSink.write({
       events: [
         {
@@ -919,18 +925,29 @@ const runOnSessionThatBlocksStops = (
             status: "ready",
             cwd: "/workspace",
             model: null,
-            capabilities: {
-              ...CodexProviderCapabilitiesV2,
-              context: {
-                ...CodexProviderCapabilitiesV2.context,
-                blocksStopWithOpenLedger: blocksStops,
-              },
-            },
+            capabilities: { ...CodexProviderCapabilitiesV2, context: storedContext },
             createdAt: now,
             updatedAt: now,
             lastError: null,
           },
         },
+      ],
+    });
+    return providerSessionId;
+  });
+
+/** Ends the latest run on a provider thread whose roster lists `pendingBackgroundTasks`. */
+const runOnProviderThread = (
+  threadId: ThreadId,
+  pendingBackgroundTasks: OrchestrationV2ProviderThread["pendingBackgroundTasks"] = [],
+  providerSessionId: ProviderSessionId | null = null,
+) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const providerThreadId = ProviderThreadId.make(`provider-thread:${threadId}`);
+    yield* eventSink.write({
+      events: [
         {
           id: EventId.make(nextId("event:provider-thread")),
           type: "provider-thread.updated",
@@ -965,37 +982,6 @@ const runOnSessionThatBlocksStops = (
     const event = yield* endRun({ ...run, providerThreadId });
     yield* afterRun(event);
   });
-
-it.effect.each([
-  { blocksStops: true, followUps: 0, notices: 1 },
-  { blocksStops: false, followUps: 1, notices: 0 },
-])(
-  "leaves the ledger to a provider that blocks its own stop (blocks: $blocksStops)",
-  ({ blocksStops, followUps, notices }) =>
-    Effect.gen(function* () {
-      const threadId = yield* setup(`provider-blocks-stop-${blocksStops}`);
-      yield* sendUserMessage(threadId);
-      yield* runOnSessionThatBlocksStops(threadId, blocksStops);
-      assert.equal((yield* autoContinues(threadId)).length, followUps);
-      // The run ending with items open means the provider's own stop gate gave up.
-      const stopped = yield* stopNotices(threadId);
-      assert.equal(stopped.length, notices);
-      assert.equal(yield* isMarkedStuck(threadId), notices === 1);
-      if (notices === 1) assert.include(stopped[0], "2 items still open");
-    }).pipe(Effect.provide(layerTest)),
-);
-
-it.effect("posts no stop notice for a self-blocking provider waiting on a delegate", () =>
-  Effect.gen(function* () {
-    const threadId = yield* setup("provider-blocks-stop-delegate");
-    yield* sendUserMessage(threadId);
-    yield* setDelegate(threadId, "running");
-    yield* runOnSessionThatBlocksStops(threadId, true);
-    assert.equal((yield* autoContinues(threadId)).length, 0);
-    assert.equal((yield* stopNotices(threadId)).length, 0);
-    assert.isFalse(yield* isMarkedStuck(threadId));
-  }).pipe(Effect.provide(layerTest)),
-);
 
 /** The provider's own subagent row in the parent's timeline, which the composer reads as waiting. */
 const setNativeSubagentItem = (threadId: ThreadId, runId: RunId, status: "running" | "completed") =>
@@ -1039,22 +1025,16 @@ const setNativeSubagentItem = (threadId: ThreadId, runId: RunId, status: "runnin
     });
   });
 
-it.effect.each([
-  { source: "roster", blocksStops: true },
-  { source: "roster", blocksStops: false },
-  { source: "turn item", blocksStops: true },
-  { source: "turn item", blocksStops: false },
-] as const)(
-  "waits for the provider's own background subagent ($source, blocks: $blocksStops)",
-  ({ source, blocksStops }) =>
+it.effect.each(["roster", "turn item"] as const)(
+  "waits for the provider's own background subagent (%s)",
+  (source) =>
     Effect.gen(function* () {
-      const threadId = yield* setup(`native-subagent-${source}-${blocksStops}`);
+      const threadId = yield* setup(`native-subagent-${source}`);
       yield* sendUserMessage(threadId);
       const launchRun = yield* latestRun(threadId);
       if (source === "turn item") yield* setNativeSubagentItem(threadId, launchRun.id, "running");
-      yield* runOnSessionThatBlocksStops(
+      yield* runOnProviderThread(
         threadId,
-        blocksStops,
         source === "roster"
           ? [{ taskId: "agent-1", kind: "subagent", description: "Audit the API" }]
           : [],
@@ -1067,10 +1047,124 @@ it.effect.each([
       // The report wakes the agent; a turn after that which moves nothing is judged as usual.
       yield* serverWake(threadId);
       if (source === "turn item") yield* setNativeSubagentItem(threadId, launchRun.id, "completed");
-      yield* runOnSessionThatBlocksStops(threadId, blocksStops);
-      assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), blocksStops ? [] : [1]);
-      assert.equal((yield* stopNotices(threadId)).length, blocksStops ? 1 : 0);
+      yield* runOnProviderThread(threadId);
+      assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), [1]);
+      assert.deepEqual(yield* stopNotices(threadId), []);
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  { name: "command", task: { taskId: "map-runner", kind: "command", awaited: true } },
+  { name: "Monitor", task: { taskId: "build-log", kind: "monitor", awaited: true } },
+] as const)("waits, with no notice, while the agent waits on a background $name", ({ task }) =>
+  Effect.gen(function* () {
+    const threadId = yield* setup(`awaited-${task.kind}`);
+    yield* sendUserMessage(threadId);
+    yield* runOnProviderThread(threadId, [task]);
+    // The CLI wakes the agent when the task ends; that run's end decides again as usual.
+    assert.equal((yield* autoContinues(threadId)).length, 0);
+    assert.deepEqual(yield* stopNotices(threadId), []);
+    assert.isFalse(yield* isMarkedStuck(threadId));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("waits, with no notice, while a scheduled wakeup will wake the agent", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("scheduled-wakeup");
+    yield* sendUserMessage(threadId);
+    // What Claude's adapter lists once a stop reports the cron.
+    const waits = makeClaudeSessionWaits();
+    waits.recordCrons("native", [
+      { id: "c1", schedule: "30 14 27 10 *", recurring: false, prompt: "Check the build" },
+    ]);
+    yield* runOnProviderThread(threadId, waits.cronTasks("native"));
+    assert.equal((yield* autoContinues(threadId)).length, 0);
+    assert.deepEqual(yield* stopNotices(threadId), []);
+    assert.isFalse(yield* isMarkedStuck(threadId));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+/** A shell row still running in the timeline, named by its tool call rather than a task id. */
+const setRunningCommandItem = (threadId: ThreadId, runId: RunId) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(nextId("event:command")),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:command:${threadId}`),
+            threadId,
+            runId,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: { driver: adapter.driver, nativeId: "toolu_build", strength: "strong" },
+            parentItemId: null,
+            ordinal: 0,
+            status: "running",
+            title: "Build",
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            type: "command_execution",
+            input: "vp run build",
+          },
+        },
+      ],
+    });
+  });
+
+it.effect("follows up past work nobody waits on, naming only the tasks a wait can mark", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("unawaited-command");
+    yield* sendUserMessage(threadId);
+    yield* setRunningCommandItem(threadId, (yield* latestRun(threadId)).id);
+    // A dev server left running looks the same as a wait nobody marked.
+    yield* runOnProviderThread(threadId, [
+      { taskId: "dev-server", kind: "command", description: "vp run dev" },
+    ]);
+    const followUps = yield* autoContinues(threadId);
+    assert.deepEqual(followUps.map(roundOf), [1]);
+    assert.include(followUps[0]!.text, "dev-server");
+    // t3_background_wait matches the provider's task ids, not a timeline row's tool call.
+    assert.notInclude(followUps[0]!.text, "toolu_build");
+    assert.include(
+      followUps[0]!.text,
+      "call t3_background_wait with its task id and end your turn",
+    );
+    assert.deepEqual(yield* stopNotices(threadId), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("after the in-run gate gives up, follows up and replans before any notice", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("in-run-gate-gave-up");
+    yield* sendUserMessage(threadId);
+    // This session's run used to get "the agent stopped after repeated in-run nudges" here.
+    const session = yield* attachSessionThatBlockedStops(threadId);
+    yield* runOnProviderThread(threadId, [], session);
+    assert.deepEqual((yield* autoContinues(threadId)).map(roundOf), [1]);
+    assert.deepEqual(yield* stopNotices(threadId), []);
+
+    yield* runOnProviderThread(threadId, [], session);
+    assert.equal(replanOf((yield* autoContinues(threadId)).at(-1))?.reason, "stalled");
+    assert.deepEqual(yield* stopNotices(threadId), []);
+    assert.isFalse(yield* isMarkedStuck(threadId));
+
+    // Only a replan that moved nothing hands the ledger back.
+    yield* runOnProviderThread(threadId, [], session);
+    assert.equal((yield* autoContinues(threadId)).length, 2);
+    const notices = yield* stopNotices(threadId);
+    assert.equal(notices.length, 1);
+    assert.include(notices[0], "no progress after a replan");
+    assert.isTrue(yield* isMarkedStuck(threadId));
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("truncates a long item title in the stop notice", () =>
