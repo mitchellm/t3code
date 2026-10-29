@@ -229,6 +229,27 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   });
   if (decision.type === "idle") return;
   if (decision.type === "stuck") {
+    // The streak stays stuck until the user speaks, so every later delegate, judge or background
+    // wake decides stuck again; say it once per streak instead of re-posting and re-marking unread.
+    const lastRoundOrdinal = Math.max(
+      0,
+      ...messages
+        .filter((message) => message.notification?.source.kind === "ledger_continue")
+        .map((message) => ordinalByRun.get(message.runId!) ?? 0),
+    );
+    const sinceLastRound = runs.filter((candidate) => candidate.ordinal >= lastRoundOrdinal);
+    const { turnItems: notices } = yield* orchestrator.getThreadRecords(
+      input.threadId,
+      ["turnItems"],
+      { turnItemTypes: ["system_notice"], turnItemRunIds: sinceLastRound.map(({ id }) => id) },
+    );
+    const noticeIds = new Set(notices.map(({ id }) => id));
+    const alreadyStopped = sinceLastRound.some(({ id }) =>
+      noticeIds.has(
+        deps.ids.derive.runSignalTurnItem({ runId: id, signal: "ledger-auto-continue-stopped" }),
+      ),
+    );
+    if (alreadyStopped) return;
     yield* postStopNotice(
       deps,
       input.threadId,

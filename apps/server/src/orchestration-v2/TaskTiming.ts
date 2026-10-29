@@ -38,7 +38,6 @@ export interface TaskTimingInput {
       | "requestedAt"
       | "startedAt"
       | "completedAt"
-      | "workStartedAt"
     >
   >;
   readonly userMessages: ReadonlyArray<
@@ -57,7 +56,7 @@ export interface TaskTimingInput {
       | "startedAt"
       | "completedAt"
     >;
-    readonly childRun: Pick<OrchestrationV2Run, "startedAt" | "workStartedAt"> | undefined;
+    readonly childRun: Pick<OrchestrationV2Run, "startedAt"> | undefined;
   }>;
   readonly runtimeRequests: ReadonlyArray<
     Pick<OrchestrationV2RuntimeRequest, "id" | "kind" | "status" | "createdAt" | "resolvedAt">
@@ -107,7 +106,9 @@ function deriveRuns(input: TaskTimingInput, now: number) {
   return input.runs
     .toSorted((left, right) => left.ordinal - right.ordinal)
     .map((run): TaskTimingRun => {
-      const started = run.workStartedAt ?? run.startedAt;
+      // Not workStartedAt: a wake run inherits that from the first run of its wake chain, so
+      // each wake would be timed from the chain's start and counted again in agentMs.
+      const started = run.startedAt;
       const startMs = started === null ? null : ms(started);
       const endMs = run.completedAt === null ? null : ms(run.completedAt);
       return {
@@ -137,7 +138,7 @@ function deriveDelegated(input: TaskTimingInput, now: number) {
   return input.delegated
     .map(({ task, childRun }): TaskTimingDelegated => {
       const requestedAt = task.startedAt ?? task.completedAt ?? input.now;
-      const started = childRun?.workStartedAt ?? childRun?.startedAt ?? null;
+      const started = childRun?.startedAt ?? null;
       const endMs = task.completedAt === null ? null : ms(task.completedAt);
       return {
         taskId: task.id,
