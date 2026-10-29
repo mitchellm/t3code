@@ -33,11 +33,11 @@ const isOpen = (item: Pick<LedgerItem, "status">) =>
 /** What a follow-up records per item; a judge's hand-back changes it without a status change. */
 export type LedgerProgressMark = Pick<LedgerItem, "id" | "status" | "judging" | "judgements">;
 
+const markOf = (item: LedgerProgressMark) =>
+  `${item.id}:${item.status}:${item.judging === true}:${item.judgements ?? 0}`;
+
 const signatureOf = (items: ReadonlyArray<LedgerProgressMark>) =>
-  items
-    .map((item) => `${item.id}:${item.status}:${item.judging === true}:${item.judgements ?? 0}`)
-    .sort()
-    .join("\n");
+  items.map(markOf).sort().join("\n");
 
 export const progressMark = ({
   id,
@@ -119,6 +119,29 @@ export function decideLedgerAutoContinue(input: {
       before?.notification?.source.kind === "ledger_continue" &&
       signatureOf(before.notification.source.items) === signatureOf(items)
     ) {
+      return { type: "idle" };
+    }
+  }
+  // A stalled replan that changed nothing has already shown these items need someone else (an
+  // item only the user can drop looks like this). When a later wake closes other work and every
+  // item left open is exactly as that replan found it, more rounds would only say "still waiting".
+  // The replan's own turn ending is judged as usual, so a replan that moved things still continues,
+  // and a plain follow-up after it means that stall is over and a new one earns its own replan.
+  const latestFollowUp = input.messages.findLast(
+    (message) => message.notification?.source.kind === "ledger_continue",
+  );
+  const stalledReplan =
+    latestFollowUp?.notification?.source.kind === "ledger_continue" &&
+    latestFollowUp.notification.source.replan?.reason === "stalled"
+      ? latestFollowUp
+      : undefined;
+  if (
+    stalledReplan !== undefined &&
+    stalledReplan !== input.messages.at(-1) &&
+    stalledReplan.notification?.source.kind === "ledger_continue"
+  ) {
+    const stalledMarks = new Set(stalledReplan.notification.source.items.map(markOf));
+    if (open.every((item) => stalledMarks.has(markOf(progressMark(item))))) {
       return { type: "idle" };
     }
   }

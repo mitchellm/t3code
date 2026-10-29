@@ -114,6 +114,45 @@ describe("follow-ups after the user speaks", () => {
   });
 });
 
+describe("follow-ups after a stalled replan", () => {
+  const before = ledgerOf(
+    item("a", { status: "in_progress" }),
+    item("b", { status: "in_progress" }),
+  );
+  const stalledReplan = followUp(2, before, { reason: "stalled", itemIds: ["item:a", "item:b"] });
+  const wake: Message = { role: "user", createdBy: "agent", creationSource: "server" };
+  const bClosed = ledgerOf(item("a", { status: "in_progress" }), item("b", { status: "closed" }));
+
+  it("stay off when a later wake closes other work and what is left already stalled as it is", () => {
+    expect(
+      decideLedgerFollowUp({
+        ledger: bClosed,
+        messages: [userMessage, followUp(1, before), stalledReplan, wake],
+      }),
+    ).toEqual({ type: "idle" });
+  });
+
+  it("continue when the replan's own turn moved the ledger, or an open item is new or changed", () => {
+    expect(
+      decideLedgerFollowUp({
+        ledger: bClosed,
+        messages: [userMessage, followUp(1, before), stalledReplan],
+      }),
+    ).toMatchObject({ type: "continue" });
+    const withNew = ledgerOf(
+      item("a", { status: "in_progress" }),
+      item("b", { status: "closed" }),
+      item("c"),
+    );
+    expect(
+      decideLedgerFollowUp({
+        ledger: withNew,
+        messages: [userMessage, followUp(1, before), stalledReplan, wake],
+      }),
+    ).toMatchObject({ type: "continue" });
+  });
+});
+
 describe("judgeFailures", () => {
   it("counts recorded verdicts only while the latest one failed", () => {
     expect(judgeFailures(failedJudge("a", 3))).toBe(3);
