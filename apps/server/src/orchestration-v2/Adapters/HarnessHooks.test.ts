@@ -172,6 +172,21 @@ describe("Stop hook", () => {
     expect((await fire("Stop", stop(true))).reason).toContain("Ledger has 2 open items");
   });
 
+  it("lets a later prompt stop at once while the ledger is unchanged since the hook gave up", async () => {
+    const current = { value: state(ledgerOf([item("L1", "in_progress")])) };
+    const { fire } = make(ledgerReader(current));
+    await fire("Stop", stop(false));
+    for (let index = 0; index <= HARNESS_STOP_BLOCK_LIMIT; index++) await fire("Stop", stop(true));
+
+    // The user asks something else; the item still waits on them, so no more "still waiting" turns.
+    expect(await fire("Stop", stop(false))).toEqual({});
+    expect(await fire("Stop", stop(false))).toEqual({});
+
+    // Any change to the ledger re-arms the blocks.
+    current.value = state(ledgerOf([item("L1", "in_progress"), item("L2", "open")]));
+    expect((await fire("Stop", stop(false))).decision).toBe("block");
+  });
+
   it("replans once per stall: progress after the replan starts a new episode", async () => {
     const current = { value: state(ledgerOf([item("L1", "open")])) };
     const { fire } = make(ledgerReader(current));
@@ -255,17 +270,6 @@ describe("Stop hook", () => {
       undefined,
     ]);
     // The next prompt starts a new allowance.
-    expect((await fire("Stop", stop(false))).decision).toBe("block");
-  });
-
-  it("gives a new prompt its own allowance", async () => {
-    const current = { value: state(ledgerOf([item("L1", "open")])) };
-    const { fire } = make(ledgerReader(current));
-    // The limit's blocks and its replan.
-    for (let index = 0; index <= HARNESS_STOP_BLOCK_LIMIT; index++) {
-      await fire("Stop", stop(index > 0));
-    }
-    expect(await fire("Stop", stop(true))).toEqual({});
     expect((await fire("Stop", stop(false))).decision).toBe("block");
   });
 

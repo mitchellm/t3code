@@ -86,6 +86,34 @@ const followUp = (
   },
 });
 
+describe("follow-ups after the user speaks", () => {
+  const parked = ledgerOf(item("a", { status: "in_progress" }));
+
+  it("stay off when the user's turn left the ledger as the last follow-up found it", () => {
+    // The stalled streak stopped; the user asked something else and the turn touched no item.
+    expect(
+      decideLedgerFollowUp({
+        ledger: parked,
+        messages: [userMessage, followUp(1, parked), followUp(2, parked), userMessage],
+      }),
+    ).toEqual({ type: "idle" });
+  });
+
+  it("restart once the user's turn moved the ledger, or when no follow-up was ever sent", () => {
+    const moved = ledgerOf(item("a", { status: "in_progress" }), item("b"));
+    expect(
+      decideLedgerFollowUp({
+        ledger: moved,
+        messages: [userMessage, followUp(1, parked), followUp(2, parked), userMessage],
+      }),
+    ).toMatchObject({ type: "continue", round: 1 });
+    expect(decideLedgerFollowUp({ ledger: parked, messages: [userMessage] })).toMatchObject({
+      type: "continue",
+      round: 1,
+    });
+  });
+});
+
 describe("judgeFailures", () => {
   it("counts recorded verdicts only while the latest one failed", () => {
     expect(judgeFailures(failedJudge("a", 3))).toBe(3);

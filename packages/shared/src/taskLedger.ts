@@ -88,6 +88,7 @@ export function decideLedgerAutoContinue(input: {
   let streak = 0;
   let counting = true;
   let previous: ReadonlyArray<LedgerProgressMark> | undefined;
+  let userIndex = -1;
   for (let index = input.messages.length - 1; index >= 0; index -= 1) {
     const message = input.messages[index]!;
     if (message.role !== "user") continue;
@@ -101,11 +102,26 @@ export function decideLedgerAutoContinue(input: {
       if (counting) streak += 1;
       previous ??= message.notification.source.items;
     } else if (message.createdBy === "user" && message.creationSource !== "server") {
+      userIndex = index;
       break;
     }
   }
 
   const items = ledger.items.map(progressMark);
+  // The user spoke but their turn left the ledger exactly as the last follow-up found it, which is
+  // how a ledger waiting on the user looks (an item only they can drop). Restarting follow-ups
+  // would only produce more "still waiting on you" turns; any ledger change starts them again.
+  if (previous === undefined && userIndex > 0) {
+    const before = input.messages
+      .slice(0, userIndex)
+      .findLast((message) => message.notification?.source.kind === "ledger_continue");
+    if (
+      before?.notification?.source.kind === "ledger_continue" &&
+      signatureOf(before.notification.source.items) === signatureOf(items)
+    ) {
+      return { type: "idle" };
+    }
+  }
   if (streak >= LEDGER_AUTO_CONTINUE_CAP) {
     return { type: "stuck", reason: "cap", openIds: open.map((item) => item.id) };
   }

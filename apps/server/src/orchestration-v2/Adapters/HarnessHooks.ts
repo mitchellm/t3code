@@ -408,9 +408,11 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     hooks.Stop = [
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "Stop") return {};
-        // A stop the hook did not cause is a fresh prompt ending, which earns a fresh allowance.
+        // A stop the hook did not cause is a fresh prompt ending, which earns a fresh ceiling. The
+        // unchanged-block count carries over while the ledger is the same: once the hook has given
+        // up on a ledger only the user can move, each later prompt would otherwise end in another
+        // round of "still waiting on you" turns that bury the actual reply.
         if (!input.stop_hook_active) {
-          consecutiveBlocks = 0;
           promptBlocks = 0;
           judgeReplanned.clear();
         }
