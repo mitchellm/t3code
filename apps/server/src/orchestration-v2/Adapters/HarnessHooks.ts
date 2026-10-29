@@ -27,7 +27,7 @@ import { loadoutStructure } from "@t3tools/shared/loadouts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodePath from "node:path";
 
-import { decideStopHookNudge, ledgerReplanText } from "../LedgerReplan.ts";
+import { decideStopHookNudge, JUDGED_SET_ASIDE_HINT, ledgerReplanText } from "../LedgerReplan.ts";
 
 /** Blocks in a row, with the ledger unchanged, before a replan block and then the stop. */
 export const HARNESS_STOP_BLOCK_LIMIT = 3;
@@ -208,10 +208,11 @@ export const loadoutContext = (block: string | undefined, shownBefore: boolean) 
 const STOP_WAIT_HINT =
   "If you are waiting on background work, call t3_background_wait with its task id and end your turn.";
 
-function stopReason(open: ReadonlyArray<LedgerItem>): string {
+function stopReason(ledger: Ledger, open: ReadonlyArray<LedgerItem>): string {
   const named = open.slice(0, STOP_ITEMS_SHOWN).map(itemLabel).join(", ");
   const hidden = open.length - STOP_ITEMS_SHOWN;
-  return `Ledger has ${open.length} open ${open.length === 1 ? "item" : "items"}: ${named}${hidden > 0 ? ` and ${hidden} more` : ""}; continue, close with evidence, or drop with a reason. ${STOP_WAIT_HINT}`;
+  const judged = ledger.requiresJudge === true ? ` ${JUDGED_SET_ASIDE_HINT}` : "";
+  return `Ledger has ${open.length} open ${open.length === 1 ? "item" : "items"}: ${named}${hidden > 0 ? ` and ${hidden} more` : ""}; continue, close with evidence, or drop with a reason.${judged} ${STOP_WAIT_HINT}`;
 }
 
 /** What counts as progress: any item changing status, evidence or drop reason. */
@@ -448,7 +449,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         if (promptBlocks >= HARNESS_STOP_BLOCK_CEILING) return {};
         consecutiveBlocks++;
         promptBlocks++;
-        if (nudge.type === "block") return { decision: "block", reason: stopReason(open) };
+        if (nudge.type === "block") return { decision: "block", reason: stopReason(ledger, open) };
         if (nudge.reason === "judge") for (const item of nudge.items) judgeReplanned.add(item.id);
         return {
           decision: "block",

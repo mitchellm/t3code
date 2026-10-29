@@ -7,6 +7,7 @@
 import type { Ledger, LedgerItem } from "@t3tools/contracts";
 import {
   decideLedgerAutoContinue,
+  finishedSince,
   type LedgerAutoContinueDecision,
   type LedgerProgressMark,
   partitionLedgerFollowUp,
@@ -68,9 +69,17 @@ const itemLines = (items: ReadonlyArray<LedgerItem>) => {
   return hidden > 0 ? [...lines, `- and ${hidden} more`] : lines;
 };
 
+/**
+ * The planner refuses an agent's drop or defer of work it started on a judged ledger, so every
+ * nudge that offers those must say who can: otherwise the agent retries refused options until the
+ * follow-ups stop, and the user never learns the item needs them.
+ */
+export const JUDGED_SET_ASIDE_HINT =
+  "On this judged ledger you cannot drop or defer an item you already started: close it with evidence for the judge, or, if it no longer applies, tell the user it needs them to drop or defer it in the ledger panel and go on with the rest.";
+
 /** The replan instruction, for a follow-up message and for a Stop hook block reason alike. */
 export function ledgerReplanText(input: {
-  readonly ledger: Pick<Ledger, "title">;
+  readonly ledger: Pick<Ledger, "title" | "requiresJudge">;
   readonly reason: LedgerReplanReason;
   readonly items: ReadonlyArray<LedgerItem>;
   /** The between-turn follow-up round; absent inside a run. */
@@ -85,6 +94,7 @@ export function ledgerReplanText(input: {
   return [
     why,
     "Re-read the ledger (ledger_read). For each item below decide one of: split it into smaller sub-items (ledger_add_items with parentItemId); rewrite its acceptance so it can actually be met (drop it with a reason and add a replacement item); mark it blocked by something new (add the blocker as an item and set blockedBy); or defer it with a reason. Record the decision in the ledger, then continue with the new plan.",
+    ledger.requiresJudge === true ? JUDGED_SET_ASIDE_HINT : "",
     ...itemLines(items),
     reason === "stalled"
       ? "If the ledger is still unchanged after this, automatic follow-ups stop and the user is asked to look."
@@ -112,8 +122,12 @@ type LedgerFollowUpInput = Parameters<typeof decideLedgerAutoContinue>[0];
  * What the replans already sent since the user last spoke say, read from the same follow-up
  * messages the streak counts, so the replan state is the message log itself.
  */
-function replanHistory(messages: LedgerFollowUpInput["messages"]) {
+function replanHistory(
+  messages: LedgerFollowUpInput["messages"],
+  items: ReadonlyArray<LedgerItem>,
+) {
   let streak = 0;
+  let counting = true;
   let latestWasReplan: boolean | undefined;
   const judgeReplanned = new Set<string>();
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -121,7 +135,9 @@ function replanHistory(messages: LedgerFollowUpInput["messages"]) {
     if (message.role !== "user") continue;
     const source = message.notification?.source;
     if (source?.kind === "ledger_continue") {
-      streak += 1;
+      // Same streak as decideLedgerAutoContinue: rounds before the latest finished item drop out.
+      counting &&= !finishedSince(source.items, items);
+      if (counting) streak += 1;
       latestWasReplan ??= source.replan !== undefined;
       if (source.replan?.reason === "judge") {
         for (const id of source.replan.itemIds) judgeReplanned.add(id);
@@ -143,7 +159,7 @@ export function decideLedgerFollowUp(input: LedgerFollowUpInput): LedgerFollowUp
   const { ledger } = input;
   if (ledger === undefined || base.type === "idle") return base;
   if (base.type === "stuck" && base.reason === "cap") return base;
-  const history = replanHistory(input.messages);
+  const history = replanHistory(input.messages, ledger.items);
   if (base.type === "stuck") {
     // Any replan, the judge's included, is this stall's one replan: a judge replan that moved
     // nothing has used it up, so the stall stops here rather than replanning again.

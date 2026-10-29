@@ -52,6 +52,25 @@ export const progressMark = ({
 });
 
 /**
+ * An open ledger whose every item is closed, dropped or deferred: a new ledger or investigation
+ * closes it instead of being refused, so finished work does not strand the thread's next task.
+ * A running investigation keeps its own ledger until it ends.
+ */
+export const isFinishedOpenLedger = (ledger: Ledger): boolean =>
+  ledger.closedAt === null &&
+  ledger.investigation?.status !== "running" &&
+  !ledger.items.some(isOpen);
+
+/** Whether an item open when `snapshot` was taken has since been closed, dropped or deferred. */
+export function finishedSince(
+  snapshot: ReadonlyArray<Pick<LedgerItem, "id" | "status">>,
+  current: ReadonlyArray<Pick<LedgerItem, "id" | "status">>,
+): boolean {
+  const finishedThen = new Set(snapshot.filter((item) => !isOpen(item)).map(({ id }) => id));
+  return current.some((item) => !isOpen(item) && !finishedThen.has(item.id));
+}
+
+/**
  * Each follow-up records its round and the item statuses it was sent against, so the streak
  * since the user last spoke (chronological `messages`; server wakes neither count nor reset it)
  * is both counter and progress check. A follow-up in `cancelledRunIds` was declined: stay quiet.
@@ -67,6 +86,7 @@ export function decideLedgerAutoContinue(input: {
   if (open.length === 0) return { type: "idle" };
 
   let streak = 0;
+  let counting = true;
   let previous: ReadonlyArray<LedgerProgressMark> | undefined;
   for (let index = input.messages.length - 1; index >= 0; index -= 1) {
     const message = input.messages[index]!;
@@ -75,7 +95,10 @@ export function decideLedgerAutoContinue(input: {
       if (message.runId != null && input.cancelledRunIds?.has(message.runId) === true) {
         return { type: "idle" };
       }
-      streak += 1;
+      // The cap bounds rounds that finish nothing; a delegate or judge wake that closed an item
+      // since an older round is real progress, so rounds before it no longer count.
+      counting &&= !finishedSince(message.notification.source.items, ledger.items);
+      if (counting) streak += 1;
       previous ??= message.notification.source.items;
     } else if (message.createdBy === "user" && message.creationSource !== "server") {
       break;

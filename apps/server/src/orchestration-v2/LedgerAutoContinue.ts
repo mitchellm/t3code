@@ -28,7 +28,7 @@ import * as Layer from "effect/Layer";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 import * as EventSink from "./EventSink.ts";
-import { decideLedgerFollowUp, ledgerReplanText } from "./LedgerReplan.ts";
+import { decideLedgerFollowUp, JUDGED_SET_ASIDE_HINT, ledgerReplanText } from "./LedgerReplan.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 
@@ -72,7 +72,7 @@ function continuationText(
       : `- ${item.id} ${item.title}: blocked by ${waitingOn.join(", ")}`,
   );
   return [
-    `The task ledger "${ledger.title}" still has ${open.length} open ${open.length === 1 ? "item" : "items"} (automatic follow-up ${round}). Continue working through them. Close an item with evidence once its acceptance holds, or drop it with a reason if it no longer applies. Add work you discover as items; defer out-of-scope work instead of doing it.`,
+    `The task ledger "${ledger.title}" still has ${open.length} open ${open.length === 1 ? "item" : "items"} (automatic follow-up ${round}). Continue working through them. Close an item with evidence once its acceptance holds, or drop it with a reason if it no longer applies. Add work you discover as items; defer out-of-scope work instead of doing it.${ledger.requiresJudge === true ? ` ${JUDGED_SET_ASIDE_HINT}` : ""}`,
     ...actionableLines,
     ...(waitingLines.length === 0 ? [] : ["Waiting, not actionable yet:", waitingLines.join("\n")]),
   ].join("\n\n");

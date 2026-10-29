@@ -13,6 +13,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { isApproachItem, isLiveApproach } from "@t3tools/shared/investigation";
+import { isFinishedOpenLedger } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
@@ -152,9 +153,10 @@ export function planInvestigationCommand(input: {
     if (ledger?.id === command.ledgerId && ledger.investigation !== undefined) {
       return Result.succeed([]);
     }
-    if (ledger !== undefined && ledger.closedAt === null) {
+    const closesFinished = ledger !== undefined && isFinishedOpenLedger(ledger);
+    if (ledger !== undefined && ledger.closedAt === null && !closesFinished) {
       return Result.fail(
-        `Thread ${command.threadId} already has an open ledger (${ledger.id}). Close it before starting an investigation.`,
+        `Thread ${command.threadId} already has an open ledger (${ledger.id}) with unfinished items. Close it before starting an investigation.`,
       );
     }
     if (!input.requiresJudge) {
@@ -163,6 +165,14 @@ export function planInvestigationCommand(input: {
       );
     }
     return Result.succeed([
+      ...(closesFinished && ledger !== undefined
+        ? [
+            {
+              type: "ledger.closed" as const,
+              payload: { ledgerId: ledger.id, closedAt: now, updatedAt: now },
+            },
+          ]
+        : []),
       {
         type: "ledger.created",
         payload: {

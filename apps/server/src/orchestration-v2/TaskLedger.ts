@@ -10,6 +10,7 @@ import type {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { isRefutedApproach } from "@t3tools/shared/investigation";
+import { isFinishedOpenLedger } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
@@ -300,11 +301,26 @@ function planCoreLedgerCommand(input: {
   const reject = (detail: string) => Result.fail(detail);
 
   if (command.type === "ledger.create") {
-    if (ledger !== undefined && ledger.closedAt === null) {
+    const closesFinished = ledger !== undefined && isFinishedOpenLedger(ledger);
+    if (ledger !== undefined && ledger.closedAt === null && !closesFinished) {
       return reject(
-        `Thread ${command.threadId} already has an open ledger (${ledger.id}). Close it before creating another.`,
+        `Thread ${command.threadId} already has an open ledger (${ledger.id}) with unfinished items: ${ledger.items
+          .filter(isUnfinished)
+          .map((item) => item.id)
+          .join(
+            ", ",
+          )}. Close, drop or defer them, or add the new work to it with ledger_add_items.`,
       );
     }
+    const closePrevious: ReadonlyArray<PlannedLedgerEvent> =
+      closesFinished && ledger !== undefined
+        ? [
+            {
+              type: "ledger.closed",
+              payload: { ledgerId: ledger.id, closedAt: now, updatedAt: now },
+            },
+          ]
+        : [];
     if (ledger?.id === command.ledgerId) {
       return reject(
         `Ledger id ${command.ledgerId} is already used by this thread's closed ledger.`,
@@ -325,6 +341,7 @@ function planCoreLedgerCommand(input: {
     // A closed ledger's flag must not leak into its replacement, so only the input counts here.
     const stampedRequiresJudge = input.requiresJudge === true;
     return Result.succeed([
+      ...closePrevious,
       {
         type: "ledger.created",
         payload: {
