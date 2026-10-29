@@ -166,15 +166,16 @@ describe("decideLedgerFollowUp", () => {
         ledger: moved,
         messages: [userMessage, followUp(1, before), replanned],
       }),
-    ).toMatchObject({ type: "continue", round: 3 });
+    ).toMatchObject({ type: "continue", round: 1 });
 
-    // A new stall after progress is a new episode and earns its own replan.
+    // A new stall after progress is a new episode and earns its own replan; the deferred item
+    // restarted the count, so only the round sent after it counts.
     expect(
       decideLedgerFollowUp({
         ledger: moved,
-        messages: [userMessage, followUp(1, before), replanned, followUp(3, moved)],
+        messages: [userMessage, followUp(1, before), replanned, followUp(1, moved)],
       }),
-    ).toMatchObject({ type: "replan", reason: "stalled", round: 4 });
+    ).toMatchObject({ type: "replan", reason: "stalled", round: 2 });
   });
 
   it(`replans an item that failed the judge ${LEDGER_JUDGE_FAILURE_REPLAN_THRESHOLD} times, once`, () => {

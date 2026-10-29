@@ -309,15 +309,16 @@ it.effect("links a delegated task to its item through the ledger's own events an
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("allows one open ledger per thread and a replacement only after close", () =>
+it.effect("allows one open ledger per thread while it has unfinished items", () =>
   Effect.gen(function* () {
     const threadId = yield* createThread("one-ledger");
-    yield* createLedger(threadId, { items: [] });
+    yield* createLedger(threadId, { items: ["a"] });
     yield* assertRejected(
       threadId,
       createLedger(threadId, { id: LedgerId.make("ledger:second") }),
-      "open ledger",
+      "unfinished items",
     );
+    yield* updateItem(threadId, "a", { status: "dropped", dropReason: "not needed" });
     yield* closeLedger(threadId);
     yield* assertRejected(threadId, createLedger(threadId), "already used");
     yield* createLedger(threadId, { id: LedgerId.make("ledger:second"), items: ["x"] });

@@ -678,7 +678,7 @@ it.effect("marks the thread unread when the follow-up itself fails", () =>
   }),
 );
 
-it.effect("keeps going while each round moves an item", () =>
+it.effect("keeps going while each round moves an item, and a closed item restarts the count", () =>
   Effect.gen(function* () {
     const threadId = yield* setup("progress", ["a", "b", "c"]);
     yield* sendUserMessage(threadId);
@@ -688,7 +688,7 @@ it.effect("keeps going while each round moves an item", () =>
     yield* updateItem(threadId, "a", "closed");
     yield* completeLatest(threadId);
     const followUps = yield* autoContinues(threadId);
-    assert.deepEqual(followUps.map(roundOf), [1, 2, 3]);
+    assert.deepEqual(followUps.map(roundOf), [1, 2, 1]);
     assert.isFalse(yield* isMarkedStuck(threadId));
   }).pipe(Effect.provide(layerTest)),
 );
