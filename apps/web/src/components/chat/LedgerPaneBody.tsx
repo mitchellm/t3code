@@ -355,12 +355,14 @@ function ItemRow({
   row,
   requiresJudge,
   context,
+  initiallyOpen = false,
 }: {
   row: LedgerPanelRow;
   requiresJudge: boolean;
   context: LedgerAgentContext;
+  initiallyOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initiallyOpen);
   const { item } = row;
   const { Icon, className: iconClass } = STATUS_ICON[item.status];
   return (
@@ -412,12 +414,14 @@ function ItemGroup({
   requiresJudge,
   context,
   folded = false,
+  openItemId = null,
 }: {
   label: string;
   rows: ReadonlyArray<LedgerPanelRow>;
   requiresJudge: boolean;
   context: LedgerAgentContext;
   folded?: boolean;
+  openItemId?: LedgerItem["id"] | null;
 }) {
   if (rows.length === 0) return null;
   // A sub-item whose parent sits in another group starts at the margin, not under a gap.
@@ -434,6 +438,7 @@ function ItemGroup({
           }
           requiresJudge={requiresJudge}
           context={context}
+          initiallyOpen={row.item.id === openItemId}
         />
       ))}
     </ul>
@@ -694,9 +699,12 @@ type PaneView = "items" | "agents";
 export function LedgerPaneBody({
   threadRef,
   ledger,
+  initialOpenItemId = null,
 }: {
   threadRef: ScopedThreadRef;
   ledger: Ledger;
+  /** Opened on mount, when the short form hands over a clicked item. */
+  initialOpenItemId?: LedgerItem["id"] | null;
 }) {
   const [view, setView] = useState<PaneView>("items");
   const records = useLedgerTaskRecords(threadRef);
@@ -745,12 +753,14 @@ export function LedgerPaneBody({
             rows={running}
             requiresJudge={requiresJudge}
             context={context}
+            openItemId={initialOpenItemId}
           />
           <ItemGroup
             label="Up next"
             rows={upNext}
             requiresJudge={requiresJudge}
             context={context}
+            openItemId={initialOpenItemId}
           />
           <ItemGroup
             label="Done"

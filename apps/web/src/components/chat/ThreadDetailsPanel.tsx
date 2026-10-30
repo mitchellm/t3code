@@ -21,7 +21,7 @@ import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
-import { ThreadLedgerDetailsSection } from "./ThreadLedger";
+import { ThreadLedgerCard } from "./ThreadLedger";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
 const GitActionsControl = memo(BaseGitActionsControl);
@@ -107,6 +107,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
       anchor={props.anchor}
       handle={props.handle}
       onPresentationChange={props.onPresentationChange}
+      secondary={props.draftId ? null : <ThreadLedgerCard threadRef={activeThreadRef} />}
     >
       {(density) => (
         <>
@@ -181,10 +182,6 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                 ) : null}
               </div>
             </ThreadDetailsSection>
-          ) : null}
-
-          {density === "full" && !props.draftId ? (
-            <ThreadLedgerDetailsSection threadRef={activeThreadRef} />
           ) : null}
 
           {density === "full" && !props.draftId ? (

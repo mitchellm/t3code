@@ -12,12 +12,15 @@ import {
   resolveThreadDetailsCardLayout,
 } from "./threadDetailsCardLayout";
 import { observeResize } from "../../lib/observeResize";
+import { useLedgerCardStore } from "../../ledgerCardStore";
+import { ChevronDownIcon } from "lucide-react";
 
 export function ThreadDetailsCard({
   threadRef,
   anchor,
   handle,
   onPresentationChange,
+  secondary,
   children,
 }: {
   threadRef: ScopedThreadRef;
@@ -25,7 +28,13 @@ export function ThreadDetailsCard({
   handle: ReturnType<typeof PopoverCreateHandle>;
   onPresentationChange: (presentation: ThreadPanelPresentation) => void;
   children: (density: "full" | "compact" | "essential") => ReactNode;
+  /** Fork: a card stacked under this one (the task ledger); both fold from a title row. */
+  secondary?: ReactNode;
 }) {
+  const detailsCollapsed = useLedgerCardStore(
+    (state) => secondary != null && state.detailsCollapsed,
+  );
+  const toggleDetails = useLedgerCardStore((state) => state.toggleDetails);
   const canvas = useChatCanvas();
   const preferredPlacement = canvas
     ? resolveThreadDetailsCardLayout({
@@ -123,18 +132,47 @@ export function ThreadDetailsCard({
   const card = (
     <div
       className={cn(
-        "dropdown-glass isolate contain-paint grid max-h-full grid-rows-[minmax(0,1fr)] overflow-hidden rounded-2xl",
+        "dropdown-glass isolate contain-paint grid max-h-full overflow-hidden rounded-2xl",
+        secondary == null || detailsCollapsed
+          ? "grid-rows-[minmax(0,1fr)]"
+          : "grid-rows-[auto_minmax(0,1fr)]",
         mode === "popover" &&
           "max-h-[min(calc(100dvh-6.5rem),calc(var(--available-height,100dvh)-1rem))]",
       )}
       style={placement ? { maxHeight: height } : undefined}
       data-thread-details-card
     >
-      <ScrollArea scrollFade className="min-h-0">
-        <div ref={setContentElement}>{children(density)}</div>
-      </ScrollArea>
+      {secondary == null ? null : (
+        <button
+          type="button"
+          aria-expanded={!detailsCollapsed}
+          onClick={toggleDetails}
+          className="group flex h-8 w-full shrink-0 items-center justify-between gap-2 px-4 text-2xs font-medium text-muted-foreground select-none hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          Thread
+          <ChevronDownIcon
+            aria-hidden
+            className={cn("size-3.5", detailsCollapsed && "-rotate-90")}
+          />
+        </button>
+      )}
+      {detailsCollapsed ? null : (
+        <ScrollArea scrollFade className="min-h-0">
+          <div ref={setContentElement}>{children(density)}</div>
+        </ScrollArea>
+      )}
     </div>
   );
+  // The details card shrinks before the ledger does, so a long plan keeps its room.
+  const stack =
+    secondary == null ? (
+      card
+    ) : (
+      <div className="flex max-h-full min-h-0 flex-col items-end gap-2 *:min-h-0">
+        <div className="w-full shrink">{card}</div>
+        {secondary}
+      </div>
+    );
   return (
     <Popover
       handle={handle}
@@ -172,7 +210,7 @@ export function ThreadDetailsCard({
             data-density={density}
             data-thread-details-panel="inline"
           >
-            {card}
+            {stack}
           </aside>
         ) : null
       ) : (
@@ -188,7 +226,7 @@ export function ThreadDetailsCard({
           padding="none"
         >
           <div data-density={density} data-thread-details-panel="popover">
-            {card}
+            {stack}
           </div>
         </PopoverPopup>
       )}

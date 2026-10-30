@@ -366,9 +366,6 @@ import { observeResize } from "~/lib/observeResize";
 import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
-import { LedgerPane } from "./chat/LedgerPane";
-import { useLedgerPaneStore } from "../ledgerPaneStore";
-import { useThreadLedgerIfSupported } from "../hooks/useThreadLedgerIfSupported";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
 import { branchMismatchBannerItem } from "./chat/ThreadActivityBanners";
 import { useTimelineFollow } from "./chat/useTimelineFollow";
@@ -1011,12 +1008,6 @@ export default function ChatView(props: ChatViewProps) {
   const canMaximizeRightPanel = rightPanelOpen && !shouldUsePlanSidebarSheet;
   const rightPanelMaximized = canMaximizeRightPanel && rightPanelState.maximized === true;
   const inlineRightPanelOwnsTitleBar = rightPanelOpen && !shouldUsePlanSidebarSheet;
-  // Fork: the ledger pane sits left of the chat column, so it takes the titlebar inset when shown.
-  const ledgerPresent =
-    useThreadLedgerIfSupported(isServerThread ? activeThreadRef : null) !== null;
-  const ledgerPaneOpen = useLedgerPaneStore((state) => state.open);
-  const ledgerPaneInline =
-    ledgerPresent && ledgerPaneOpen && !shouldUsePlanSidebarSheet && !rightPanelMaximized;
   const [threadPanelPresentation, setThreadPanelPresentation] =
     useState<ThreadPanelPresentation>("inline");
   const [threadPanelPopoverHandle] = useState(PopoverCreateHandle);
@@ -2720,10 +2711,6 @@ export default function ChatView(props: ChatViewProps) {
       "thread.copyReference": ({ event }) => {
         if (!event.repeat) copyActiveThreadReference();
       },
-      "ledgerPanel.toggle": ({ event }) => {
-        if (!ledgerPresent) return false;
-        if (!event.repeat) useLedgerPaneStore.getState().toggle(shouldUsePlanSidebarSheet);
-      },
       "chat.find": () => {
         if (!isServerThread || serverConfig?.threadFind !== true || activeThreadKey === null)
           return false;
@@ -3204,9 +3191,6 @@ export default function ChatView(props: ChatViewProps) {
         state={deviceState}
       />
       {rightPanelControlsAtRoot ? panelLayoutControls : null}
-      {isServerThread && activeThreadRef && !rightPanelMaximized ? (
-        <LedgerPane threadRef={activeThreadRef} sheet={shouldUsePlanSidebarSheet} />
-      ) : null}
       <div
         className={cn(
           "flex min-h-0 min-w-0 flex-col overflow-x-hidden",
@@ -3228,7 +3212,7 @@ export default function ChatView(props: ChatViewProps) {
                     "wco:pr-(--workspace-native-controls-inset)",
                 )
               : "flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center pl-(--workspace-gutter-start) pr-(--workspace-gutter-end)",
-            !ledgerPaneInline && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+            COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
           )}
         >
           {isElectron && rightPanelControlsAtRoot ? (
