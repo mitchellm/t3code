@@ -181,6 +181,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.vcsStage]: AuthSourceControlWriteScope,
   [WS_METHODS.vcsUnstage]: AuthSourceControlWriteScope,
   [WS_METHODS.vcsCommitStaged]: AuthSourceControlWriteScope,
+  [WS_METHODS.reviewGetBranchCommits]: AuthFilesystemReadScope,
   [WS_METHODS.reviewGetDiffPreview]: AuthFilesystemReadScope,
   [WS_METHODS.reviewGetDiffFileContents]: AuthFilesystemReadScope,
   [WS_METHODS.terminalOpen]: AuthTerminalOperateScope,
@@ -239,7 +240,8 @@ const SettingsUpdate = Schema.Struct({
   patch: ServerSettingsPatch,
   providerInstanceMutation: Schema.optionalKey(ProviderInstanceMutation),
 });
-const decodeSettingsUpdate = Schema.decodeUnknownSync(SettingsUpdate);
+// Middleware receives the payload already decoded, so it is checked against the decoded shape.
+const decodeSettingsUpdate = Schema.decodeUnknownSync(Schema.toType(SettingsUpdate));
 
 const requiredScopesForSettingsUpdate = (payload: unknown) => {
   const input = decodeSettingsUpdate(payload);

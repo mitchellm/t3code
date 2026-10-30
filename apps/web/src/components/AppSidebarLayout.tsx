@@ -42,6 +42,7 @@ import { ExplorerRevealer } from "./explorer/ExplorerRevealer";
 import { ExplorerSidebarContent } from "./explorer/ExplorerSidebarContent";
 import { explorerWidthStorageKey, readExplorerWidth } from "./explorer/explorerWidth";
 import { useActiveExplorerViewIdentity } from "./explorer/useActiveExplorerView";
+import { HistorySwipeNavigation } from "./HistorySwipeNavigation";
 import { SidebarBrandWidthProbe } from "./sidebar/SidebarChrome";
 import { isAppModalPage } from "./sidebar/mainAppLocation";
 import { ThreadVisitRecorder } from "./sidebar/ThreadHistoryButtons";
@@ -452,7 +453,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         defaultOpen
         style={sidebarProviderStyle}
       >
-        <SidebarBrandWidthProbe onWidthChange={setBrandWidth} />
+        <SidebarBrandWidthProbe isElectron={isElectron} onWidthChange={setBrandWidth} />
         <Sidebar
           side="left"
           collapsible="offcanvas"
@@ -484,6 +485,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         <ThreadVisitRecorder />
         {/* Fork: picking a view from the palette or switcher opens the sidebar. */}
         <ExplorerRevealer />
+        {isElectron ? <HistorySwipeNavigation /> : null}
       </SidebarProvider>
     </PanelAnimationSuppressionProvider>
   );
