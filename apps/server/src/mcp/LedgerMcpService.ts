@@ -2,6 +2,7 @@ import {
   CommandId,
   type Ledger,
   LedgerId,
+  type LedgerItemId,
   type LedgerMcpAddItemsInput,
   type LedgerMcpCreateInput,
   type LedgerMcpReadResult,
@@ -16,6 +17,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -24,6 +26,7 @@ import {
   investigationSpawnGuard,
   investigationSpawnRefusal,
 } from "../orchestration-v2/Investigation.ts";
+import * as LedgerJudgeRunner from "../orchestration-v2/LedgerJudgeRunner.ts";
 import { latestUserMessageAt } from "./InvestigationSpawnGuard.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
@@ -121,6 +124,7 @@ const make = Effect.gen(function* () {
       Effect.orDie,
     );
   const threads = yield* ThreadManagementService.ThreadManagementService;
+  const judgeRunner = yield* LedgerJudgeRunner.LedgerJudgeRunner;
 
   const loadOwnLedger = Effect.fn("LedgerMcpService.loadOwnLedger")(function* (
     scope: McpInvocationScope,
@@ -313,6 +317,26 @@ const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * Fork: the judge delegates from the agent's run, live only now; the outbox start can queue for
+   * minutes, and until a judge task exists the Stop hook nudges as if the items were stuck. The
+   * start is idempotent, so the outbox rejoins this judge, or starts it if this one failed.
+   */
+  const startRequestedJudge = Effect.fn("LedgerMcpService.startRequestedJudge")(function* (
+    scope: McpInvocationScope,
+    itemId: LedgerItemId,
+  ) {
+    const { threadId, ledger } = yield* loadOwnLedger(scope);
+    const item = ledger?.items.find(({ id }) => id === itemId);
+    if (ledger === undefined || item?.judging !== true || item.judgeTaskId !== undefined) return;
+    yield* judgeRunner.start({
+      threadId,
+      ledgerId: ledger.id,
+      itemId: item.id,
+      requestedAt: DateTime.formatIso(item.updatedAt),
+    });
+  });
+
   const updateItem = Effect.fn("LedgerMcpService.updateItem")(function* (
     scope: McpInvocationScope,
     input: LedgerMcpUpdateItemInput,
@@ -330,7 +354,7 @@ const make = Effect.gen(function* () {
         "Pass status, evidence, a reason, blockedBy or parentItemId to update.",
       );
     }
-    return yield* onExisting(
+    const written = yield* onExisting(
       "update-item",
       scope,
       input,
@@ -364,6 +388,17 @@ const make = Effect.gen(function* () {
         );
       },
     );
+    if (input.status !== undefined) {
+      yield* startRequestedJudge(scope, input.itemId).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("ledger judge start with the close failed; the outbox retries it", {
+            itemId: input.itemId,
+            cause,
+          }),
+        ),
+      );
+    }
+    return written;
   });
 
   const setCheckpoint = Effect.fn("LedgerMcpService.setCheckpoint")(function* (
