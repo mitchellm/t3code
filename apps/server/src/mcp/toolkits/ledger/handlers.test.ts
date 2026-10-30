@@ -7,6 +7,7 @@ import {
   LedgerId,
   LedgerItemId,
   MessageId,
+  NodeId,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2Run,
   ProviderInstanceId,
@@ -21,6 +22,7 @@ import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import { McpSchema, McpServer } from "effect/ai";
 
+import * as LedgerJudgeRunner from "../../../orchestration-v2/LedgerJudgeRunner.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
   OrchestratorDispatchError,
@@ -90,7 +92,26 @@ const makeFakeThreads = () => {
   /** The thread's runs and user messages, for the one tool that reads them (create after an end). */
   const runs = new Map<ThreadId, ReadonlyArray<OrchestrationV2Run>>();
   const messages = new Map<ThreadId, ReadonlyArray<OrchestrationV2ConversationMessage>>();
-  const layer = Layer.mock(ThreadManagement.ThreadManagementService)({
+  const judgeStarts: Array<LedgerJudgeRunner.LedgerJudgeStartInput> = [];
+  // Like the real runner once its judge task exists: the judging item records the task.
+  const judgeRunner = Layer.succeed(LedgerJudgeRunner.LedgerJudgeRunner)({
+    start: (input) =>
+      Effect.sync(() => {
+        judgeStarts.push(input);
+        const ledger = ledgers.get(input.threadId);
+        if (ledger === undefined) return;
+        ledgers.set(input.threadId, {
+          ...ledger,
+          items: ledger.items.map((item) =>
+            item.id === input.itemId
+              ? { ...item, judgeTaskId: NodeId.make(`task:judge:${item.id}`) }
+              : item,
+          ),
+        });
+      }),
+    bind: () => Effect.void,
+  });
+  const threads = Layer.mock(ThreadManagement.ThreadManagementService)({
     getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
     getThreadRecords: ((
       threadId: ThreadId,
@@ -153,7 +174,14 @@ const makeFakeThreads = () => {
         return { sequence, storedEvents: [] };
       }),
   });
-  return { layer, ledgers, runs, messages, planned: () => planned };
+  return {
+    layer: Layer.merge(threads, judgeRunner),
+    ledgers,
+    runs,
+    messages,
+    judgeStarts,
+    planned: () => planned,
+  };
 };
 
 const withServer = <A, E>(
@@ -468,6 +496,44 @@ it.effect(
     );
   },
 );
+
+it.effect("starts the judge within the agent's own close call, while its run is live", () => {
+  const fake = makeFakeThreads();
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      yield* call("ledger_create", { title: "Ship", items: twoItems });
+      fake.ledgers.set(ownThread, { ...fake.ledgers.get(ownThread)!, requiresJudge: true });
+      const ledgerId = fake.ledgers.get(ownThread)!.id;
+
+      yield* call("ledger_update_item", {
+        itemId: "L1",
+        status: "closed",
+        evidence: "parser.test.ts: 12 passed",
+      });
+      // The runner acts only on the request whose stamp is the judging item's own.
+      const judging = fake.ledgers.get(ownThread)!.items.find(({ id }) => id === "L1")!;
+      expect(judging.judging).toBe(true);
+      expect(fake.judgeStarts).toEqual([
+        {
+          threadId: ownThread,
+          ledgerId,
+          itemId: "L1",
+          requestedAt: DateTime.formatIso(judging.updatedAt),
+        },
+      ]);
+      // Once its judge is on record, asking again starts no second one.
+      yield* call("ledger_update_item", { itemId: "L1", status: "closed" });
+      // Setting aside started work is judged as well, so its judge starts the same way.
+      yield* call("ledger_update_item", { itemId: "L2", status: "in_progress" });
+      yield* call("ledger_update_item", {
+        itemId: "L2",
+        status: "dropped",
+        dropReason: "Superseded by L1.",
+      });
+      expect(fake.judgeStarts.map(({ itemId }) => itemId)).toEqual(["L1", "L2"]);
+    }),
+  );
+});
 
 it.effect("rejects a caller outside a thread and a credential without orchestration", () =>
   withServer(makeFakeThreads(), (call) =>
