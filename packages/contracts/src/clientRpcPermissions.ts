@@ -70,6 +70,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [ORCHESTRATION_V2_WS_METHODS.stopInvestigation]: AuthOrchestrationOperateScope,
   // Fork: starts turns, and for an audit a judge model, on this environment's providers.
   [ORCHESTRATION_V2_WS_METHODS.runBuildMode]: AuthOrchestrationOperateScope,
+  // Force stop kills agent processes, as Stop on a terminal does.
+  [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: AuthOrchestrationOperateScope,
   // A guest link hands thread access to someone outside, like a pairing link.
   [WS_METHODS.guestShareCreate]: AuthAccessWriteScope,
   [WS_METHODS.peerLinksLink]: AuthAccessWriteScope,
