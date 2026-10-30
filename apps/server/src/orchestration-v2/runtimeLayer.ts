@@ -321,9 +321,7 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
     Layer.mergeAll(
       layerRunFinalizationServiceProvided,
       LedgerAutoContinue.layer.pipe(
-        Layer.provide(
-          Layer.mergeAll(layerOrchestratorProvided, layerEventSinkProvided, IdAllocator.layer),
-        ),
+        Layer.provide(Layer.mergeAll(layerOrchestratorProvided, layerEventSink, IdAllocator.layer)),
       ),
       layerCheckpointRollbackServiceProvided,
       layerProviderSessionManagerProvided,

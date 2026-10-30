@@ -21,6 +21,9 @@ import { McpSchema, McpServer } from "effect/ai";
 
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as Project from "../project/ProjectService.ts";
 import { guardInvestigationSpawn } from "./InvestigationSpawnGuard.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
@@ -287,8 +290,8 @@ const toolRefusal = (result: McpSchema.CallToolResult) => {
     : undefined;
 };
 
-it.effect("update_scheduled_task is refused after the end, before the service runs", () =>
-  callRegistered("update_scheduled_task", { scheduledTaskId: "task:nightly", enabled: true }).pipe(
+it.effect("schedule_task updating a task is refused after the end, before the service runs", () =>
+  callRegistered("schedule_task", { scheduledTaskId: "task:nightly", enabled: true }).pipe(
     Effect.map((result) => expect(toolRefusal(result)).toContain("has ended (solved")),
     Effect.provide(
       McpHttpServer.toolkitRegistration(OrchestratorToolkit, OrchestratorHandlers.layer).pipe(
@@ -299,6 +302,9 @@ it.effect("update_scheduled_task is refused after the end, before the service ru
           }),
         ),
         Layer.provide(Layer.mock(ThreadMetadataMcpService.ThreadMetadataMcpService)({})),
+        Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+        Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+        Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
         Layer.provide(threadsLayer(endedTree)),
       ),
     ),

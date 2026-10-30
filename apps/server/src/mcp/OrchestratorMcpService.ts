@@ -1998,15 +1998,21 @@ const make = Effect.gen(function* () {
     const judgeRun = (
       result: OrchestratorMcpDelegateTaskResult,
       expected: { readonly providerInstanceId: ProviderInstanceId; readonly model: string },
-    ) => ({
-      taskId: result.taskId,
-      childThreadId: result.childThreadId,
-      status: result.status,
-      summary: result.summary,
-      waitTimedOut: result.waitTimedOut,
-      judge: { instanceId: result.providerInstanceId, model: result.model ?? "unknown" },
-      expectedJudge: { instanceId: expected.providerInstanceId, model: expected.model },
-    });
+    ) =>
+      // A judgement reads the judge's messages, so it needs a thread on this environment.
+      result.childThreadId === null
+        ? Effect.fail(
+            failure("orchestration_error", "The judge did not start on this environment."),
+          )
+        : Effect.succeed({
+            taskId: result.taskId,
+            childThreadId: result.childThreadId,
+            status: result.status,
+            summary: result.summary,
+            waitTimedOut: result.waitTimedOut,
+            judge: { instanceId: result.providerInstanceId, model: result.model ?? "unknown" },
+            expectedJudge: { instanceId: expected.providerInstanceId, model: expected.model },
+          });
     // `prepareJudgement` refuses before any port runs when there is no ledger.
     const ledgerId = () => ledger!.id;
     const ports: BackgroundJudgementPorts = {
@@ -2036,7 +2042,7 @@ const make = Effect.gen(function* () {
           },
           JUDGE_DELEGATION_OPERATION,
         );
-        return judgeRun(result, expected);
+        return yield* judgeRun(result, expected);
       }),
       readTask: Effect.fn("OrchestratorMcpService.judgeReadTask")(function* (taskId) {
         // Not acknowledged: the parent's completion wake still delivers the judge's answer.
@@ -2055,7 +2061,7 @@ const make = Effect.gen(function* () {
                 instanceId: result.providerInstanceId,
                 model: result.model,
               });
-        return judgeRun(result, ran ?? (yield* expectedJudge()));
+        return yield* judgeRun(result, ran ?? (yield* expectedJudge()));
       }),
       userMessages: (threadId) =>
         threadManagement.getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] }).pipe(

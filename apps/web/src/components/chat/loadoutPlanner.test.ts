@@ -263,7 +263,6 @@ describe("plannerModelSwitch", () => {
 
   it("repeats the model picker's own reason when a started thread cannot change models", () => {
     const modelDisabledReason = makeModelDisabledReason({
-      providers: [{ instanceId: superbot, requiresNewThreadForModelChange: true }],
       hasStartedSession: true,
       currentModelSelection: { instanceId: superbot, model: "superbot-mini" },
       currentProviderInstanceId: superbot,

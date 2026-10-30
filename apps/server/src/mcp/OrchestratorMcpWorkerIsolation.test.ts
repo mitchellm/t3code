@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -160,6 +161,7 @@ const delegate = (options: {
       }),
       Layer.mock(SecretRequests.SecretRequests)({}),
       Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      Layer.mock(RemoteDelegation.RemoteDelegation)({}),
       ServerSettings.layerTest({ loadouts }),
     );
     const layerService = OrchestratorMcpService.layer.pipe(

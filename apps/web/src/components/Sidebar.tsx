@@ -3605,6 +3605,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             renderThreadRow(
                               threadByKey.get(item.key)!,
                               item.section,
+                              undefined,
                               false,
                               item.nested === true,
                             ),

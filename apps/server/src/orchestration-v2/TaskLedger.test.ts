@@ -1069,7 +1069,7 @@ it.effect("resumes a judge start the server crashed in the middle of", () => {
     const threadId = yield* judgedLedgerClosedByAgent("judge-restart");
     const outbox = yield* EffectOutbox.EffectOutboxV2;
     // The old process claimed the start and died before settling it.
-    const claimed = yield* outbox.claimNext({ workerId: "crashed", leaseDurationMs: 60_000 });
+    const claimed = yield* outbox.claimNext({ workerId: "crashed" });
     assert.equal(
       claimed._tag === "Some" ? claimed.value.request.type : undefined,
       "ledger-judge.start",
