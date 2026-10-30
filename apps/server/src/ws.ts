@@ -3382,9 +3382,10 @@ export const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
+  reportProfiles: ServerBrowser.ProfileReporter,
 ) =>
   Layer.merge(
-    layerUpstreamWsRpc(currentSession, clientAnalyticsProps, serverBrowser),
+    layerUpstreamWsRpc(currentSession, clientAnalyticsProps, serverBrowser, reportProfiles),
     layerForkWsRpc,
   );
 
