@@ -294,12 +294,21 @@ describe("decideLedgerAutoContinue", () => {
     ).toBe("continue");
   });
 
-  it("starts over after a user message", () => {
+  it("starts over after a user turn that moved the ledger", () => {
+    expect(
+      decideLedgerAutoContinue({
+        ledger: withItems(item("a", { status: "in_progress" })),
+        messages: [followUp(1, [["a", "open"]]), userMessage],
+      }),
+    ).toMatchObject({ type: "continue", round: 1 });
+  });
+
+  it("stays off after a user turn that left the ledger as the last follow-up found it", () => {
     expect(
       decideLedgerAutoContinue({
         ledger: withItems(item("a")),
         messages: [followUp(1, [["a", "open"]]), userMessage],
       }),
-    ).toMatchObject({ type: "continue", round: 1 });
+    ).toEqual({ type: "idle" });
   });
 });
