@@ -1000,17 +1000,25 @@ function Invoke-RestartRun {
       $closedAt = Get-Date
     }
     [void](Complete-Install $req.installer $ver $closedAt -SkipIfCurrent)
-    $back = Wait-AppBack 15
+    # On 2026-10-30 T3 took 16 minutes to answer: two relaunches, then a 6-minute cold start.
+    $backMinutes = 30
+    $back = Wait-AppBack $backMinutes
     $installed = Get-InstalledBuild
     $ok = (Compare-Build $installed $ver) -ge 0
-    Log "T3 is $($back ? 'back' : 'NOT back after 15 minutes') on $installed$($ok ? '' : ", not $ver")"
-    Show-Toast ($ok ? "T3 Code restarted on $installed" : 'T3 Code restart did not finish') ($ok ? "Was $from." : "Installed build reads $installed. Log: $script:RunLog")
+    Log "T3 is $($back ? 'back' : "NOT back after $backMinutes minutes") on $installed$($ok ? '' : ", not $ver")"
+    Show-Toast ($ok -and $back ? "T3 Code restarted on $installed" : 'T3 Code restart did not finish') ($ok -and $back ? "Was $from." : "Installed build reads $installed. Log: $script:RunLog")
     # Give the threads a moment to reconnect before one of them gets a message.
     if ($threadId) { Start-Sleep -Seconds 30 }
+    # T3 can answer during that pause, and the report should say how it is when it is read.
+    $back = $back -or ((Test-AppRunning) -and (Test-AppApi))
+    $problems = @(
+      if (-not $back) { "T3 is not back after $backMinutes minutes" }
+      if (-not $ok) { "its installed build reads $installed, not $ver" }
+    )
     $at = (Get-Date).ToString('HH:mm')
-    Send-Report $threadId ($ok -and $back ?
+    Send-Report $threadId ($problems.Count -eq 0 ?
       "T3 Code restarted at $at and runs $installed (was $from)$($compacted ? "; $compacted" : ''). Background jobs that threads had running ended with T3; re-arm any that are still needed. Log: $script:RunLog" :
-      "T3 Code restart at $at did not finish: T3 $($back ? 'is back' : 'did not come back') and its installed build reads $installed, not $ver. Log: $script:RunLog")
+      "T3 Code restart at $at did not finish: $($problems -join ' and '). Log: $script:RunLog")
   } catch {
     Log "FAILED: $_"
     Show-Toast 'T3 Code restart failed' "$_"
