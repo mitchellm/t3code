@@ -70,12 +70,12 @@ const itemLines = (items: ReadonlyArray<LedgerItem>) => {
 };
 
 /**
- * The planner refuses an agent's drop or defer of work it started on a judged ledger, so every
- * nudge that offers those must say who can: otherwise the agent retries refused options until the
- * follow-ups stop, and the user never learns the item needs them.
+ * On a judged ledger the planner sends an agent's drop or defer of work it started to the judge,
+ * so every nudge that offers those says so: an agent that believes it cannot set work aside
+ * resubmits evidence that will fail, or stalls waiting on the user.
  */
 export const JUDGED_SET_ASIDE_HINT =
-  "On this judged ledger you cannot drop or defer an item you already started: close it with evidence for the judge, or, if it no longer applies, tell the user it needs them to drop or defer it in the ledger panel and go on with the rest.";
+  "On this judged ledger, dropping or deferring an item you already started goes to the judge like a close: give a dropReason or deferReason that says why it no longer needs doing (for example which item replaced it and passed, or what makes its acceptance impossible), and it is set aside when the judge agrees. Do not resubmit evidence the judge already failed for the same reason.";
 
 /** The replan instruction, for a follow-up message and for a Stop hook block reason alike. */
 export function ledgerReplanText(input: {

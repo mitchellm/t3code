@@ -419,7 +419,7 @@ it.effect("takes blockers, sub-items and deferral, and reads them back in tree o
 });
 
 it.effect(
-  "turns a close on a judged ledger into a judge request the agent cannot set aside",
+  "turns a close, drop or defer of started work on a judged ledger into a judge request",
   () => {
     const fake = makeFakeThreads();
     return withServer(fake, (call) =>
@@ -444,17 +444,26 @@ it.effect(
         // Asking again while it is judged changes nothing and does not fail.
         const again = yield* call("ledger_update_item", { itemId: "L1", status: "closed" });
         expect(failureOf(again)).toBeUndefined();
-        // Work the agent started on a judged ledger is the user's to set aside.
+        // Setting aside work it started goes to the judge too, never to the user.
         yield* call("ledger_update_item", { itemId: "L2", status: "in_progress" });
-        expect(
-          failureOf(
-            yield* call("ledger_update_item", {
-              itemId: "L2",
-              status: "dropped",
-              dropReason: "too hard",
-            }),
-          ),
-        ).toMatchObject({ message: expect.stringContaining("ask the user") });
+        const dropping = yield* call("ledger_update_item", {
+          itemId: "L2",
+          status: "dropped",
+          dropReason: "Superseded by L1.",
+        });
+        expect(failureOf(dropping)).toBeUndefined();
+        expect(dropping.structuredContent).toMatchObject({
+          ledger: {
+            items: expect.arrayContaining([
+              expect.objectContaining({
+                id: "L2",
+                status: "in_progress",
+                judging: true,
+                setAside: { status: "dropped", reason: "Superseded by L1." },
+              }),
+            ]),
+          },
+        });
       }),
     );
   },

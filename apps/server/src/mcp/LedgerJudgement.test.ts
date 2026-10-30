@@ -571,15 +571,19 @@ const backgroundHarness = (options: {
   /** The judged thread's checkpoints; the test edits the array in place as they land. */
   readonly checkpoints?: Array<JudgeCheckpoint>;
   readonly item?: Partial<LedgerItem>;
+  /** The ledger's other items, after the judged one, and its own fields. */
+  readonly others?: ReadonlyArray<LedgerItem>;
+  readonly ledger?: Partial<Ledger>;
   /** Runs as the judge task is recorded, before the start reads it back. */
   readonly onRecorded?: () => void;
 }) => {
-  let ledger = ledgerOf({}, [
+  let ledger = ledgerOf(options.ledger, [
     item({
       judging: true,
       ...(options.tasks === undefined ? {} : { tasks: options.tasks }),
       ...options.item,
     }),
+    ...(options.others ?? []),
   ]);
   const requestedAt = DateTime.formatIso(ledger.items[0]!.updatedAt);
   const delegated: Array<string> = [];
@@ -713,6 +717,79 @@ it.effect("hands the item back in progress with the judge's notes when it fails"
     expect(judged?.status).toBe("in_progress");
     expect(judged?.judging).toBeUndefined();
     expect(judged?.verdict?.notes).toContain("No CLI entry exists.");
+  });
+});
+
+const supersededDrop = {
+  acceptance: "The flag commit holds only that key",
+  evidence: "Flag at Custom.luau:78",
+  verdict: {
+    outcome: "fail",
+    judge,
+    notes: "The squash commit also holds SaveReleaseTiming.",
+    at,
+  },
+  setAside: { status: "dropped", reason: "Superseded by B6, which passed." },
+} satisfies Partial<LedgerItem>;
+const passedReplacement = item({
+  id: LedgerItemId.make("B6"),
+  title: "Flag without the only-that-key clause",
+  status: "closed",
+  verdict: { outcome: "pass", judge, notes: "ok", at },
+});
+
+it.effect("judges a drop of started work on the agent's reason and the ledger around it", () => {
+  const harnessed = backgroundHarness({
+    item: supersededDrop,
+    others: [passedReplacement],
+    ledger: { winConditions: ["Both flags ship off"] },
+    ended: run({
+      summary:
+        "C1: PASS - B6 passed and covers the flag.\nC2: PASS - nothing else waits on it.\nTests: none needed -> n/a\nVERDICT: PASS",
+    }),
+  });
+  return Effect.gen(function* () {
+    yield* harnessed.start();
+    const prompt = harnessed.delegated[0] ?? "";
+    expect(prompt).toContain("The agent asks to drop ONE ledger item it already started");
+    expect(prompt).toContain(
+      `reason to drop it. This is a claim, not proof:\n${FENCE_BEGIN}\nSuperseded by B6, which passed.\n${FENCE_END}`,
+    );
+    expect(prompt).toContain("The flag commit holds only that key");
+    expect(prompt).toContain("Flag at Custom.luau:78");
+    expect(prompt).toContain("The squash commit also holds SaveReleaseTiming.");
+    expect(prompt).toContain(
+      "- B6 [closed, last verdict pass] Flag without the only-that-key clause",
+    );
+    expect(prompt).toContain("Both flags ship off");
+    // The server's criteria, not the item's acceptance, are what the judge answers.
+    expect(prompt).toContain("Criterion 1: The item no longer needs doing");
+    expect(prompt).not.toContain("Criterion 1: The flag commit holds only that key");
+    yield* harnessed.settle();
+    const judged = harnessed.ledger().items[0];
+    expect(judged?.status).toBe("dropped");
+    expect(judged?.dropReason).toBe("Superseded by B6, which passed.");
+    expect(judged?.setAside).toBeUndefined();
+    expect(judged?.judging).toBeUndefined();
+  });
+});
+
+it.effect("hands a refused defer back in progress with the judge's notes", () => {
+  const harnessed = backgroundHarness({
+    item: { setAside: { status: "deferred", reason: "Too slow to test." } },
+    ended: run({
+      summary: "C1: FAIL - nothing blocks it; the test runs in a minute.\nVERDICT: FAIL",
+    }),
+  });
+  return Effect.gen(function* () {
+    yield* harnessed.start();
+    expect(harnessed.delegated[0]).toContain("asks to defer ONE ledger item");
+    yield* harnessed.settle();
+    const judged = harnessed.ledger().items[0];
+    expect(judged?.status).toBe("in_progress");
+    expect(judged?.verdict?.notes).toContain("nothing blocks it");
+    expect(judged?.setAside).toBeUndefined();
+    expect(judged?.deferReason).toBeUndefined();
   });
 });
 

@@ -111,7 +111,15 @@ function DetailField({ label, children }: { label: string; children: ReactNode }
 }
 
 function JudgeField({ item, requiresJudge }: { item: LedgerItem; requiresJudge: boolean }) {
-  if (item.judging === true) return <DetailField label="Judge">Judging now</DetailField>;
+  if (item.judging === true) {
+    return (
+      <DetailField label="Judge">
+        {item.setAside === undefined
+          ? "Judging now"
+          : `Judging the agent's ${item.setAside.status === "dropped" ? "drop" : "defer"}: ${item.setAside.reason}`}
+      </DetailField>
+    );
+  }
   if (item.verdict !== null) {
     return (
       <DetailField label="Judge">

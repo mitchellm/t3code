@@ -52,6 +52,13 @@ export const progressMark = ({
 });
 
 /**
+ * What the judge rules on: a pending drop or defer's reason, else the evidence offered for a
+ * close. A verdict is recorded against it, so a claim changed while judging voids the verdict.
+ */
+export const judgedClaim = (item: Pick<LedgerItem, "setAside" | "evidence">): string | null =>
+  item.setAside?.reason ?? item.evidence;
+
+/**
  * An open ledger whose every item is closed, dropped or deferred: a new ledger or investigation
  * closes it instead of being refused, so finished work does not strand the thread's next task.
  * A running investigation keeps its own ledger until it ends.
@@ -109,8 +116,9 @@ export function decideLedgerAutoContinue(input: {
 
   const items = ledger.items.map(progressMark);
   // The user spoke but their turn left the ledger exactly as the last follow-up found it, which is
-  // how a ledger waiting on the user looks (an item only they can drop). Restarting follow-ups
-  // would only produce more "still waiting on you" turns; any ledger change starts them again.
+  // how a ledger waiting on the user looks (an item blocked on something only they have).
+  // Restarting follow-ups would only produce more "still waiting on you" turns; any ledger change
+  // starts them again.
   if (previous === undefined && userIndex > 0) {
     const before = input.messages
       .slice(0, userIndex)
@@ -122,11 +130,10 @@ export function decideLedgerAutoContinue(input: {
       return { type: "idle" };
     }
   }
-  // A stalled replan that changed nothing has already shown these items need someone else (an
-  // item only the user can drop looks like this). When a later wake closes other work and every
-  // item left open is exactly as that replan found it, more rounds would only say "still waiting".
-  // The replan's own turn ending is judged as usual, so a replan that moved things still continues,
-  // and a plain follow-up after it means that stall is over and a new one earns its own replan.
+  // A stalled replan that changed nothing showed these items need someone else: once a later wake
+  // finds every open item exactly as that replan did, more rounds would only say "still waiting".
+  // A replan that moved things still continues, and a plain follow-up after it ends that stall, so
+  // a new one earns its own replan.
   const latestFollowUp = input.messages.findLast(
     (message) => message.notification?.source.kind === "ledger_continue",
   );

@@ -69,6 +69,16 @@ export const LedgerItemTaskJson = LedgerItemTask.mapFields((fields) => ({
   createdAt: Schema.DateTimeUtcFromString,
 }));
 
+/**
+ * Fork: an agent's drop or defer of work it started on a judged ledger. It is a request the judge
+ * rules on, like a close, so setting started work aside never waits on the user.
+ */
+export const LedgerItemSetAside = Schema.Struct({
+  status: Schema.Literals(["dropped", "deferred"]),
+  reason: TrimmedNonEmptyString,
+});
+export type LedgerItemSetAside = typeof LedgerItemSetAside.Type;
+
 export const LedgerItem = Schema.Struct({
   id: LedgerItemId,
   title: TrimmedNonEmptyString,
@@ -99,6 +109,11 @@ export const LedgerItem = Schema.Struct({
    * server sets or clears it; the verdict closes the item (pass) or hands it back (fail).
    */
   judging: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Fork: present while judging when the request is a drop or defer rather than a close. A pass
+   * sets the item aside with the reason; a fail hands it back in progress.
+   */
+  setAside: Schema.optionalKey(LedgerItemSetAside),
   /** The delegated judge task for the pending close request, once the server started it. */
   judgeTaskId: Schema.optionalKey(NodeId),
   /**

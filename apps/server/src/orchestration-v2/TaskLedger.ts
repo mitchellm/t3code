@@ -10,7 +10,7 @@ import type {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { isRefutedApproach } from "@t3tools/shared/investigation";
-import { isFinishedOpenLedger } from "@t3tools/shared/taskLedger";
+import { isFinishedOpenLedger, judgedClaim } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
@@ -137,6 +137,7 @@ function withOptional<
     | "parentItemId"
     | "deferReason"
     | "judging"
+    | "setAside"
     | "judgeTaskId"
     | "judgePromptDigest"
     | "judgeError"
@@ -454,7 +455,7 @@ function planCoreLedgerCommand(input: {
       if (item.status === "closed" || item.status === "dropped" || item.status === "deferred") {
         return reject(`Item ${item.id} is ${item.status}. Reopen it before judging it.`);
       }
-      if (command.judgedEvidence !== undefined && command.judgedEvidence !== item.evidence) {
+      if (command.judgedEvidence !== undefined && command.judgedEvidence !== judgedClaim(item)) {
         return reject(`Item ${item.id} evidence changed while it was being judged.`);
       }
       const judgements = (item.judgements ?? 0) + 1;
@@ -471,6 +472,30 @@ function planCoreLedgerCommand(input: {
         return itemUpdated(ledger.id, { ...recorded, updatedAt: item.updatedAt }, now);
       }
       const settled = withOptional(endJudging(recorded), "judgeError", undefined);
+      const { setAside } = item;
+      if (setAside !== undefined) {
+        // A pass sets the item aside as asked. A defer stays refused while unfinished items wait
+        // on the item, so if some came to since the request, the pass is kept and the item handed
+        // back, like a close that a reopened blocker stops.
+        const setsAside =
+          command.verdict.outcome === "pass" &&
+          (setAside.status === "dropped" || dependentsOf(ledger, item).length === 0);
+        if (!setsAside) return itemUpdated(ledger.id, { ...settled, status: "in_progress" }, now);
+        return itemUpdated(
+          ledger.id,
+          withOptional(
+            {
+              ...settled,
+              status: setAside.status,
+              dropReason: setAside.status === "dropped" ? setAside.reason : null,
+              closedAt: null,
+            },
+            "deferReason",
+            setAside.status === "deferred" ? setAside.reason : undefined,
+          ),
+          now,
+        );
+      }
       // A blocker or sub-item reopened while the judge ran: keep the pass, leave the close to
       // the agent, whose next close request then succeeds without another judge.
       const closes =
@@ -537,18 +562,36 @@ function planCoreLedgerCommand(input: {
       // The user is the authority over the ledger: their close is final, judge or no judge.
       const userCloses = !byAgent && command.status === "closed";
       if (item.judging === true && !userCloses) {
+        const pending = item.setAside;
+        const keepsShape = command.blockedBy === undefined && command.parentItemId === undefined;
         const repeatsClose =
+          pending === undefined &&
           command.status === "closed" &&
           (command.evidence === undefined || command.evidence === item.evidence) &&
           command.dropReason === undefined &&
           command.deferReason === undefined &&
-          command.blockedBy === undefined &&
-          command.parentItemId === undefined;
-        // A retried close request while the judge runs is already in effect.
-        if (repeatsClose) return Result.succeed([]);
-        if (command.status !== "dropped") {
+          keepsShape;
+        const repeatsSetAside =
+          pending !== undefined &&
+          command.status === pending.status &&
+          command.evidence === undefined &&
+          (pending.status === "dropped"
+            ? command.dropReason?.trim() === pending.reason && command.deferReason === undefined
+            : command.deferReason?.trim() === pending.reason && command.dropReason === undefined) &&
+          keepsShape;
+        // A retried request while the judge runs is already in effect.
+        if (repeatsClose || repeatsSetAside) return Result.succeed([]);
+        // The user may still drop it; an agent waits, since a second request would orphan the
+        // running judge's verdict. A refuted approach's drop asks nothing of the judge.
+        const dropsRefuted =
+          command.status === "dropped" &&
+          ledger.investigation?.status === "running" &&
+          isRefutedApproach(ledger.investigation, item);
+        if (command.status !== "dropped" || (byAgent && !dropsRefuted)) {
           return reject(
-            `Item ${item.id} is being judged. Wait for the verdict, which closes it or hands it back with the judge's notes.`,
+            pending === undefined
+              ? `Item ${item.id} is being judged. Wait for the verdict, which closes it or hands it back with the judge's notes.`
+              : `Item ${item.id} is being judged for ${pending.status === "dropped" ? "a drop" : "a defer"}. Wait for the verdict, which sets it aside or hands it back with the judge's notes.`,
           );
         }
       }
@@ -558,26 +601,27 @@ function planCoreLedgerCommand(input: {
       if (changesStatus && !LEGAL_TRANSITIONS[item.status].includes(target)) {
         return reject(`Item ${item.id} cannot go from ${item.status} to ${target}.`);
       }
-      // On a judged ledger, work the agent started ends only through the judge; setting it aside
-      // is the user's call. Deferring or dropping work it never started stays open to it.
-      // Fork: dropping a refuted investigation approach claims nothing, so the agent may, to make
-      // room for a variant under the parallel cap.
+      // On a judged ledger the agent's close, drop or defer of started work is a request the judge
+      // settles, so it never needs the user and cannot skip the gate; un-starting would let a later
+      // unjudged drop through. Fork: dropping a refuted investigation approach claims nothing, so
+      // the agent may, to make room for a variant under the parallel cap.
       const dropsRefutedApproach =
         target === "dropped" &&
         ledger.investigation?.status === "running" &&
         isRefutedApproach(ledger.investigation, item);
-      if (
-        byAgent &&
-        requiresJudge &&
-        changesStatus &&
-        item.status === "in_progress" &&
-        (target === "deferred" || target === "dropped" || target === "open") &&
-        !dropsRefutedApproach
-      ) {
+      const endsStartedJudgedWork =
+        byAgent && requiresJudge && changesStatus && item.status === "in_progress";
+      if (endsStartedJudgedWork && target === "open") {
         return reject(
-          `Item ${item.id} is in progress on a judged ledger. Close it with evidence for the judge, or ask the user to defer or drop it.`,
+          `Item ${item.id} is in progress on a judged ledger, so it cannot go back to open. Close it with evidence, or drop or defer it with a reason; the judge rules on either.`,
         );
       }
+      const requestedSetAside =
+        endsStartedJudgedWork &&
+        !dropsRefutedApproach &&
+        (target === "dropped" || target === "deferred")
+          ? target
+          : undefined;
       if (changesStatus && target === "deferred") {
         const dependents = dependentsOf(ledger, item);
         if (dependents.length > 0) {
@@ -688,6 +732,32 @@ function planCoreLedgerCommand(input: {
           );
         }
       }
+      if (requestedSetAside !== undefined) {
+        const reason = ((requestedSetAside === "dropped" ? dropReason : deferReason) ?? "").trim();
+        return itemUpdated(
+          ledger.id,
+          {
+            ...withOptional(
+              withOptional(
+                withOptional(endJudging(structured), "deferReason", undefined),
+                "judgeError",
+                undefined,
+              ),
+              "setAside",
+              { status: requestedSetAside, reason },
+            ),
+            status: "in_progress",
+            evidence,
+            dropReason: null,
+            // Kept so the judge reads why earlier verdicts failed; this one replaces it.
+            verdict: item.verdict,
+            judging: true,
+            closedAt: null,
+            updatedAt: now,
+          },
+          now,
+        );
+      }
       // A verdict judged the evidence as it stood, so changed evidence needs a fresh one;
       // otherwise pass, edit the evidence, close would sidestep the judge gate.
       const verdict = evidence === item.evidence ? item.verdict : null;
@@ -749,7 +819,11 @@ function planCoreLedgerCommand(input: {
 
 const endJudging = (item: LedgerItem): LedgerItem =>
   withOptional(
-    withOptional(withOptional(item, "judging", undefined), "judgeTaskId", undefined),
+    withOptional(
+      withOptional(withOptional(item, "judging", undefined), "setAside", undefined),
+      "judgeTaskId",
+      undefined,
+    ),
     "judgePromptDigest",
     undefined,
   );

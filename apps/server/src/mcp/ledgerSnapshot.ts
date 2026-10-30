@@ -68,6 +68,7 @@ export function snapshotLedger(
       dropReason: item.dropReason,
       deferReason: item.deferReason ?? null,
       judging: item.judging === true,
+      ...(item.setAside === undefined ? {} : { setAside: item.setAside }),
       verdict: item.verdict?.outcome ?? null,
       verdictNotes: item.verdict?.notes ?? null,
       judgeError: item.judgeError ?? null,

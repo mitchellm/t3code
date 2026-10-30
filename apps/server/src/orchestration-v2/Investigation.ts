@@ -318,8 +318,12 @@ export function stampRefuterVerdict(
   if (command.type !== "ledger.item.verdict.record") return planned;
   const investigation = ledger?.investigation;
   const before = ledger?.items.find(({ id }) => id === command.itemId);
+  // A drop or defer request is judged by the set-aside prompt, not the refuter.
   const refuter =
-    investigation !== undefined && before !== undefined && isApproachItem(investigation, before);
+    investigation !== undefined &&
+    before !== undefined &&
+    before.setAside === undefined &&
+    isApproachItem(investigation, before);
   return planned.map((event) => {
     if (event.type !== "ledger.item.updated" || event.payload.item.id !== command.itemId) {
       return event;

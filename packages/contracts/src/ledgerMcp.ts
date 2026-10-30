@@ -6,7 +6,7 @@ import {
   NonNegativeInt,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { LedgerItemStatus } from "./ledger.ts";
+import { LedgerItemSetAside, LedgerItemStatus } from "./ledger.ts";
 import { OrchestrationV2Subagent } from "./orchestrationV2.ts";
 
 // Agents pick these keys by hand and read them back in every tool result, so keep them short.
@@ -132,7 +132,7 @@ export const LedgerMcpSnapshot = Schema.Struct({
   closed: Schema.Boolean,
   requiresJudge: Schema.Boolean.annotate({
     description:
-      "True when an item closes only on a passing judge verdict. Closing such an item starts the judge automatically: the item shows judging, then closes on a pass or comes back in_progress with the judge's notes.",
+      "True when an item closes only on a passing judge verdict. Closing such an item starts the judge automatically: the item shows judging, then closes on a pass or comes back in_progress with the judge's notes. Dropping or deferring an item already started is judged the same way.",
   }),
   counts: Schema.Struct({
     open: NonNegativeInt,
@@ -165,8 +165,15 @@ export const LedgerMcpSnapshot = Schema.Struct({
       dropReason: Schema.NullOr(Schema.String),
       deferReason: Schema.NullOr(Schema.String),
       judging: Schema.Boolean.annotate({
-        description: "The server's judge is checking this item's close request.",
+        description:
+          "The server's judge is checking this item's close request, or its drop or defer request when setAside is present.",
       }),
+      setAside: Schema.optionalKey(
+        LedgerItemSetAside.annotate({
+          description:
+            "Present while the judge rules on dropping or deferring started work: the status asked for and the reason.",
+        }),
+      ),
       verdict: Schema.NullOr(Schema.Literals(["pass", "fail"])),
       verdictNotes: Schema.NullOr(Schema.String),
       judgeError: Schema.NullOr(Schema.String).annotate({

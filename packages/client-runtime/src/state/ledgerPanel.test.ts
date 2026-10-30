@@ -208,6 +208,21 @@ describe("deriveLedgerPanel badges", () => {
     expect(labels(rowOf(ledger, "P"))).toEqual(["passed"]);
   });
 
+  it("says when the judge is ruling on a drop or defer rather than a close", () => {
+    const ledger = ledgerOf([
+      item("D", "in_progress", {
+        judging: true,
+        setAside: { status: "dropped", reason: "Superseded by P." },
+      }),
+      item("W", "in_progress", {
+        judging: true,
+        setAside: { status: "deferred", reason: "Waits." },
+      }),
+    ]);
+    expect(labels(rowOf(ledger, "D"))).toEqual(["judging drop"]);
+    expect(labels(rowOf(ledger, "W"))).toEqual(["judging defer"]);
+  });
+
   it("counts failures since the item was last reopened", () => {
     const ledger = ledgerOf([
       item("F", "in_progress", { verdict: verdict("fail"), judgements: 3, judgementsAtReopen: 1 }),

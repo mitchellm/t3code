@@ -151,7 +151,14 @@ function failuresSinceReopen(item: LedgerItem): number | null {
 }
 
 function verdictBadge(item: LedgerItem): LedgerRowBadge | null {
-  if (item.judging === true) return { kind: "judging", label: "judging" };
+  if (item.judging === true) {
+    const asked = item.setAside?.status;
+    return {
+      kind: "judging",
+      label:
+        asked === undefined ? "judging" : asked === "dropped" ? "judging drop" : "judging defer",
+    };
+  }
   if (item.verdict === null) return null;
   if (item.verdict.outcome === "pass") return { kind: "passed", label: "passed" };
   const failures = failuresSinceReopen(item);

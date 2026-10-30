@@ -468,14 +468,123 @@ describe("what the agent may set aside on a judged ledger", () => {
   const asAgent = (name: string, fields: UpdateFields) =>
     plan(update(name, { ...fields, createdBy: "agent" }), judgedLedger);
 
-  it("refuses the agent dropping, deferring or un-starting work it started", () => {
-    for (const fields of [
-      { status: "dropped", dropReason: "too hard" },
-      { status: "deferred", deferReason: "later" },
-      { status: "open" },
+  it("sends the agent's drop or defer of work it started to the judge instead of the user", () => {
+    for (const [fields, reason] of [
+      [{ status: "dropped", dropReason: " Superseded by N, which passed. " }, "dropped"],
+      [{ status: "deferred", deferReason: "Waits on a credential." }, "deferred"],
     ] as const) {
-      assert.include(failureOf(asAgent("S", fields)), "ask the user", fields.status);
+      const command = update("S", { ...fields, createdBy: "agent" });
+      const planned = plan(command, judgedLedger);
+      const requested = updatedItem(planned);
+      assert.equal(requested?.status, "in_progress", reason);
+      assert.isTrue(requested?.judging, reason);
+      assert.deepEqual(requested?.setAside, {
+        status: fields.status,
+        reason: (fields.status === "dropped" ? fields.dropReason : fields.deferReason).trim(),
+      });
+      assert.equal(requested?.evidence, "half");
+      assert.lengthOf(
+        ledgerJudgeEffects(command, judgedLedger, Result.isSuccess(planned) ? planned.success : []),
+        1,
+        reason,
+      );
     }
+  });
+
+  it("refuses the agent un-starting work it started, and says to drop or defer it instead", () => {
+    const refused = failureOf(asAgent("S", { status: "open" }));
+    assert.include(refused, "drop or defer it with a reason");
+    assert.notInclude(refused, "user");
+  });
+
+  const judgingAt = now;
+  const requested = (setAside: NonNullable<LedgerItem["setAside"]>) =>
+    ledgerOf(
+      [
+        item("S", {
+          status: "in_progress",
+          evidence: "half",
+          judging: true,
+          setAside,
+          updatedAt: judgingAt,
+        }),
+        item("N"),
+      ],
+      true,
+    );
+  const verdictOn = (outcome: "pass" | "fail", judgedEvidence: string): LedgerCommand => ({
+    type: "ledger.item.verdict.record",
+    commandId,
+    threadId,
+    ledgerId,
+    itemId: id("S"),
+    judgedEvidence,
+    verdict: {
+      outcome,
+      judge: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus-5-5" },
+      notes: outcome === "pass" ? "B6 covers it." : "Still needed.",
+      at: now,
+    },
+    judgingRequestedAt: judgingAt,
+  });
+
+  it("sets the item aside with the agent's reason when the judge passes the request", () => {
+    const dropped = updatedItem(
+      plan(
+        verdictOn("pass", "Superseded."),
+        requested({ status: "dropped", reason: "Superseded." }),
+      ),
+    );
+    assert.equal(dropped?.status, "dropped");
+    assert.equal(dropped?.dropReason, "Superseded.");
+    assert.notProperty(dropped ?? {}, "judging");
+    assert.notProperty(dropped ?? {}, "setAside");
+    const deferred = updatedItem(
+      plan(verdictOn("pass", "Waits."), requested({ status: "deferred", reason: "Waits." })),
+    );
+    assert.equal(deferred?.status, "deferred");
+    assert.equal(deferred?.deferReason, "Waits.");
+    assert.isNull(deferred?.dropReason);
+  });
+
+  it("hands the item back in progress with the judge's notes when it fails the request", () => {
+    const back = updatedItem(
+      plan(verdictOn("fail", "Too hard."), requested({ status: "dropped", reason: "Too hard." })),
+    );
+    assert.equal(back?.status, "in_progress");
+    assert.equal(back?.verdict?.notes, "Still needed.");
+    assert.equal(back?.evidence, "half");
+    assert.notProperty(back ?? {}, "judging");
+    assert.notProperty(back ?? {}, "setAside");
+  });
+
+  it("holds a verdict to the reason it judged, not the item's evidence", () => {
+    assert.include(
+      failureOf(plan(verdictOn("pass", "half"), requested({ status: "dropped", reason: "Moot." }))),
+      "changed while it was being judged",
+    );
+  });
+
+  it("keeps a retried request in effect and lets only the user act while it is judged", () => {
+    const pending = requested({ status: "dropped", reason: "Moot." });
+    const retry = plan(
+      update("S", { status: "dropped", dropReason: "Moot.", createdBy: "agent" }),
+      pending,
+    );
+    assert.deepEqual(Result.isSuccess(retry) ? retry.success : "failed", []);
+    for (const fields of [
+      { status: "closed", evidence: "done after all" },
+      { status: "dropped", dropReason: "Another reason." },
+    ] as const) {
+      assert.include(
+        failureOf(plan(update("S", { ...fields, createdBy: "agent" }), pending)),
+        "being judged for a drop",
+      );
+    }
+    assert.equal(
+      updatedItem(plan(update("S", { status: "dropped", dropReason: "Mine." }), pending))?.status,
+      "dropped",
+    );
   });
 
   it("lets the agent defer work it never started, and the user set aside anything", () => {
