@@ -818,8 +818,7 @@ const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
   "t3_thread_send_attachments",
   "schedule_task",
   "run_scheduled_task_now",
-  // Fork: both start work later or elsewhere, so Investigate mode's spawn guard covers them too.
-  "update_scheduled_task",
+  // Fork: starts work elsewhere, so Investigate mode's spawn guard covers it too.
   "t3_worktree_handoff",
   "watch_pull_request",
 ]);
