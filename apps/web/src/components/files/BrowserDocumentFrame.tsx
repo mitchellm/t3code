@@ -58,6 +58,7 @@ const HTML_RENDER_SHORTCUT_COMMANDS: ReadonlySet<KeybindingCommand> = new Set([
   "rightPanel.toggle",
   "rightPanel.toggleMaximized",
   "threadPanel.toggle",
+  "ledgerPanel.toggle",
   "terminal.toggle",
   "preview.toggle",
   "navigation.back",

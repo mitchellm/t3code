@@ -111,8 +111,25 @@ const isInScope = (item: LedgerItem) => item.status !== "dropped" && item.status
 const elapsedMs = (from: DateTime.Utc, to: DateTime.Utc) =>
   Math.max(0, DateTime.toEpochMillis(to) - DateTime.toEpochMillis(from));
 
+/** The tone and wording every agent line shares: "running", or "done 1m 12s" once finished. */
+export function ledgerAgentStatus(
+  status: OrchestrationV2Subagent["status"] | null,
+  startedAt: DateTime.Utc | null,
+  completedAt: DateTime.Utc | null,
+): { readonly tone: LedgerAgentTone; readonly statusLabel: string } {
+  const { label, tone } = status === null ? UNKNOWN_STATUS : AGENT_STATUS[status];
+  const finishedIn =
+    tone === "done" && startedAt !== null && completedAt !== null
+      ? formatDuration(elapsedMs(startedAt, completedAt))
+      : null;
+  return { tone, statusLabel: finishedIn === null ? label : `${label} ${finishedIn}` };
+}
+
 // Delegations are titled "Worker: label zones 1-2"; the role is already its own column.
-function taskLabel(title: string | null | undefined, role: string | undefined): string | null {
+export function taskLabel(
+  title: string | null | undefined,
+  role: string | undefined,
+): string | null {
   const trimmed = title?.trim() ?? "";
   const prefix = role === undefined ? "" : `${role.toLowerCase()}:`;
   const label =
@@ -126,16 +143,12 @@ function agentLine(
   row: ReturnType<typeof deriveLedgerItemTasks>[number],
   record: LedgerTaskRecord | undefined,
 ): LedgerAgentLine {
-  const { label, tone } = row.status === null ? UNKNOWN_STATUS : AGENT_STATUS[row.status];
-  const finishedIn =
-    tone === "done" && row.startedAt !== null && row.completedAt !== null
-      ? formatDuration(elapsedMs(row.startedAt, row.completedAt))
-      : null;
+  const { tone, statusLabel } = ledgerAgentStatus(row.status, row.startedAt, row.completedAt);
   return {
     task: row.task,
     status: row.status,
     tone,
-    statusLabel: finishedIn === null ? label : `${label} ${finishedIn}`,
+    statusLabel,
     report: row.report,
     label: taskLabel(record?.title, row.task.role),
     modelSelection: record?.modelSelection,
@@ -358,11 +371,16 @@ export function deriveLedgerAgentCard(
 
 const EMPTY_TASK_RECORDS: ReadonlyArray<LedgerTaskRecord> = Object.freeze([]);
 
-const sameTime = (left: DateTime.Utc | null, right: DateTime.Utc | null) =>
+export const sameTime = (left: DateTime.Utc | null, right: DateTime.Utc | null) =>
   left === right ||
   (left !== null &&
     right !== null &&
     DateTime.toEpochMillis(left) === DateTime.toEpochMillis(right));
+
+export const sameModelSelection = (
+  left: ModelSelection | undefined,
+  right: ModelSelection | undefined,
+) => left === right || JSON.stringify(left) === JSON.stringify(right);
 
 function sameRecord(left: LedgerTaskRecord, right: LedgerTaskRecord): boolean {
   return (
@@ -373,8 +391,7 @@ function sameRecord(left: LedgerTaskRecord, right: LedgerTaskRecord): boolean {
       left.title === right.title &&
       sameTime(left.startedAt, right.startedAt) &&
       sameTime(left.completedAt, right.completedAt) &&
-      (left.modelSelection === right.modelSelection ||
-        JSON.stringify(left.modelSelection) === JSON.stringify(right.modelSelection)))
+      sameModelSelection(left.modelSelection, right.modelSelection))
   );
 }
 
