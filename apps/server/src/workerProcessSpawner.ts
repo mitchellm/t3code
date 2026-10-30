@@ -15,9 +15,9 @@ import * as NodeWorkerThreads from "node:worker_threads";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 /**
- * Spawns from worker threads: a Windows CreateProcess stall would otherwise freeze the event
- * loop. Spawns go to the worker with the fewest children, so one slow start does not hold up
- * others. Only what ProcessRunner reads is supported (piped stdio, exit code); Windows only.
+ * Spawns from worker threads because Windows CreateProcess can stall for seconds and would
+ * freeze the event loop. Each spawn goes to the worker with the fewest children, so one slow
+ * start does not hold back other output. Supports only piped stdio and the exit code.
  */
 export const WorkerProcessSpawner = HostProcess.WorkerProcessSpawner;
 
@@ -265,7 +265,7 @@ export const make = Effect.gen(function* () {
   // Kill the tree if still running, then wait up to a second for the exit, as
   // the in-process spawner does on Windows. The wait starts once taskkill has
   // finished, since taskkill is itself a process start that can stall.
-  const terminate = Effect.fn("WorkerProcessSpawner.terminate")(function* (
+  const terminate = Effect.fnUntraced(function* (
     id: number,
     entry: ChildEntry,
     signal: NodeJS.Signals,

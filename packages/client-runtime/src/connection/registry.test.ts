@@ -416,6 +416,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
             Stream.die(new Error("Config is not used by registry tests.")),
           ready: Effect.void,
           probe: Effect.void,
+          inboundFrames: Effect.succeed(0),
           closed: Deferred.await(closed),
         } satisfies RpcSession.RpcSession),
         () => Ref.update(releasedSessions, (count) => count + 1),
@@ -432,9 +433,13 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
           ),
         ),
       ),
-    checkRoute: (_entry, route) => checkRoute(route),
     preflight: (_entry, route) =>
-      checkRoute(route).pipe(Effect.map((check) => check === "answered")),
+      checkRoute(route).pipe(
+        Effect.map((check): ConnectionDriver.RoutePreflight =>
+          check === "answered" ? "ready" : check,
+        ),
+      ),
+    checkHost: () => Effect.succeed<ConnectionDriver.RouteCheck>("unchecked"),
   });
 
   const layerCache = Layer.succeed(Persistence.EnvironmentCacheStore, cacheStore);
@@ -1536,7 +1541,7 @@ describe("EnvironmentRegistry", () => {
 
       yield* Effect.gen(function* () {
         const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        yield* registry.registerPlatform(new PrimaryConnectionRegistration({ target: TARGET }));
+        yield* registry.reconcilePlatform([new PrimaryConnectionRegistration({ target: TARGET })]);
         yield* awaitConnectionState(
           registry,
           TARGET.environmentId,
@@ -1555,7 +1560,7 @@ describe("EnvironmentRegistry", () => {
 
       yield* Effect.gen(function* () {
         const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        yield* registry.registerPlatform(new PrimaryConnectionRegistration({ target: TARGET }));
+        yield* registry.reconcilePlatform([new PrimaryConnectionRegistration({ target: TARGET })]);
         yield* awaitConnectionState(
           registry,
           TARGET.environmentId,
@@ -1592,7 +1597,7 @@ describe("EnvironmentRegistry", () => {
 
       yield* Effect.gen(function* () {
         const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        yield* registry.registerPlatform(new PrimaryConnectionRegistration({ target: TARGET }));
+        yield* registry.reconcilePlatform([new PrimaryConnectionRegistration({ target: TARGET })]);
         expect(yield* permissions.get(shadowedEntry)).toBe("off");
 
         expect(
@@ -1637,7 +1642,7 @@ describe("EnvironmentRegistry", () => {
         yield* Deferred.await(registrationStarted);
 
         const platformRegistration = yield* registry
-          .registerPlatform(new PrimaryConnectionRegistration({ target: TARGET }))
+          .reconcilePlatform([new PrimaryConnectionRegistration({ target: TARGET })])
           .pipe(Effect.forkChild({ startImmediately: true }));
         yield* Effect.yieldNow;
         const removal = yield* Effect.flip(registry.remove(TARGET.environmentId)).pipe(
@@ -1700,7 +1705,7 @@ describe("EnvironmentRegistry", () => {
       yield* Effect.gen(function* () {
         const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
         const registration = new PrimaryConnectionRegistration({ target: TARGET });
-        yield* registry.registerPlatform(registration);
+        yield* registry.reconcilePlatform([registration]);
         yield* awaitConnectionState(
           registry,
           TARGET.environmentId,
@@ -1716,29 +1721,29 @@ describe("EnvironmentRegistry", () => {
           TARGET.environmentId,
           (state) => state.phase === "available",
         );
-        yield* registry.registerPlatform(registration);
+        yield* registry.reconcilePlatform([registration]);
         yield* registry.reconcilePlatform([registration]);
         expect(
           (yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId),
         ).toMatchObject({ enabled: true, unsupportedReason: error.message });
-        yield* registry.registerPlatform(
+        yield* registry.reconcilePlatform([
           new PrimaryConnectionRegistration({
             target: new PrimaryConnectionTarget({ ...TARGET, label: "Renamed" }),
           }),
-        );
+        ]);
         expect(yield* registry.state(TARGET.environmentId)).toMatchObject({
           desired: false,
           phase: "available",
         });
         expect(yield* Ref.get(harness.sessions)).toHaveLength(1);
-        yield* registry.registerPlatform(
+        yield* registry.reconcilePlatform([
           new PrimaryConnectionRegistration({
             target: new PrimaryConnectionTarget({
               ...TARGET,
               httpBaseUrl: "https://changed.example.test",
             }),
           }),
-        );
+        ]);
         yield* awaitConnectionState(
           registry,
           TARGET.environmentId,
@@ -1760,7 +1765,7 @@ describe("EnvironmentRegistry", () => {
         const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
         const registration = new PrimaryConnectionRegistration({ target: TARGET });
         yield* Effect.all(
-          Array.from({ length: 5 }, () => registry.registerPlatform(registration)),
+          Array.from({ length: 5 }, () => registry.reconcilePlatform([registration])),
           { concurrency: "unbounded", discard: true },
         );
         yield* awaitConnectionState(
@@ -1771,7 +1776,7 @@ describe("EnvironmentRegistry", () => {
 
         yield* Effect.all(
           [
-            ...Array.from({ length: 5 }, () => registry.registerPlatform(registration)),
+            ...Array.from({ length: 5 }, () => registry.reconcilePlatform([registration])),
             ...Array.from({ length: 5 }, () => registry.retryNow(TARGET.environmentId)),
             registry.reconcilePlatform([registration]),
           ],
@@ -1812,7 +1817,7 @@ describe("EnvironmentRegistry", () => {
       yield* Effect.gen(function* () {
         const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
         const registration = new PrimaryConnectionRegistration({ target: TARGET });
-        yield* registry.registerPlatform(registration);
+        yield* registry.reconcilePlatform([registration]);
         yield* awaitConnectionState(
           registry,
           TARGET.environmentId,
@@ -1820,7 +1825,7 @@ describe("EnvironmentRegistry", () => {
         );
         yield* permissions.set(entry, "read-write");
 
-        yield* registry.registerPlatform(registration);
+        yield* registry.reconcilePlatform([registration]);
 
         expect(yield* Ref.get(harness.sessions)).toHaveLength(1);
         expect(yield* permissions.get(entry)).toBe("read-write");
@@ -1830,9 +1835,9 @@ describe("EnvironmentRegistry", () => {
           httpBaseUrl: "https://changed.example.test",
         });
         failWrites = true;
-        yield* registry.registerPlatform(
+        yield* registry.reconcilePlatform([
           new PrimaryConnectionRegistration({ target: changedTarget }),
-        );
+        ]);
         expect(
           (yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId)?.target,
         ).toEqual(TARGET);
@@ -1840,15 +1845,15 @@ describe("EnvironmentRegistry", () => {
         expect((yield* SubscriptionRef.get(registry.entries)).has(TARGET.environmentId)).toBe(true);
 
         failWrites = false;
-        yield* registry.registerPlatform(
+        yield* registry.reconcilePlatform([
           new PrimaryConnectionRegistration({ target: changedTarget }),
-        );
+        ]);
         expect(yield* permissions.get(entry)).toBe("off");
-        yield* registry.registerPlatform(registration);
+        yield* registry.reconcilePlatform([registration]);
         expect(yield* permissions.get(entry)).toBe("off");
         yield* permissions.set(entry, "read-write");
         yield* registry.reconcilePlatform([]);
-        yield* registry.registerPlatform(registration);
+        yield* registry.reconcilePlatform([registration]);
         expect(yield* permissions.get(entry)).toBe("off");
       }).pipe(
         Effect.provide(harness.layer),

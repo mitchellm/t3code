@@ -1,8 +1,5 @@
-/**
- * Fork: the Threads view's control row under the search row, its view options menu, and each
- * project group's header row. Grouping, sorts and pins write the active Threads view, or this
- * device's arrangement where views cannot be saved.
- */
+// Fork: the Threads view's control row, view options menu and project group header.
+// Grouping, sorts and pins write the active Threads view, or this device's arrangement where views can't be saved.
 import {
   SidebarProjectIconStyle,
   SidebarProjectRowDensity,
@@ -195,7 +192,7 @@ function ThreadsSortControl(props: { options: ThreadsViewOptions }) {
 }
 
 /** The view row's options menu: pins and row settings; grouping and sorts have their own controls. */
-export function SidebarViewControls(props: { options: ThreadsViewOptions }) {
+function SidebarViewControls(props: { options: ThreadsViewOptions }) {
   const { view, update, pinsStayGrouped } = props.options;
   return (
     <SidebarViewOptionsMenu

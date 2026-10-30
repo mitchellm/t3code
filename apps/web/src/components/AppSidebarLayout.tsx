@@ -8,6 +8,7 @@ import {
 } from "react";
 import { useLocation, useRouter, type AnyRouter } from "@tanstack/react-router";
 
+import { moveWorkspaceFocus, workspaceAreaProps } from "../lib/workspaceFocus";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { isElectron } from "../env";
 import {
@@ -29,20 +30,18 @@ import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
-import { useEnvironmentIdentificationMode, useLegacySidebarEnabled } from "../hooks/useSettings";
+import { useEnvironmentIdentificationMode } from "../hooks/useSettings";
 import {
   PanelAnimationSuppressionProvider,
   usePanelAnimationSettings,
   usePanelNavigationSuppression,
 } from "../panelAnimations";
 import { BackgroundThreadAnnouncer } from "./BackgroundThreadAnnouncer";
-import LegacyThreadSidebar from "./LegacySidebar";
 // Fork: the sidebar is an explorer showing the active saved view.
 import { ExplorerRevealer } from "./explorer/ExplorerRevealer";
 import { ExplorerSidebarContent } from "./explorer/ExplorerSidebarContent";
 import { explorerWidthStorageKey, readExplorerWidth } from "./explorer/explorerWidth";
 import { useActiveExplorerViewIdentity } from "./explorer/useActiveExplorerView";
-import { BUILT_IN_THREADS_VIEW_ID } from "./views/viewEngine";
 import { SidebarBrandWidthProbe } from "./sidebar/SidebarChrome";
 import { isAppModalPage } from "./sidebar/mainAppLocation";
 import { ThreadVisitRecorder } from "./sidebar/ThreadHistoryButtons";
@@ -78,9 +77,6 @@ function subscribeToViewportWidth(onChange: () => void): () => void {
 function readViewportWidth(): number {
   return window.innerWidth;
 }
-
-// Fork: the legacy sidebar keeps the Threads view's width.
-const THREADS_WIDTH_SOURCE = { id: BUILT_IN_THREADS_VIEW_ID, layout: "threads" } as const;
 
 // Cache the synchronous fullscreen IPC read until subscription.
 let windowFullscreenSnapshot: boolean | null = null;
@@ -163,6 +159,33 @@ export function registerNavigationHistoryCommands(router: AnyRouter): () => void
       }),
     },
   );
+}
+
+// Capture phase, so F6 also leaves widgets that swallow keys, such as the terminal.
+function registerWorkspaceFocusCommands(router: AnyRouter): () => void {
+  const move = (direction: 1 | -1) => (event: KeyboardEvent) => {
+    if (event.isComposing) return false;
+    // Inside a dialog the move is refused, but the key is still consumed.
+    event.preventDefault();
+    event.stopPropagation();
+    moveWorkspaceFocus(direction);
+  };
+  const disposers = [
+    registerCommands(
+      { "workspace.focusNext": move(1), "workspace.focusPrevious": move(-1) },
+      {
+        capture: true,
+        when: (event) => !isKeybindingCaptureTarget(event),
+        context: () => readRoutePanelsOpen(router),
+      },
+    ),
+    // A focused desktop browser forwards the keys; its renderer focus is stale.
+    registerMenuAction("workspace.focusNext", () => moveWorkspaceFocus(1, "panel")),
+    registerMenuAction("workspace.focusPrevious", () => moveWorkspaceFocus(-1, "panel")),
+  ];
+  return () => {
+    for (const dispose of disposers) dispose();
+  };
 }
 
 // Escape leaves the pull requests page when no scope (a selection, a dialog,
@@ -267,6 +290,7 @@ function registerAppShellCommands(router: AnyRouter, shellElement: Element): () 
   const disposers = [
     registerThreadUndoCommands(router, readSidebarVisible),
     registerNavigationHistoryCommands(router),
+    registerWorkspaceFocusCommands(router),
     registerPullRequestsEscapeCommand(router),
     registerMenuAction("open-settings", () => {
       if (!/^\/settings(\/|$)/.test(router.state.location.pathname))
@@ -285,13 +309,12 @@ function SidebarControl() {
   const { toggleSidebar, isMobile, mobileSheetMounted } = useSidebar();
   const isSidebarVisible = useSidebarVisibility();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
-  const stageBackdropVariant = useSidebarStageBackdropVariant(
-    environmentIdentificationMode === "artwork",
-  );
+  const stageBackdropVariant = useSidebarStageBackdropVariant(environmentIdentificationMode);
   const shortcutLabel = shortcutLabelForCommand(keybindings, "sidebar.toggle", {
     context: { usagePageOpen },
   });
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window keydown listener that toggles the sidebar on its shortcut
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
@@ -369,7 +392,7 @@ function SidebarControl() {
 }
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
-  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const sidebarArea = workspaceAreaProps("sidebar", 0, "Threads");
   const [sidebarRouteReveal] = useState<SidebarRouteReveal>(() => ({
     observedKey: null,
     pendingKey: null,
@@ -382,9 +405,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
   // Fork: each explorer view keeps its own sidebar width.
   const activeExplorerView = useActiveExplorerViewIdentity();
-  const widthSource = legacySidebarEnabled
-    ? THREADS_WIDTH_SOURCE
-    : { id: activeExplorerView.id, layout: activeExplorerView.layout };
+  const widthSource = { id: activeExplorerView.id, layout: activeExplorerView.layout };
   const sidebarWidthStorageKey = explorerWidthStorageKey(widthSource.id);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     readExplorerWidth(widthSource, window.innerWidth, THREAD_SIDEBAR_MIN_WIDTH),
@@ -436,9 +457,10 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           side="left"
           collapsible="offcanvas"
           data-app-sidebar=""
+          {...sidebarArea}
           role="navigation"
           // Fork: named for the view the explorer shows.
-          aria-label={legacySidebarEnabled ? "Threads" : activeExplorerView.name}
+          aria-label={activeExplorerView.name}
           resizable={{
             maxWidth: sidebarMaximumWidth,
             minWidth: sidebarMinimumWidth,
@@ -451,12 +473,8 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           }}
           style={windowControlsInsetStyle}
         >
-          {legacySidebarEnabled ? (
-            <LegacyThreadSidebar routeReveal={sidebarRouteReveal} />
-          ) : (
-            // Fork: the explorer shows the active saved view.
-            <ExplorerSidebarContent routeReveal={sidebarRouteReveal} />
-          )}
+          {/* Fork: the explorer shows the active saved view. */}
+          <ExplorerSidebarContent routeReveal={sidebarRouteReveal} />
           <SidebarRail onDoubleClick={resetSidebarWidth} />
         </Sidebar>
         {children}

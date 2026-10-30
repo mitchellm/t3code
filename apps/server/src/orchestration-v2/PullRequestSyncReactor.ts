@@ -338,9 +338,7 @@ export const make = Effect.gen(function* () {
     for (const key of missing) if (key.endsWith(`\0${pullRequestKey}`)) return true;
     return false;
   };
-  // Rate limit pauses by project and host, since each project reads with its own credential.
-  // A paused host refuses every read without asking it, so the sweep leaves its pull requests
-  // due until the pause ends rather than failing each of them every minute.
+  // Pause per project and host because credentials are project-specific; leave paused PRs due until reset.
   const pausedUntil = new Map<string, number>();
 
   const isDue = (key: string, entries: ReadonlyArray<LinkEntry>, nowMs: number): boolean => {
@@ -354,8 +352,7 @@ export const make = Effect.gen(function* () {
     const sinceLastMs = last === undefined ? Number.POSITIVE_INFINITY : nowMs - last;
     if (missing.has(key)) return sinceLastMs >= SLOW_SYNC_INTERVAL_MS;
     if (active.some((entry) => entry.link.snapshot === null)) return true;
-    // A merged snapshot without its merge time cannot settle the thread, so it keeps the slow
-    // cadence until the host supplies one (Bitbucket snapshots saved before it was read).
+    // Merged snapshots without mergedAt cannot settle threads; reread slowly until supplied.
     if (
       active.every(
         (entry) => entry.link.snapshot?.state === "merged" && entry.link.snapshot.mergedAt != null,
@@ -419,7 +416,9 @@ export const make = Effect.gen(function* () {
     const stacksReadThisSweep = new Map<string, ThreadPullRequestStack | null>();
     const persistence = yield* Semaphore.make(1);
 
-    const syncEntry = Effect.fn("PullRequestSyncReactor.syncEntry")(function* (
+    // Effect.fn's stack frames close over these sweep-scoped bodies and their arguments, and a
+    // cache lookup forked inside keeps those frames, so a plain span leaves the sweep collectable.
+    const syncEntry = Effect.fnUntraced(function* (
       entry: LinkEntry,
       fields: SnapshotFields,
       fetchedStack: { readonly stack: ThreadPullRequestStack | null } | null,
@@ -473,12 +472,9 @@ export const make = Effect.gen(function* () {
           stack: nextStack,
         });
       }
-    });
+    }, Effect.withSpan("PullRequestSyncReactor.syncEntry"));
 
-    const syncGroup = Effect.fn("PullRequestSyncReactor.syncGroup")(function* (
-      key: string,
-      entries: ReadonlyArray<LinkEntry>,
-    ) {
+    const syncGroup = Effect.fnUntraced(function* (key: string, entries: ReadonlyArray<LinkEntry>) {
       const first = entries[0]!;
       const ref = {
         projectId: first.thread.projectId,
@@ -593,7 +589,7 @@ export const make = Effect.gen(function* () {
           ),
         { discard: true },
       );
-    });
+    }, Effect.withSpan("PullRequestSyncReactor.syncGroup"));
 
     const skips = new Map<string, { count: number; readonly key: string }>();
     const readGroup = (key: string, entries: ReadonlyArray<LinkEntry>, pauseKey: string) =>

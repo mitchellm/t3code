@@ -1,8 +1,6 @@
-/**
- * Fork: sorts and groups only the sidebar's active list; other shelves keep their own order, and
- * manual order without grouping returns the list untouched so upstream's drag order still rules.
- * "Pins stay grouped" sorts each pin to the top of its project group instead of above every one.
- */
+// Fork: sort and group the sidebar's active list only; pins, snoozed and settled keep their own order.
+// Manual order without grouping returns the list untouched so upstream's drag order stays the source of truth.
+// "Pins stay grouped" sorts each pin to the top of its project group instead of above every one.
 import type {
   SidebarProjectIconStyle,
   SidebarProjectRowDensity,
