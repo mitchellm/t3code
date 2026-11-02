@@ -114,6 +114,7 @@ import {
   ledgerJudgeEffects,
   planLedgerCommand,
 } from "./TaskLedger.ts";
+import { judgeVerdictWakesPlanner } from "./LedgerJudgeWake.ts";
 import {
   findInvestigationLock,
   type InvestigationCallerLock,
@@ -12517,6 +12518,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         message: undefined,
         offer: false,
       };
+    }
+    // Fork: the verdict is recorded from the task's own terminal event whether or not anyone is
+    // woken, so a pass the planner has nothing to do with starts no turn.
+    if (input.task.serverJudge === true && input.updatedTask.status === "completed") {
+      const ledger = yield* projectionStore
+        .getThreadRecords(input.parentProjection.thread.id, ["ledger"])
+        .pipe(
+          Effect.map((records) => records.ledger),
+          Effect.orElseSucceed(() => undefined),
+        );
+      if (
+        !judgeVerdictWakesPlanner({
+          ledger,
+          taskId: input.task.id,
+          answer: input.updatedTask.result,
+          plannerBusy: hasLiveRun(input.parentProjection),
+        })
+      ) {
+        return {
+          task: {
+            ...input.updatedTask,
+            completionDelivery: { state: "disposed" as const, observedByRunId: null },
+          },
+          parentRun: undefined,
+          message: undefined,
+          offer: false,
+        };
+      }
     }
     // settled_only relies on a blocking wait that ends with the spawning turn; later results need another delivery path.
     if (

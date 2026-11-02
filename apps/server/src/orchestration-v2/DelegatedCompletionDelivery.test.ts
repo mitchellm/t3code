@@ -6,6 +6,8 @@ import {
   CheckpointId,
   CommandId,
   EventId,
+  LedgerId,
+  LedgerItemId,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -3024,6 +3026,117 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         projection.runs.find((row) => row.id === runId)?.delegatedCompletion?.delivery?.taskIds,
         [child.taskId],
       );
+    }),
+  );
+
+  it.effect.each([
+    { name: "a pass with items left", otherOpen: true, answer: "pass", woken: false },
+    { name: "a pass that finishes the ledger", otherOpen: false, answer: "pass", woken: true },
+    { name: "a failed verdict", otherOpen: true, answer: "fail", woken: true },
+  ] as const)("a finished judge task: $name", ({ name, otherOpen, answer, woken }) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const key = name.replaceAll(" ", "-");
+      const threadId = ThreadId.make(`thread:judge-wake-${key}`);
+      const runId = RunId.make(`run:judge-wake-${key}`);
+      const taskId = NodeId.make(`node:judge-wake-${key}-task`);
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId: ProjectId.make(`project:judge-wake-${key}`),
+        runId,
+        rootNodeId: NodeId.make(`node:judge-wake-${key}-root`),
+        taskId,
+        deliveryState: "delivered",
+        completionWake: "settled_only",
+        now,
+      });
+      const item = (id: string, status: "in_progress" | "closed", judging: boolean) => ({
+        id: LedgerItemId.make(`item:${id}`),
+        title: `Item ${id}`,
+        acceptance: `${id} works`,
+        status,
+        evidence: "tests pass",
+        dropReason: null,
+        verdict: null,
+        createdAt: now,
+        updatedAt: now,
+        closedAt: null,
+        ...(judging ? { judging: true as const, judgeTaskId: taskId } : {}),
+      });
+      yield* eventSink.write({
+        commandId: CommandId.make(`command:judge-wake-${key}:seed`),
+        events: [
+          {
+            id: EventId.make(`event:judge-wake-${key}:ledger`),
+            type: "ledger.created",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: LedgerId.make(`ledger:judge-wake-${key}`),
+              threadId,
+              title: "Ship it",
+              startState: "",
+              checkpoints: [],
+              winConditions: [],
+              items: [
+                item("a", "in_progress", true),
+                item("b", otherOpen ? "in_progress" : "closed", false),
+              ],
+              requiresJudge: true,
+              createdAt: now,
+              updatedAt: now,
+              closedAt: null,
+            },
+          },
+          {
+            id: EventId.make(`event:judge-wake-${key}:judge`),
+            type: "subagent.updated",
+            threadId,
+            runId,
+            nodeId: taskId,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              ...(yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+                (row) => row.id === taskId,
+              )!,
+              role: "judge",
+              serverJudge: true,
+              result:
+                answer === "pass"
+                  ? "C1: PASS - ran `vp test run a.test.ts` myself: 3 passed.\nTests: vp test run a.test.ts -> 3 passed\nVERDICT: PASS"
+                  : "C1: FAIL - the empty-input case still throws.\nVERDICT: FAIL",
+              completionDelivery: { state: "pending", observedByRunId: null },
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+
+      // The parent's turn is live, so the upgrade is what offers the terminal judge's wake.
+      yield* orchestrator.dispatch({
+        type: "delegated_task.wake-policy",
+        commandId: CommandId.make(`command:judge-wake-${key}:wake-policy`),
+        parentThreadId: threadId,
+        taskId,
+        completionWake: "always",
+      });
+
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      const delivery = projection.runs.find((row) => row.id === runId)?.delegatedCompletion
+        ?.delivery;
+      const state = projection.subagents.find((row) => row.id === taskId)?.completionDelivery
+        ?.state;
+      if (woken) {
+        assert.equal(state, "claimed");
+        assert.deepEqual(delivery?.taskIds, [taskId]);
+      } else {
+        assert.equal(state, "disposed");
+        assert.isNull(delivery);
+      }
     }),
   );
 

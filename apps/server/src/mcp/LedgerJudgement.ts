@@ -238,6 +238,22 @@ function setAsidePrompt(
   ].join("\n");
 }
 
+/**
+ * Whether a finished judge's answer is recorded as a pass: a final PASS line with a proven PASS
+ * line per criterion. The thread and model checks of `verdictOf` are not repeated, so this is for
+ * deciding whether anyone needs to hear of a verdict, never for recording one.
+ */
+export function answerWouldPass(
+  ledger: Ledger,
+  item: LedgerItem,
+  answer: string | null | undefined,
+): boolean {
+  return (
+    parseJudgeVerdict(answer)?.outcome === "pass" &&
+    criteriaProblem(answer ?? "", judgedCriteria(ledger, item).length) === undefined
+  );
+}
+
 /** The criteria the verdict is held to: the user's for a refuter, else the item's acceptance. */
 function judgedCriteria(ledger: Ledger, item: LedgerItem): ReadonlyArray<string> {
   if (item.setAside !== undefined) return SET_ASIDE_CRITERIA[item.setAside.status];
