@@ -128,14 +128,10 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpc["Service"] =>
           try: () => {
             ipcMain.removeAllListeners(channel);
             ipcMain.on(channel, (event) => {
+              // Sync handlers are polled reads (60 a minute per window) that block the renderer;
+              // their spans were 93% of the desktop trace, so none are recorded, nested ones included.
               event.returnValue = runSync(
-                Effect.gen(function* () {
-                  yield* Effect.annotateCurrentSpan({ channel });
-                  return yield* handler();
-                }).pipe(
-                  Effect.annotateLogs({ channel }),
-                  Effect.withSpan("desktop.ipc.invokeSync"),
-                ),
+                handler().pipe(Effect.annotateLogs({ channel }), Effect.withTracerEnabled(false)),
               );
             });
           },
@@ -263,12 +259,6 @@ export const makeSyncIpcMethod = <
 
   return {
     channel: method.channel,
-    handler: () =>
-      method
-        .handler()
-        .pipe(
-          Effect.flatMap(encode),
-          Effect.withSpan("desktop.ipc.method", { attributes: { channel: method.channel } }),
-        ),
+    handler: () => method.handler().pipe(Effect.flatMap(encode)),
   };
 };
