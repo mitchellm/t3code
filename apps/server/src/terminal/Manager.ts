@@ -43,6 +43,7 @@ import { mergePathEntries } from "@t3tools/shared/shell";
 
 import { acpRegistryManagedBinaryDirectories } from "@t3tools/provider-acp-registry/server";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Context from "effect/Context";
@@ -70,6 +71,10 @@ import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceReg
 import * as ServerSettings from "../serverSettings.ts";
 import { increment, terminalSessionsTotal } from "../observability/Metrics.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import {
+  pruneStaleTerminalHistories,
+  TERMINAL_HISTORY_MAX_AGE_MS,
+} from "./pruneTerminalHistory.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
@@ -1716,6 +1721,34 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   };
 
   const readManagerState = SynchronizedRef.get(managerStateRef);
+
+  // Runs at start, then daily, so history of closed terminals and removed projects cannot pile up.
+  const pruneHistories = Effect.gen(function* () {
+    const state = yield* readManagerState;
+    const liveFileNames = new Set(
+      [...state.sessions.values()].flatMap((session) =>
+        historyPaths(session.threadId, session.terminalId).map((filePath) =>
+          path.basename(filePath),
+        ),
+      ),
+    );
+    yield* pruneStaleTerminalHistories({
+      logsDir,
+      nowMs: (yield* DateTime.now).epochMilliseconds,
+      maxAgeMs: TERMINAL_HISTORY_MAX_AGE_MS,
+      liveFileNames,
+    });
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("terminal history pruning failed", { cause: Cause.pretty(cause) }),
+    ),
+    Effect.andThen(Effect.sleep(Duration.hours(24))),
+    Effect.forever,
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+    Effect.provideService(Path.Path, path),
+    Effect.forkIn(workerScope),
+  );
+  yield* pruneHistories;
 
   const modifyManagerState = <A>(
     f: (state: TerminalManagerState) => readonly [A, TerminalManagerState],
