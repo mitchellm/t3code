@@ -8,6 +8,7 @@ import type { Ledger, LedgerItem } from "@t3tools/contracts";
 import {
   decideLedgerAutoContinue,
   finishedSince,
+  isLedgerFollowUpRound,
   type LedgerAutoContinueDecision,
   type LedgerProgressMark,
   partitionLedgerFollowUp,
@@ -104,8 +105,63 @@ export function ledgerReplanText(input: {
     .join("\n\n");
 }
 
+/**
+ * The text of the one-shot hint for a judged ledger that went idle on items the judge failed. The
+ * planner's usual reply to a failed item it cannot finish is to ask the user to drop it, which
+ * nothing else corrects once the ledger is idle, because only a nudge carries the set-aside rule.
+ */
+export function ledgerSetAsideHintText(input: {
+  readonly ledger: Pick<Ledger, "title">;
+  readonly items: ReadonlyArray<LedgerItem>;
+}): string {
+  const { ledger, items } = input;
+  const lines = items.slice(0, ITEMS_SHOWN).map((item) => {
+    const notes =
+      item.verdict === null
+        ? ""
+        : `\n  Last judge notes: ${clip(item.verdict.notes, NOTES_MAX_CHARS)}`;
+    return `- ${item.id} [${item.status}] ${item.title}${notes}`;
+  });
+  const hidden = items.length - ITEMS_SHOWN;
+  const them = items.length === 1 ? "it" : "them";
+  return [
+    `The task ledger "${ledger.title}" is waiting on ${items.map((item) => item.id).join(", ")}, which the judge failed. You can set ${them} aside yourself, so do not ask the user to drop or defer ${them} in the ledger panel.`,
+    JUDGED_SET_ASIDE_HINT,
+    (hidden > 0 ? [...lines, `- and ${hidden} more`] : lines).join("\n"),
+  ].join("\n\n");
+}
+
+/** Open items the judge's latest verdict failed and no judge is working on now. */
+const judgeFailedItems = (open: ReadonlyArray<LedgerItem>) =>
+  open.filter((item) => item.judging !== true && judgeFailures(item) > 0);
+
+/**
+ * The hint goes out once per fail: the messages record each item with the verdict count it was
+ * sent for, so a restart or a second evaluation of the same idle ledger finds it already sent,
+ * and a new failed verdict (a higher count) is a new episode.
+ */
+function setAsideHintDue(
+  messages: LedgerFollowUpInput["messages"],
+  failed: ReadonlyArray<LedgerItem>,
+): ReadonlyArray<LedgerItem> {
+  const sent = new Set<string>();
+  for (const message of messages) {
+    const source = message.notification?.source;
+    if (source?.kind !== "ledger_continue") continue;
+    for (const { itemId, judgements } of source.setAsideHint ?? []) {
+      sent.add(`${itemId}:${judgements}`);
+    }
+  }
+  return failed.filter((item) => !sent.has(`${item.id}:${item.judgements ?? 0}`));
+}
+
 export type LedgerFollowUpDecision =
   | LedgerAutoContinueDecision
+  | {
+      readonly type: "hint";
+      readonly items: ReadonlyArray<LedgerProgressMark>;
+      readonly hintItems: ReadonlyArray<LedgerItem>;
+    }
   | {
       readonly type: "replan";
       readonly reason: LedgerReplanReason;
@@ -134,6 +190,7 @@ function replanHistory(
     const message = messages[index]!;
     if (message.role !== "user") continue;
     const source = message.notification?.source;
+    if (source?.kind === "ledger_continue" && source.setAsideHint !== undefined) continue;
     if (source?.kind === "ledger_continue") {
       // Same streak as decideLedgerAutoContinue: rounds before the latest finished item drop out.
       counting &&= !finishedSince(source.items, items);
@@ -157,7 +214,8 @@ function replanHistory(
 export function decideLedgerFollowUp(input: LedgerFollowUpInput): LedgerFollowUpDecision {
   const base = decideLedgerAutoContinue(input);
   const { ledger } = input;
-  if (ledger === undefined || base.type === "idle") return base;
+  if (ledger === undefined) return base;
+  if (base.type === "idle") return idleSetAsideHint(input, ledger) ?? base;
   if (base.type === "stuck" && base.reason === "cap") return base;
   const history = replanHistory(input.messages, ledger.items);
   if (base.type === "stuck") {
@@ -185,6 +243,26 @@ export function decideLedgerFollowUp(input: LedgerFollowUpInput): LedgerFollowUp
     replanItems: due,
     replanItemIds: due.map((item) => item.id),
   };
+}
+
+/**
+ * A judged ledger that is idle on items the judge failed gets the set-aside rule once. A nudge
+ * carries it, but an idle ledger gets no nudge, and an agent that never read it asks the user to
+ * drop the item instead. A follow-up the user cancelled stays quiet, as it does for every round.
+ */
+function idleSetAsideHint(
+  input: LedgerFollowUpInput,
+  ledger: Ledger,
+): LedgerFollowUpDecision | undefined {
+  if (ledger.requiresJudge !== true || ledger.closedAt !== null) return undefined;
+  const latestRound = input.messages.findLast(isLedgerFollowUpRound);
+  if (latestRound?.runId != null && input.cancelledRunIds?.has(latestRound.runId) === true) {
+    return undefined;
+  }
+  const due = setAsideHintDue(input.messages, judgeFailedItems(ledger.items.filter(isOpen)));
+  return due.length === 0
+    ? undefined
+    : { type: "hint", items: ledger.items.map(progressMark), hintItems: due };
 }
 
 export type StopHookNudge =

@@ -209,6 +209,36 @@ describe("decideLedgerAutoContinue", () => {
     expect(decision).toMatchObject({ type: "continue", round: 3 });
   });
 
+  it("does not count the set-aside hint as a round or compare against it", () => {
+    const hint = {
+      role: "user",
+      createdBy: "agent",
+      creationSource: "server",
+      notification: {
+        source: {
+          kind: "ledger_continue",
+          round: 1,
+          items: [{ id: LedgerItemId.make("item:a"), status: "open" as const }],
+          setAsideHint: [{ itemId: LedgerItemId.make("item:a"), judgements: 1 }],
+        },
+        outcome: "updated",
+        summary: "hint",
+      },
+    } satisfies Message;
+    // Round 1 was sent against [a open]; the hint is not round 2, and an unchanged ledger after it
+    // is still the stall the round found, not a fresh ledger.
+    const unchanged = decideLedgerAutoContinue({
+      ledger: withItems(item("a")),
+      messages: [userMessage, followUp(1, [["a", "open"]]), hint],
+    });
+    expect(unchanged).toMatchObject({ type: "stuck", reason: "stalled" });
+    const moved = decideLedgerAutoContinue({
+      ledger: withItems(item("a"), item("b")),
+      messages: [userMessage, followUp(1, [["a", "open"]]), hint],
+    });
+    expect(moved).toMatchObject({ type: "continue", round: 2 });
+  });
+
   it("stops at the cap even while items keep moving", () => {
     const rounds = Array.from({ length: LEDGER_AUTO_CONTINUE_CAP }, (_, index) =>
       followUp(index + 1, [

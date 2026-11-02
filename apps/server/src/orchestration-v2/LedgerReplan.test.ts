@@ -13,9 +13,11 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   decideLedgerFollowUp,
   decideStopHookNudge,
+  JUDGED_SET_ASIDE_HINT,
   judgeFailures,
   LEDGER_JUDGE_FAILURE_REPLAN_THRESHOLD,
   ledgerReplanText,
+  ledgerSetAsideHintText,
 } from "./LedgerReplan.ts";
 
 const at = DateTime.makeUnsafe(Date.UTC(2026, 9, 26));
@@ -302,5 +304,114 @@ describe("decideStopHookNudge", () => {
     expect(
       decideStopHookNudge({ ledger, open, unchangedBlocks: 0, limit, judgeReplanned: new Set() }),
     ).toMatchObject({ type: "replan", reason: "judge", items: [open[1]] });
+  });
+});
+
+describe("the set-aside hint on an idle judged ledger", () => {
+  const judged = (...items: ReadonlyArray<LedgerItem>): Ledger => ({
+    ...ledgerOf(...items),
+    requiresJudge: true,
+  });
+  const hintMessage = (
+    ledger: Ledger,
+    sent: ReadonlyArray<{ readonly itemId: string; readonly judgements: number }>,
+  ): Message => ({
+    role: "user",
+    createdBy: "agent",
+    creationSource: "server",
+    notification: {
+      source: {
+        kind: "ledger_continue",
+        round: 1,
+        items: ledger.items.map(progressMark),
+        setAsideHint: sent.map(({ itemId, judgements }) => ({
+          itemId: LedgerItemId.make(itemId),
+          judgements,
+        })),
+      },
+      outcome: "updated",
+      summary: "hint",
+    },
+  });
+
+  // The user spoke and their turn left the ledger as the last round found it: idle.
+  const idleAfterUser = (ledger: Ledger, ...between: ReadonlyArray<Message>): Array<Message> => [
+    userMessage,
+    followUp(1, ledger),
+    ...between,
+    userMessage,
+  ];
+
+  it("is sent when the ledger would otherwise go idle on a judge-failed item", () => {
+    const ledger = judged(failedJudge("a", 1), item("b", { status: "closed" }));
+    expect(decideLedgerFollowUp({ ledger, messages: idleAfterUser(ledger) })).toMatchObject({
+      type: "hint",
+      hintItems: [expect.objectContaining({ id: "item:a" })],
+    });
+  });
+
+  it("is sent once per fail: a restart or a second evaluation finds it already sent", () => {
+    const ledger = judged(failedJudge("a", 1));
+    const sent = hintMessage(ledger, [{ itemId: "item:a", judgements: 1 }]);
+    expect(decideLedgerFollowUp({ ledger, messages: idleAfterUser(ledger, sent) })).toEqual({
+      type: "idle",
+    });
+  });
+
+  it("is re-armed by a new failed verdict on the item", () => {
+    const first = judged(failedJudge("a", 1));
+    const sent = hintMessage(first, [{ itemId: "item:a", judgements: 1 }]);
+    const second = judged(failedJudge("a", 2));
+    expect(
+      decideLedgerFollowUp({ ledger: second, messages: idleAfterUser(second, sent) }),
+    ).toMatchObject({
+      type: "hint",
+      hintItems: [expect.objectContaining({ id: "item:a", judgements: 2 })],
+    });
+  });
+
+  it("is not sent without a judge gate, a failed latest verdict, or while a judge is working", () => {
+    const solo = ledgerOf(failedJudge("a", 1));
+    expect(decideLedgerFollowUp({ ledger: solo, messages: idleAfterUser(solo) })).toEqual({
+      type: "idle",
+    });
+    const passed = judged(item("a", { verdict: verdict("pass"), judgements: 1 }));
+    expect(decideLedgerFollowUp({ ledger: passed, messages: idleAfterUser(passed) })).toEqual({
+      type: "idle",
+    });
+    const judging = judged({ ...failedJudge("a", 1), judging: true });
+    expect(decideLedgerFollowUp({ ledger: judging, messages: idleAfterUser(judging) })).toEqual({
+      type: "idle",
+    });
+  });
+
+  it("stays quiet after the user cancelled a follow-up", () => {
+    const ledger = judged(failedJudge("a", 1));
+    const cancelled: Message = { ...followUp(1, ledger), runId: "run:cancelled" as never };
+    expect(
+      decideLedgerFollowUp({
+        ledger,
+        messages: [userMessage, cancelled, userMessage],
+        cancelledRunIds: new Set(["run:cancelled"]),
+      }),
+    ).toEqual({ type: "idle" });
+  });
+
+  it("does not count toward the cap or stand as the round a later one is compared with", () => {
+    const ledger = judged(failedJudge("a", 1));
+    const sent = hintMessage(ledger, [{ itemId: "item:a", judgements: 1 }]);
+    const moved = judged(failedJudge("a", 1), item("b"));
+    expect(
+      decideLedgerFollowUp({ ledger: moved, messages: [userMessage, followUp(1, ledger), sent] }),
+    ).toMatchObject({ type: "continue", round: 2 });
+  });
+
+  it("tells the agent it can set the item aside itself, with the judge's notes", () => {
+    const failed = failedJudge("a", 1);
+    const text = ledgerSetAsideHintText({ ledger: judged(failed), items: [failed] });
+    expect(text).toContain(JUDGED_SET_ASIDE_HINT);
+    expect(text).toContain("item:a");
+    expect(text).toContain("the parser still drops trailing commas");
+    expect(text).toContain("do not ask the user to drop or defer it");
   });
 });
