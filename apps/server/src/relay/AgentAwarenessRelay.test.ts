@@ -10,8 +10,11 @@ import {
   type OrchestrationV2TurnItem,
   ProjectId,
   ProviderInstanceId,
+  ProviderThreadId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
+  type ThreadPullRequestLink,
   TurnItemId,
 } from "@t3tools/contracts";
 import { RelayAgentActivityState } from "@t3tools/contracts/relay";
@@ -551,7 +554,7 @@ describe("AgentAwarenessRelay", () => {
 
     // Publishes once so the relay has confirmed state, then hands back a way to feed one event at
     // a time and wait until the relay has handled it and drained its worker.
-    const startPublishedRelay = Effect.fnUntraced(function* () {
+    const startPublishedRelay = Effect.fnUntraced(function* (initial?: OrchestrationV2ThreadShell) {
       const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
       const pulls = yield* Queue.unbounded<void>();
       const test = yield* makeTestRelay({
@@ -559,6 +562,7 @@ describe("AgentAwarenessRelay", () => {
           Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
         ),
       });
+      if (initial !== undefined) yield* Ref.set(test.currentShell, initial);
       yield* test.relay.start();
       yield* Queue.take(pulls);
       yield* test.relay.publishThread(THREAD_ID);
@@ -649,6 +653,456 @@ describe("AgentAwarenessRelay", () => {
         assert.equal(projectReads.length, 4);
         assert.equal(publications.length, 1);
       }).pipe(Effect.scoped),
+    );
+
+    const RUN_1 = RunId.make("run-1");
+    const runRecord = (overrides: Record<string, unknown> = {}) => ({
+      id: RUN_1,
+      threadId: THREAD_ID,
+      ordinal: 1,
+      status: "running",
+      queueHeld: false,
+      requestedAt: DateTime.makeUnsafe(NOW),
+      startedAt: DateTime.makeUnsafe(NOW),
+      completedAt: null,
+      ...overrides,
+    });
+    const runningShell = (overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+      shell({ latestRunId: RUN_1, status: "running", activityRunStatus: "running", ...overrides });
+
+    const REQUEST_1 = RuntimeRequestId.make("request-1");
+    const requestRecord = (overrides: Record<string, unknown> = {}) => ({
+      id: REQUEST_1,
+      nodeId: "node-1",
+      kind: "command",
+      status: "pending",
+      responseCapability: { type: "live", providerSessionId: "session-1" },
+      createdAt: DateTime.makeUnsafe(NOW),
+      resolvedAt: null,
+      ...overrides,
+    });
+    const pendingRequest = (id = REQUEST_1) => ({
+      id,
+      kind: "command" as const,
+      createdAt: DateTime.makeUnsafe(NOW),
+      blocking: true,
+    });
+
+    const PROVIDER_THREAD_1 = ProviderThreadId.make("provider-thread-1");
+    const backgroundTask = { taskId: "bg-1", kind: "background_task" as const };
+    const providerThreadRecord = (
+      tasks: ReadonlyArray<{ readonly taskId: string; readonly kind: string }>,
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      id: PROVIDER_THREAD_1,
+      appThreadId: THREAD_ID,
+      status: "active",
+      pendingBackgroundTasks: tasks,
+      updatedAt: DateTime.makeUnsafe(NOW),
+      ...overrides,
+    });
+    // A completed run holds the card at "running" while a background task is pending.
+    const holdingShell = (overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+      shell({
+        status: "completed",
+        activeProviderThreadId: PROVIDER_THREAD_1,
+        pendingBackgroundTasks: [backgroundTask],
+        ...overrides,
+      });
+
+    const pullRequestLink = (
+      number: number,
+      overrides: Partial<ThreadPullRequestLink> = {},
+    ): ThreadPullRequestLink => ({
+      host: "github.com",
+      repository: "acme/widgets",
+      number,
+      url: `https://github.com/acme/widgets/pull/${number}`,
+      source: "manual",
+      linkedAt: NOW,
+      snapshot: null,
+      stack: null,
+      watch: {
+        startedAt: NOW,
+        headSha: null,
+        failedChecks: [],
+        passed: false,
+        passedChecks: [],
+        remarksThrough: NOW,
+        remarkIds: [],
+        conflicting: false,
+        wakes: 0,
+      },
+      ...overrides,
+    });
+    const watchTask = (number: number) => ({
+      taskId: `pull-request-watch:github.com/acme/widgets#${number}`,
+      description: `Watching pull request #${number}`,
+      kind: "monitor" as const,
+      awaited: true as const,
+    });
+
+    const costs = (test: {
+      readonly shellReads: ReadonlyArray<unknown>;
+      readonly projectReads: ReadonlyArray<unknown>;
+      readonly publications: ReadonlyArray<unknown>;
+      readonly secretReads: ReadonlyArray<unknown>;
+    }) => ({
+      shellReads: test.shellReads.length,
+      projectReads: test.projectReads.length,
+      publications: test.publications.length,
+      secretReads: test.secretReads.length,
+    });
+    const afterOneRead = (idle: ReturnType<typeof costs>, publishes = 0) => ({
+      ...idle,
+      shellReads: idle.shellReads + 1,
+      projectReads: idle.projectReads + 1,
+      publications: idle.publications + publishes,
+    });
+
+    it.effect(
+      "run events: does no read and no publish when the run and its status match the published card",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(runningShell());
+          const idle = costs(test);
+          yield* test.emit("run.updated", runRecord());
+          yield* test.emit(
+            "run.updated",
+            runRecord({ workStartedAt: DateTime.makeUnsafe("2026-09-04T12:00:05Z") }),
+          );
+          assert.deepEqual(costs(test), idle);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect("run events: a new run or a finished run still reads and publishes", () =>
+      Effect.gen(function* () {
+        const test = yield* startPublishedRelay(runningShell());
+        const idle = costs(test);
+        const run2 = RunId.make("run-2");
+        yield* Ref.set(test.currentShell, runningShell({ latestRunId: run2 }));
+        yield* test.emit("run.created", runRecord({ id: run2, ordinal: 2 }));
+        assert.deepEqual(costs(test), afterOneRead(idle));
+        // The new run is now the published baseline, so repeating it reads nothing.
+        yield* test.emit("run.updated", runRecord({ id: run2, ordinal: 2 }));
+        assert.deepEqual(costs(test), afterOneRead(idle));
+
+        yield* Ref.set(
+          test.currentShell,
+          shell({ latestRunId: run2, status: "completed", activityRunStatus: null }),
+        );
+        yield* test.emit("run.updated", runRecord({ id: run2, ordinal: 2, status: "completed" }));
+        assert.equal(test.shellReads.length, idle.shellReads + 2);
+        yield* TestClock.adjust("5 seconds");
+        yield* test.relay.drain;
+        assert.deepEqual(
+          test.publications.map((publication) => publication.state?.phase),
+          ["running", "completed"],
+        );
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect("run events: a held queued run is never taken for the published one", () =>
+      Effect.gen(function* () {
+        const test = yield* startPublishedRelay(runningShell());
+        const idle = costs(test);
+        yield* test.emit("run.updated", runRecord({ queueHeld: true }));
+        assert.deepEqual(costs(test), afterOneRead(idle));
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "runtime-request events: does no read and no publish when the pending request is already published",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(
+            runningShell({ pendingRuntimeRequest: pendingRequest() }),
+          );
+          assert.equal(test.publications[0]?.state?.phase, "waiting_for_approval");
+          const idle = costs(test);
+          yield* test.emit("runtime-request.updated", requestRecord());
+          // A request that was never the pending one cannot move the card when it resolves.
+          yield* test.emit(
+            "runtime-request.updated",
+            requestRecord({
+              id: RuntimeRequestId.make("request-2"),
+              status: "resolved",
+              resolvedAt: DateTime.makeUnsafe(NOW),
+            }),
+          );
+          assert.deepEqual(costs(test), idle);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "runtime-request events: a request that opens or resolves still reads and publishes",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(runningShell());
+          const idle = costs(test);
+          yield* Ref.set(
+            test.currentShell,
+            runningShell({ pendingRuntimeRequest: pendingRequest() }),
+          );
+          yield* test.emit("runtime-request.updated", requestRecord());
+          assert.deepEqual(costs(test), afterOneRead(idle, 1));
+          assert.equal(test.publications[1]?.state?.phase, "waiting_for_approval");
+          yield* test.emit("runtime-request.updated", requestRecord());
+          assert.deepEqual(costs(test), afterOneRead(idle, 1));
+
+          yield* Ref.set(test.currentShell, runningShell());
+          yield* test.emit(
+            "runtime-request.updated",
+            requestRecord({ status: "resolved", resolvedAt: DateTime.makeUnsafe(NOW) }),
+          );
+          assert.equal(test.shellReads.length, idle.shellReads + 2);
+          assert.equal(test.publications[2]?.state?.phase, "running");
+          yield* test.emit(
+            "runtime-request.updated",
+            requestRecord({ status: "resolved", resolvedAt: DateTime.makeUnsafe(NOW) }),
+          );
+          assert.equal(test.shellReads.length, idle.shellReads + 2);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "provider-thread events: does no read and no publish when the pending task set is unchanged",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(holdingShell());
+          assert.equal(test.publications[0]?.state?.phase, "running");
+          const idle = costs(test);
+          // Nothing in the relay has seen this provider thread's tasks yet, so the first event reads.
+          yield* test.emit("provider-thread.updated", providerThreadRecord([backgroundTask]));
+          assert.deepEqual(costs(test), afterOneRead(idle));
+          yield* test.emit(
+            "provider-thread.updated",
+            providerThreadRecord([backgroundTask], {
+              updatedAt: DateTime.makeUnsafe("2026-09-04T12:05:00Z"),
+            }),
+          );
+          yield* test.emit(
+            "provider-thread.updated",
+            providerThreadRecord([backgroundTask], { status: "idle" }),
+          );
+          assert.deepEqual(costs(test), afterOneRead(idle));
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "provider-thread events: a task that clears or appears still reads and publishes",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(holdingShell());
+          const idle = costs(test);
+          yield* test.emit("provider-thread.updated", providerThreadRecord([backgroundTask]));
+          yield* Ref.set(test.currentShell, holdingShell({ pendingBackgroundTasks: [] }));
+          yield* test.emit("provider-thread.updated", providerThreadRecord([]));
+          assert.equal(test.shellReads.length, idle.shellReads + 2);
+          yield* TestClock.adjust("5 seconds");
+          yield* test.relay.drain;
+          assert.deepEqual(
+            test.publications.map((publication) => publication.state?.phase),
+            ["running", "completed"],
+          );
+
+          const second = { taskId: "bg-2", kind: "background_task" as const };
+          yield* Ref.set(test.currentShell, holdingShell({ pendingBackgroundTasks: [second] }));
+          yield* test.emit("provider-thread.updated", providerThreadRecord([second]));
+          // The held completion's confirmation read once more after its five seconds.
+          assert.equal(test.shellReads.length, idle.shellReads + 4);
+          assert.deepEqual(
+            test.publications.map((publication) => publication.state?.phase),
+            ["running", "completed", "running"],
+          );
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "provider-thread events: a provider thread that is not the active one still reads",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(holdingShell());
+          const idle = costs(test);
+          yield* test.emit("provider-thread.updated", providerThreadRecord([backgroundTask]));
+          yield* test.emit(
+            "provider-thread.updated",
+            providerThreadRecord([backgroundTask], {
+              id: ProviderThreadId.make("provider-thread-2"),
+            }),
+          );
+          assert.equal(test.shellReads.length, idle.shellReads + 2);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "pull-request-link events: does no read and no publish when the link's watch state is already published",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(
+            holdingShell({
+              pullRequests: [pullRequestLink(7)],
+              pendingBackgroundTasks: [watchTask(7)],
+            }),
+          );
+          assert.equal(test.publications[0]?.state?.phase, "running");
+          const idle = costs(test);
+          yield* test.emit(
+            "thread.pull-request-link-updated",
+            pullRequestLink(7, { linkedAt: "2026-09-04T12:30:00.000Z" }),
+          );
+          // A dismissed link that was never watched cannot hold a completion open.
+          yield* test.emit(
+            "thread.pull-request-link-updated",
+            pullRequestLink(8, { source: "stack-dismissed" }),
+          );
+          assert.deepEqual(costs(test), idle);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "pull-request-link events: a watch that appears or ends still reads and publishes",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(
+            holdingShell({
+              pullRequests: [pullRequestLink(7)],
+              pendingBackgroundTasks: [watchTask(7)],
+            }),
+          );
+          const idle = costs(test);
+          yield* test.emit("thread.pull-request-link-updated", pullRequestLink(9));
+          assert.deepEqual(costs(test), afterOneRead(idle));
+
+          const dismissed = pullRequestLink(7, { source: "stack-dismissed" });
+          yield* Ref.set(
+            test.currentShell,
+            holdingShell({ pullRequests: [dismissed], pendingBackgroundTasks: [] }),
+          );
+          yield* test.emit("thread.pull-request-link-updated", dismissed);
+          assert.equal(test.shellReads.length, idle.shellReads + 2);
+          yield* TestClock.adjust("5 seconds");
+          yield* test.relay.drain;
+          assert.deepEqual(
+            test.publications.map((publication) => publication.state?.phase),
+            ["running", "completed"],
+          );
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "thread events: settled, model and provider switches that carry the published fields do no read",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay();
+          const idle = costs(test);
+          yield* test.emit("thread.settled", threadRecord());
+          yield* test.emit("thread.model-selection-updated", threadRecord());
+          yield* test.emit("thread.provider-switched", threadRecord());
+          assert.deepEqual(costs(test), idle);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "thread events: a model switch or a settle that moves a published field still reads",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay();
+          const idle = costs(test);
+          yield* Ref.set(
+            test.currentShell,
+            shell({
+              modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "other" },
+            }),
+          );
+          yield* test.emit(
+            "thread.model-selection-updated",
+            threadRecord({
+              modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "other" },
+            }),
+          );
+          assert.deepEqual(costs(test), afterOneRead(idle, 1));
+          assert.equal(test.publications[1]?.state?.modelTitle, "other");
+          yield* test.emit("thread.settled", threadRecord({ settledOverride: "settled" }));
+          assert.equal(test.shellReads.length, idle.shellReads + 2);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "subagent.updated does no read: no published field comes from a subagent record",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* startPublishedRelay(holdingShell());
+          const idle = costs(test);
+          yield* test.emit("subagent.updated", {
+            id: "node-1",
+            threadId: THREAD_ID,
+            status: "completed",
+            childThreadId: SECOND_THREAD_ID,
+          });
+          yield* test.emit("subagent.updated", {
+            id: "node-1",
+            threadId: THREAD_ID,
+            status: "running",
+            childThreadId: SECOND_THREAD_ID,
+          });
+          assert.deepEqual(costs(test), idle);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "reads an event that arrives while a publish is reading, not the stale baseline",
+      () =>
+        Effect.gen(function* () {
+          const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+          const pulls = yield* Queue.unbounded<void>();
+          const live = yield* Ref.make(shell());
+          const readStarted = yield* Deferred.make<void>();
+          const releaseRead = yield* Deferred.make<void>();
+          let blockNextRead = false;
+          const test = yield* makeTestRelay({
+            readShell: () =>
+              Effect.gen(function* () {
+                const snapshot = yield* Ref.get(live);
+                if (blockNextRead) {
+                  blockNextRead = false;
+                  yield* Deferred.succeed(readStarted, undefined);
+                  yield* Deferred.await(releaseRead);
+                }
+                return snapshot;
+              }),
+            domainEvents: Stream.fromEffectRepeat(
+              Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
+            ),
+          });
+          yield* test.relay.start();
+          yield* Queue.take(pulls);
+          yield* test.relay.publishThread(THREAD_ID);
+          const offer = Effect.fnUntraced(function* (id: string, title: string) {
+            yield* Queue.offer(events, {
+              id: EventId.make(id),
+              type: "thread.metadata-updated",
+              threadId: THREAD_ID,
+              occurredAt: yield* DateTime.now,
+              payload: threadRecord({ title }),
+            } as unknown as OrchestrationV2DomainEvent);
+            yield* Queue.take(pulls);
+          });
+
+          yield* Ref.set(live, shell({ title: "Renamed thread" }));
+          blockNextRead = true;
+          yield* offer("event:rename", "Renamed thread");
+          yield* Deferred.await(readStarted);
+          // The rename is being published; renaming back matches the baseline from before it.
+          yield* Ref.set(live, shell({ title: "Thread" }));
+          yield* offer("event:rename-back", "Thread");
+          yield* Deferred.succeed(releaseRead, undefined);
+          yield* test.relay.drain;
+          assert.deepEqual(
+            test.publications.map((publication) => publication.state?.threadTitle),
+            ["Thread", "Renamed thread", "Thread"],
+          );
+        }).pipe(Effect.scoped),
     );
 
     it.effect("reads again after the relay link is reset", () =>
