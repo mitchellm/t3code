@@ -1392,6 +1392,15 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
           itemIds: Schema.Array(LedgerItemId),
         }),
       ),
+      /**
+       * Present on a hint-only message: a judged ledger went idle on items the judge failed, and the
+       * agent was told once that it can set them aside itself. It is not a round (no cap, no
+       * progress check) and records each item with the verdict count it was sent for, so the same
+       * fail is never hinted twice and a new one re-arms it.
+       */
+      setAsideHint: Schema.optionalKey(
+        Schema.Array(Schema.Struct({ itemId: LedgerItemId, judgements: NonNegativeInt })),
+      ),
     }),
     Schema.Struct({ kind: Schema.Literal("system") }),
     /**

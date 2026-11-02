@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   EventId,
+  type Ledger,
   LedgerId,
   LedgerItemId,
   MessageId,
@@ -1181,4 +1182,144 @@ it.effect("truncates a long item title in the stop notice", () =>
     assert.include(notice, `${longTitle.slice(0, 47)}…`);
     assert.notInclude(notice, longTitle);
   }).pipe(Effect.provide(layerTest)),
+);
+
+/**
+ * The orchestrator seam over a canned judged ledger, because the real stack stamps `requiresJudge`
+ * from a loadout this harness does not have. A dispatched message joins the log the next run reads.
+ */
+const judgedLedgerWorld = (judgements: { current: number }) => {
+  const threadId = ThreadId.make("thread:judged-hint");
+  const run = (ordinal: number): OrchestrationV2Run =>
+    ({
+      id: RunId.make(`run:judged-hint:${ordinal}`),
+      threadId,
+      ordinal,
+      status: "completed",
+    }) as OrchestrationV2Run;
+  const runs = [run(1), run(2), run(3)];
+  const messages: Array<Record<string, unknown>> = [
+    { role: "user", createdBy: "user", creationSource: "web", runId: runs[0]!.id },
+  ];
+  const dispatched: Array<{
+    readonly type: string;
+    readonly text?: string;
+    readonly notification?: unknown;
+  }> = [];
+  const ledger = () =>
+    ({
+      id: ledgerId,
+      threadId,
+      title: "Ship it",
+      closedAt: null,
+      requiresJudge: true,
+      items: [
+        {
+          id: itemId("a"),
+          title: "Item a",
+          acceptance: "a works",
+          status: "in_progress",
+          evidence: "done",
+          verdict: { outcome: "fail", notes: "Still throws", judge: modelSelection },
+          judgements: judgements.current,
+        },
+      ],
+    }) as unknown as Ledger;
+  const orchestrator = {
+    getThreadRecords: () =>
+      Effect.succeed({
+        thread: { archivedAt: null, deletedAt: null, activeProviderThreadId: null },
+        runs: runs.slice(0, 3),
+        runtimeRequests: [],
+        ledger: ledger(),
+        turnItems: [],
+        providerThreads: [],
+        subagents: [],
+        messages: [...messages],
+      }),
+    dispatch: (command: (typeof dispatched)[number] & Record<string, unknown>) =>
+      Effect.sync(() => {
+        dispatched.push(command);
+        if (command.type === "message.dispatch") {
+          messages.push({
+            role: "user",
+            createdBy: command.createdBy,
+            creationSource: command.creationSource,
+            runId: runs[2]!.id,
+            text: command.text,
+            notification: command.notification,
+          });
+        }
+      }),
+  } as unknown as Parameters<typeof continueLedgerAfterRun>[0]["orchestrator"];
+  const unused = {} as never;
+  const deps = { orchestrator, eventSink: unused, ids: unused };
+  return { threadId, runs, messages, dispatched, deps };
+};
+
+it.effect("sends the set-aside hint once when a judged ledger goes idle on a failed item", () =>
+  Effect.gen(function* () {
+    const judgements = { current: 1 };
+    const world = judgedLedgerWorld(judgements);
+    // A server round found this ledger as it is; then the user spoke and left it alone: idle.
+    world.messages.push({
+      role: "user",
+      createdBy: "agent",
+      creationSource: "server",
+      runId: world.runs[1]!.id,
+      notification: {
+        source: {
+          kind: "ledger_continue",
+          round: 1,
+          items: [{ id: itemId("a"), status: "in_progress", judgements: 1 }],
+        },
+        outcome: "updated",
+        summary: "open",
+      },
+    });
+    world.messages.push({
+      role: "user",
+      createdBy: "user",
+      creationSource: "web",
+      runId: world.runs[2]!.id,
+    });
+    const input = { threadId: world.threadId, runId: world.runs[2]!.id };
+
+    yield* continueLedgerAfterRun(world.deps, input);
+    assert.deepEqual(
+      world.dispatched.map(({ type }) => type),
+      ["message.dispatch"],
+    );
+    const hint = world.dispatched[0]!;
+    assert.include(hint.text ?? "", "do not ask the user to drop or defer it");
+    assert.include(hint.text ?? "", "Still throws");
+    assert.deepEqual(
+      (hint.notification as { source: { setAsideHint: unknown } }).source.setAsideHint,
+      [{ itemId: itemId("a"), judgements: 1 }],
+    );
+
+    // The same run decided again, as after a restart, finds the hint in the log and sends nothing.
+    yield* continueLedgerAfterRun(world.deps, input);
+    assert.equal(world.dispatched.length, 1);
+
+    // A new failed verdict re-arms it for the next idle evaluation.
+    judgements.current = 2;
+    world.messages.splice(1, 1, {
+      role: "user",
+      createdBy: "agent",
+      creationSource: "server",
+      runId: world.runs[1]!.id,
+      notification: {
+        source: {
+          kind: "ledger_continue",
+          round: 1,
+          items: [{ id: itemId("a"), status: "in_progress", judgements: 2 }],
+        },
+        outcome: "updated",
+        summary: "open",
+      },
+    });
+    yield* continueLedgerAfterRun(world.deps, input);
+    assert.equal(world.dispatched.length, 2);
+  }),
 );

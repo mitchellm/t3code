@@ -10,6 +10,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import {
+  isLedgerFollowUpRound,
   LEDGER_AUTO_CONTINUE_CAP,
   type LedgerAutoContinueDecision,
   partitionLedgerFollowUp,
@@ -28,7 +29,12 @@ import * as Layer from "effect/Layer";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 import * as EventSink from "./EventSink.ts";
-import { decideLedgerFollowUp, JUDGED_SET_ASIDE_HINT, ledgerReplanText } from "./LedgerReplan.ts";
+import {
+  decideLedgerFollowUp,
+  JUDGED_SET_ASIDE_HINT,
+  ledgerReplanText,
+  ledgerSetAsideHintText,
+} from "./LedgerReplan.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 
@@ -228,13 +234,42 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
     ),
   });
   if (decision.type === "idle") return;
+  if (decision.type === "hint") {
+    // Not a round: it records which fails it was sent for, and the streak ignores it. The command
+    // id is the run's, so the same run deciding twice sends it once.
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`server:ledger-hint:${run.id}`),
+      messageId: MessageId.make(`message:ledger-hint:${run.id}`),
+      threadId: input.threadId,
+      text: ledgerSetAsideHintText({ ledger, items: decision.hintItems }),
+      notification: {
+        source: {
+          kind: "ledger_continue",
+          round: 1,
+          items: [...decision.items],
+          setAsideHint: decision.hintItems.map((item) => ({
+            itemId: item.id,
+            judgements: item.judgements ?? 0,
+          })),
+        },
+        outcome: "updated",
+        summary: `Telling the agent it can set ${decision.hintItems.map((item) => item.id).join(", ")} aside itself`,
+      },
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "server",
+    });
+    return;
+  }
   if (decision.type === "stuck") {
     // The streak stays stuck until the user speaks, so every later delegate, judge or background
     // wake decides stuck again; say it once per streak instead of re-posting and re-marking unread.
     const lastRoundOrdinal = Math.max(
       0,
       ...messages
-        .filter((message) => message.notification?.source.kind === "ledger_continue")
+        .filter(isLedgerFollowUpRound)
         .map((message) => ordinalByRun.get(message.runId!) ?? 0),
     );
     const sinceLastRound = runs.filter((candidate) => candidate.ordinal >= lastRoundOrdinal);

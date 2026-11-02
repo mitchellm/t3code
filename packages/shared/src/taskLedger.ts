@@ -30,6 +30,15 @@ type LedgerContinueMessage = Pick<
 const isOpen = (item: Pick<LedgerItem, "status">) =>
   item.status === "open" || item.status === "in_progress";
 
+/**
+ * A round of the follow-up streak. The set-aside hint is a ledger_continue message too, but it is
+ * one-shot information, not a round: it neither counts toward the cap nor stands as the snapshot
+ * the next round is compared with.
+ */
+export const isLedgerFollowUpRound = (message: LedgerContinueMessage): boolean =>
+  message.notification?.source.kind === "ledger_continue" &&
+  message.notification.source.setAsideHint === undefined;
+
 /** What a follow-up records per item; a judge's hand-back changes it without a status change. */
 export type LedgerProgressMark = Pick<LedgerItem, "id" | "status" | "judging" | "judgements">;
 
@@ -99,6 +108,12 @@ export function decideLedgerAutoContinue(input: {
   for (let index = input.messages.length - 1; index >= 0; index -= 1) {
     const message = input.messages[index]!;
     if (message.role !== "user") continue;
+    if (
+      message.notification?.source.kind === "ledger_continue" &&
+      !isLedgerFollowUpRound(message)
+    ) {
+      continue;
+    }
     if (message.notification?.source.kind === "ledger_continue") {
       if (message.runId != null && input.cancelledRunIds?.has(message.runId) === true) {
         return { type: "idle" };
@@ -120,9 +135,7 @@ export function decideLedgerAutoContinue(input: {
   // Restarting follow-ups would only produce more "still waiting on you" turns; any ledger change
   // starts them again.
   if (previous === undefined && userIndex > 0) {
-    const before = input.messages
-      .slice(0, userIndex)
-      .findLast((message) => message.notification?.source.kind === "ledger_continue");
+    const before = input.messages.slice(0, userIndex).findLast(isLedgerFollowUpRound);
     if (
       before?.notification?.source.kind === "ledger_continue" &&
       signatureOf(before.notification.source.items) === signatureOf(items)
@@ -134,9 +147,7 @@ export function decideLedgerAutoContinue(input: {
   // finds every open item exactly as that replan did, more rounds would only say "still waiting".
   // A replan that moved things still continues, and a plain follow-up after it ends that stall, so
   // a new one earns its own replan.
-  const latestFollowUp = input.messages.findLast(
-    (message) => message.notification?.source.kind === "ledger_continue",
-  );
+  const latestFollowUp = input.messages.findLast(isLedgerFollowUpRound);
   const stalledReplan =
     latestFollowUp?.notification?.source.kind === "ledger_continue" &&
     latestFollowUp.notification.source.replan?.reason === "stalled"
