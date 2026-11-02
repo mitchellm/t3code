@@ -8,6 +8,7 @@ import {
   type Loadout,
   type LoadoutStructure,
   ProviderInstanceId,
+  type RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 import type {
@@ -21,6 +22,7 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  AUTONOMOUS_ASK_NUDGE,
   buildClaudeHarnessHooks,
   claudePlansDirectory,
   formatLedgerBlock,
@@ -1031,6 +1033,63 @@ describe("plan before editing", () => {
     expect(decisionOf(await fire("PreToolUse", preToolUse("Bash")))?.permissionDecision).toBe(
       "deny",
     );
+  });
+});
+
+describe("AskUserQuestion on an autonomous thread", () => {
+  const policyWith = (runtimeMode: RuntimeMode) => ({
+    structure: "solo" as const,
+    planBeforeEditing: false,
+    runtimeMode,
+  });
+  const asking = (runtimeMode: RuntimeMode | undefined, extra: Partial<HarnessHookPort> = {}) =>
+    make({
+      readThreadPolicy: async () =>
+        runtimeMode === undefined ? undefined : policyWith(runtimeMode),
+      ...extra,
+    });
+  const nudgeOf = (output: Record<string, unknown>) =>
+    (output.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext;
+
+  it("lets the question through with a nudge to decide, on full access and auto", async () => {
+    for (const mode of ["full-access", "auto"] as const) {
+      const output = await asking(mode).fire("PreToolUse", preToolUse("AskUserQuestion"));
+      expect(nudgeOf(output)).toBe(AUTONOMOUS_ASK_NUDGE);
+      // Never a decision: the question is still the user's to answer, and a permission prompt
+      // must still apply.
+      expect(decisionOf(output)?.permissionDecision).toBeUndefined();
+    }
+    expect(AUTONOMOUS_ASK_NUDGE).toContain("pick");
+    expect(AUTONOMOUS_ASK_NUDGE).toContain("genuinely the user's");
+  });
+
+  it("says nothing where the user is steering: approval modes, plan mode and unreadable state", async () => {
+    for (const mode of ["approval-required", "auto-accept-edits"] as const) {
+      expect(await asking(mode).fire("PreToolUse", preToolUse("AskUserQuestion"))).toEqual({});
+    }
+    // Plan mode asks to shape the plan, whatever the runtime mode.
+    expect(
+      await asking("full-access").fire(
+        "PreToolUse",
+        preToolUse("AskUserQuestion", { permission_mode: "plan" }),
+      ),
+    ).toEqual({});
+    expect(await asking(undefined).fire("PreToolUse", preToolUse("AskUserQuestion"))).toEqual({});
+  });
+
+  it("reads the policy from the turn's cache, and leaves a delegated child alone", async () => {
+    let reads = 0;
+    const { fire } = make({
+      readThreadPolicy: async () => {
+        reads++;
+        return policyWith("full-access");
+      },
+    });
+    await fire("PreToolUse", preToolUse("AskUserQuestion"));
+    await fire("PreToolUse", preToolUse("Bash"));
+    expect(reads).toBe(1);
+    const child = asking("full-access", { delegatedChild: true });
+    expect(await child.fire("PreToolUse", preToolUse("AskUserQuestion"))).toEqual({});
   });
 });
 

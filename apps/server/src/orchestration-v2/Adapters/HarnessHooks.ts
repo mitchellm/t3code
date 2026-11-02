@@ -15,6 +15,7 @@ import {
   type Ledger,
   type LedgerItem,
   type LoadoutRole,
+  type RuntimeMode,
 } from "@t3tools/contracts";
 import type {
   ProviderAdapterV2HarnessLedgerState,
@@ -60,6 +61,15 @@ const STOP_ITEMS_SHOWN = 5;
 // The agent changes its own thread's loadout only through this tool (t3_thread_configure sets the
 // model), matched by suffix since the MCP server prefix is the host's.
 const LOADOUT_CHANGE_TOOL = "t3_loadout_propose";
+const ASK_USER_TOOL = "AskUserQuestion";
+// Modes where nobody approves each step, so the user is not at the keyboard to answer.
+const AUTONOMOUS_RUNTIME_MODES: ReadonlyArray<RuntimeMode> = ["full-access", "auto"];
+/**
+ * A nudge, not a block: the question still goes through, since some decisions are the user's. It
+ * reaches the agent with the answer, so it shapes the questions after this one.
+ */
+export const AUTONOMOUS_ASK_NUDGE =
+  "This thread runs autonomously. If you can decide this from the request, the code or a sensible default, pick, say what you picked and continue; ask only for a decision that is genuinely the user's (a product call, spending money, publishing, an irreversible action).";
 
 // Plan before editing gates only these. A shell can write files too, but the gate is a nudge to
 // plan, not a sandbox: a shell edit cannot be told apart from a read, and gating shells would make
@@ -718,6 +728,20 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           ) {
             return {};
           }
+          if (tool === ASK_USER_TOOL) {
+            // Plan mode asks to shape the plan, whatever the thread's runtime mode.
+            if (input.permission_mode === "plan") return {};
+            const asked = await policyFor(signal);
+            if (asked === undefined || !AUTONOMOUS_RUNTIME_MODES.includes(asked.runtimeMode)) {
+              return {};
+            }
+            return {
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                additionalContext: AUTONOMOUS_ASK_NUDGE,
+              },
+            };
+          }
           const managersTool = input.agent_id === undefined && MANAGER_DENIED_TOOLS.includes(tool);
           // A native subagent's edit is gated too: it is the thread editing, and routing an edit
           // through Agent is the obvious way around a denial.
@@ -753,7 +777,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
             },
           };
         }),
-        MANAGER_DENIED_TOOLS.join("|"),
+        [...MANAGER_DENIED_TOOLS, ASK_USER_TOOL].join("|"),
         PRE_TOOL_HOOK_TIMEOUT_SECONDS,
       ),
     ];
