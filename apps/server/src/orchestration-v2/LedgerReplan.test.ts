@@ -155,6 +155,56 @@ describe("follow-ups after a stalled replan", () => {
   });
 });
 
+describe("a ledger already stalled on the user", () => {
+  const before = ledgerOf(failedJudge("a", 1), item("b", { status: "in_progress" }));
+  const stalledReplan = followUp(2, before, { reason: "stalled", itemIds: ["item:a", "item:b"] });
+  const wake: Message = { role: "user", createdBy: "agent", creationSource: "server" };
+  const messages = [userMessage, followUp(1, before), stalledReplan, wake];
+
+  it("replans straight away when only a judge's hand-back moved, with no plain round first", () => {
+    // A second failed verdict changes the marks but no status: nothing the agent can do alone.
+    const handedBack = ledgerOf(failedJudge("a", 2), item("b", { status: "in_progress" }));
+    expect(decideLedgerFollowUp({ ledger: handedBack, messages })).toMatchObject({
+      type: "replan",
+      reason: "stalled",
+      replanItemIds: ["item:a", "item:b"],
+    });
+  });
+
+  it("still continues plainly when the agent changed an item, one finished, or one is new", () => {
+    const moved = ledgerOf(failedJudge("a", 2), item("b", { status: "open" }));
+    expect(decideLedgerFollowUp({ ledger: moved, messages })).toMatchObject({ type: "continue" });
+    const finished = ledgerOf(failedJudge("a", 2), item("b", { status: "closed" }));
+    expect(decideLedgerFollowUp({ ledger: finished, messages })).toMatchObject({
+      type: "continue",
+    });
+    const added = ledgerOf(failedJudge("a", 2), item("b", { status: "in_progress" }), item("c"));
+    expect(decideLedgerFollowUp({ ledger: added, messages })).toMatchObject({ type: "continue" });
+  });
+
+  it("continues plainly after the user spoke, or while a judge is working", () => {
+    const handedBack = ledgerOf(failedJudge("a", 2), item("b", { status: "in_progress" }));
+    expect(
+      decideLedgerFollowUp({ ledger: handedBack, messages: [...messages, userMessage] }),
+    ).toMatchObject({ type: "continue" });
+    const judging = ledgerOf(
+      { ...failedJudge("a", 2), judging: true },
+      item("b", { status: "in_progress" }),
+    );
+    expect(decideLedgerFollowUp({ ledger: judging, messages })).toMatchObject({
+      type: "continue",
+    });
+  });
+
+  it("stops, rather than replanning again, when that replan changed nothing", () => {
+    const handedBack = ledgerOf(failedJudge("a", 2), item("b", { status: "in_progress" }));
+    const second = followUp(3, handedBack, { reason: "stalled", itemIds: ["item:a", "item:b"] });
+    expect(
+      decideLedgerFollowUp({ ledger: handedBack, messages: [...messages, second] }),
+    ).toMatchObject({ type: "stuck", reason: "stalled" });
+  });
+});
+
 describe("judgeFailures", () => {
   it("counts recorded verdicts only while the latest one failed", () => {
     expect(judgeFailures(failedJudge("a", 3))).toBe(3);

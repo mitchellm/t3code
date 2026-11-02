@@ -235,14 +235,48 @@ export function decideLedgerFollowUp(input: LedgerFollowUpInput): LedgerFollowUp
     };
   }
   const due = judgeReplanDue(base.open, history.judgeReplanned);
-  if (due.length === 0) return base;
+  if (due.length > 0) {
+    return {
+      ...base,
+      type: "replan",
+      reason: "judge",
+      replanItems: due,
+      replanItemIds: due.map((item) => item.id),
+    };
+  }
+  // A plain round here would only re-find the stall, so the replan (and its hint) goes out now.
+  if (!stalledOnTheUser(input.messages, ledger, base.open)) return base;
+  const stuck = stalledItems(ledger, base.open);
   return {
     ...base,
     type: "replan",
-    reason: "judge",
-    replanItems: due,
-    replanItemIds: due.map((item) => item.id),
+    reason: "stalled",
+    replanItems: stuck,
+    replanItemIds: stuck.map((item) => item.id),
   };
+}
+
+/**
+ * The latest round was a stalled replan, the user has not spoken since, and the only thing that
+ * moved is a judge's hand-back: no open item changed status, none finished, none is new. That is
+ * a ledger waiting on a decision the agent cannot make alone. A change the agent made itself, or
+ * a judge still working, is progress and gets a plain round.
+ */
+function stalledOnTheUser(
+  messages: LedgerFollowUpInput["messages"],
+  ledger: Ledger,
+  open: ReadonlyArray<LedgerItem>,
+): boolean {
+  const index = messages.findLastIndex(isLedgerFollowUpRound);
+  const source = index < 0 ? undefined : messages[index]!.notification?.source;
+  if (source?.kind !== "ledger_continue" || source.replan?.reason !== "stalled") return false;
+  const userSpoke = messages
+    .slice(index + 1)
+    .some((message) => message.createdBy === "user" && message.creationSource !== "server");
+  if (userSpoke || open.some((item) => item.judging === true)) return false;
+  if (finishedSince(source.items, ledger.items)) return false;
+  const statusThen = new Map(source.items.map(({ id, status }) => [id, status]));
+  return open.every((item) => statusThen.get(item.id) === item.status);
 }
 
 /**
