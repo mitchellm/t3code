@@ -78,6 +78,7 @@ $ConfigPath = Join-Path $StateDir 'config.json'
 $RustupHome = Join-Path $StateDir 'rustup'
 $SyncTaskName = 'T3 Code fork sync'
 $InstallTaskName = 'T3 Code fork install'
+$InstallerSettleSeconds = 5
 $RestartTaskName = 'T3 Code fork restart'
 $RestartPath = Join-Path $StateDir 'restart.json'
 $KeepReleases = 5
@@ -595,8 +596,7 @@ function Invoke-CompactDb {
   while (-not ($own = Get-AppInstallers | Select-Object -First 1) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 250 }
   if ($own) {
     Log 'T3 is installing its downloaded update first; compacting after it'
-    $p = Get-Process -Id $own.ProcessId -ErrorAction SilentlyContinue
-    if ($p -and -not $p.WaitForExit(600000)) { throw "T3's own installer was still running after 10 minutes." }
+    if (-not (Wait-AppInstallers 20)) { throw "T3's own installer was still running after 20 minutes." }
     Start-Sleep -Seconds 5
     if (Test-AppRunning) { Close-App 90 }
   }
@@ -685,10 +685,40 @@ function Get-DownloadedUpdate {
 }
 
 function Get-AppInstallers {
-  # Installers T3's own updater started; they run from its cache folder.
+  # Installers T3's own updater started: the downloaded installer runs from its cache folder, and
+  # NSIS hands the real work to copies of itself in a temp folder (nsXXXX.tmp, ~nsu.tmp) such as the
+  # old version's uninstaller. The first process can exit minutes before the install is done.
   $dir = "$(Get-UpdaterDir)\"
   @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, 'OrdinalIgnoreCase') })
+    Where-Object { $_.ExecutablePath -and ($_.ExecutablePath.StartsWith($dir, 'OrdinalIgnoreCase') -or $_.ExecutablePath -match '\\~?ns[a-z0-9]*\.tmp\\') } |
+    Sort-Object { $_.ExecutablePath.StartsWith($dir, 'OrdinalIgnoreCase') ? 0 : 1 }, ProcessId)
+}
+
+function Wait-AppInstallers([int]$Minutes = 20) {
+  # Waits until no installer of T3's has run for $InstallerSettleSeconds in a row (a launcher exiting
+  # and its child starting leaves a gap). False if one still runs after $Minutes.
+  $deadline = (Get-Date).AddMinutes($Minutes)
+  $quietSince = $null
+  while ((Get-Date) -lt $deadline) {
+    if (Get-AppInstallers) { $quietSince = $null }
+    else {
+      if (-not $quietSince) { $quietSince = Get-Date }
+      if (((Get-Date) - $quietSince).TotalSeconds -ge $InstallerSettleSeconds) { return $true }
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  $false
+}
+
+function Wait-InstalledBuild([string]$Expected, [int]$Seconds = 60) {
+  # The build on disk once the installers are gone. The asar is written near the end of an install,
+  # so give it a minute to show $Expected before believing an older one. Returns the last build read.
+  $until = (Get-Date).AddSeconds($Seconds)
+  while ($true) {
+    $got = Get-InstalledBuild
+    if (-not $Expected -or ($got -and (Compare-Build $got $Expected) -ge 0) -or (Get-Date) -ge $until) { return $got }
+    Start-Sleep -Seconds 1
+  }
 }
 
 function Get-AppProcesses {
@@ -782,10 +812,11 @@ function Complete-Install([string]$Exe, [string]$Ver, [datetime]$ClosedAt, [swit
   while (-not ($own = Get-AppInstallers | Select-Object -First 1) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 250 }
   if ($own) {
     Log "T3 is installing the update it downloaded ($(Split-Path $own.ExecutablePath -Leaf)); waiting for it"
-    $p = Get-Process -Id $own.ProcessId -ErrorAction SilentlyContinue
-    if ($p -and -not $p.WaitForExit(600000)) { throw "T3's own installer was still running after 10 minutes." }
+    $expected = Get-DownloadedUpdate
+    if (-not $expected -and (Split-Path $own.ExecutablePath -Leaf) -match '(\d+\.\d+\.\d+-fork\.\d{8}\.\d+)') { $expected = $Matches[1] }
+    if (-not (Wait-AppInstallers 20)) { throw "T3's own installer was still running after 20 minutes." }
     [void](Update-AppInstall)
-    $got = Get-InstalledBuild
+    $got = Wait-InstalledBuild $expected
     if (-not $Rollback -and (Compare-Build $got $Ver) -ge 0) {
       Log "T3 installed $got itself"
       # Its installer reopens T3; start it only if that did not happen.
@@ -805,6 +836,21 @@ function Complete-Install([string]$Exe, [string]$Ver, [datetime]$ClosedAt, [swit
     Clear-ForInstall $ClosedAt
     Log "installing $Exe"
     $code = Invoke-Installer $Exe
+    if ($code -eq 2) {
+      # NSIS aborts with 2 when another install or a running exe holds the files. Let the other
+      # installers finish, and skip the retry if one of them already put this build in place.
+      Log 'The installer exited with 2 (another install or a running T3 holds the files); waiting for other installers, then trying once more'
+      if (-not (Wait-AppInstallers 20)) { throw "The installer exited with 2 and another installer was still running after 20 minutes." }
+      [void](Update-AppInstall)
+      if (-not $Rollback -and (Compare-Build (Get-InstalledBuild) $Ver) -ge 0) {
+        Log "T3 now has $(Get-InstalledBuild); nothing more to install"
+        $code = 0
+      } else {
+        Clear-ForInstall (Get-Date)
+        Log "installing $Exe"
+        $code = Invoke-Installer $Exe
+      }
+    }
     if ($code) { throw "The installer exited with $code." }
     if (-not (Update-AppInstall)) { throw "The installer finished but left no T3 exe in $AppDir." }
     Log "installed exe: $AppExe"
