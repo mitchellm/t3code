@@ -79,6 +79,9 @@ $RustupHome = Join-Path $StateDir 'rustup'
 $SyncTaskName = 'T3 Code fork sync'
 $InstallTaskName = 'T3 Code fork install'
 $InstallerSettleSeconds = 5
+# Clear-ForInstall: how long T3's helpers get to exit by themselves, and to die after being ended.
+$LeftoverWaitSeconds = 15
+$KillWaitSeconds = 10
 $RestartTaskName = 'T3 Code fork restart'
 $RestartPath = Join-Path $StateDir 'restart.json'
 $KeepReleases = 5
@@ -722,15 +725,42 @@ function Wait-InstalledBuild([string]$Expected, [int]$Seconds = 60) {
 }
 
 function Get-AppProcesses {
-  @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith("$AppDir\", 'OrdinalIgnoreCase') })
+  # Everything running from the app folder. Get-Process reads each Path on its own and a loaded
+  # machine can hand back no Path (or nothing), so an empty result is cross-checked against WMI,
+  # which reads ExecutablePath another way.
+  $own = "$AppDir\"
+  $found = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($own, 'OrdinalIgnoreCase') })
+  if (-not $found) {
+    $found = @(Get-CimInstance Win32_Process -Filter "Name='$AppExeName'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($own, 'OrdinalIgnoreCase') } |
+      ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } | Where-Object { $_ })
+  }
+  $found
 }
 
 function Get-AppMain {
   # T3's main process: no --type= switch, and not started by another T3 process (its backend is).
-  $all = @(Get-CimInstance Win32_Process -Filter "Name='$AppExeName'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith("$AppDir\", 'OrdinalIgnoreCase') })
-  $ids = @($all | ForEach-Object ProcessId)
-  @($all | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.ParentProcessId -notin $ids })
+  # An empty WMI read is not proof that T3 is gone (a query under load took 3 s, and a failed one
+  # reads as nothing): while Get-Process still sees T3's exe, ask again, then fall back to its oldest
+  # process, which is the main one.
+  $own = "$AppDir\"
+  $procs = $null
+  for ($try = 0; $try -lt 3; $try++) {
+    $all = @(Get-CimInstance Win32_Process -Filter "Name='$AppExeName'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($own, 'OrdinalIgnoreCase') })
+    if ($all) {
+      $ids = @($all | ForEach-Object ProcessId)
+      return @($all | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.ParentProcessId -notin $ids })
+    }
+    if ($null -eq $procs) {
+      $procs = @(Get-AppProcesses | Where-Object { "$($_.ProcessName).exe" -eq $AppExeName })
+      if (-not $procs) { return @() }
+    }
+    Start-Sleep -Milliseconds 300
+  }
+  $oldest = $procs | Sort-Object { try { $_.StartTime } catch { [datetime]::MaxValue } } | Select-Object -First 1
+  [pscustomobject]@{ ProcessId = $oldest.Id; ParentProcessId = 0; ExecutablePath = $oldest.Path; CommandLine = $null
+    CreationDate = $(try { $oldest.StartTime } catch { Get-Date }) }
 }
 
 function Test-AppRunning { [bool](Get-AppMain) }
@@ -738,8 +768,23 @@ function Test-AppRunning { [bool](Get-AppMain) }
 function Wait-AppQuit([datetime]$Until) {
   # Blocks on the handles of T3's main processes as they are now, so a quit followed by a quick
   # reopen still counts as a quit (polling for "no T3 process" misses a reopen 2 seconds later).
-  # Returns when they quit, or $null if one still runs at $Until.
-  $mains = @(Get-AppMain | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } | Where-Object { $_ })
+  # Returns when they quit, or $null if one still runs at $Until. A quit is reported only for
+  # handles that exited, or when no T3 main process exists (Get-AppMain has already asked WMI again
+  # and cross-checked Get-Process); a main that is listed but cannot be opened is not a quit.
+  for ($try = 0; $try -lt 3; $try++) {
+    $found = @(Get-AppMain)
+    if (-not $found) { return Get-Date }
+    $mains = @($found | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } | Where-Object { $_ })
+    if ($mains) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $mains) {
+    while ((Get-Date) -lt $Until) {
+      Start-Sleep -Seconds 2
+      if (-not (Get-AppMain)) { return Get-Date }
+    }
+    return $null
+  }
   foreach ($p in $mains) {
     while (-not $p.WaitForExit(1000)) { if ((Get-Date) -gt $Until) { return $null } }
   }
@@ -775,24 +820,49 @@ function Close-App([int]$Seconds = 90) {
     Start-Sleep -Milliseconds 500
   }
   Log "T3 did not close within $Seconds s; ending it"
-  Get-AppProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+  Stop-AppProcesses @(Get-AppProcesses)
 }
+
+function Stop-AppProcesses([object[]]$Procs) {
+  # By PID, one at a time, logging each refusal: a bulk Stop-Process with SilentlyContinue hid why
+  # T3's main and backend survived on 2026-11-02.
+  foreach ($p in $Procs) {
+    try { Stop-Process -Id $p.Id -Force -ErrorAction Stop }
+    catch { Log "could not end $($p.ProcessName) ($($p.Id)): $($_.Exception.Message)" }
+  }
+}
+
+function Wait-AppProcessesGone([int]$Seconds) {
+  # The T3 processes still running after up to $Seconds.
+  $until = (Get-Date).AddSeconds($Seconds)
+  while ((Get-AppProcesses) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 500 }
+  @(Get-AppProcesses)
+}
+
+function Format-Procs([object[]]$Procs) { ($Procs | ForEach-Object { "$($_.ProcessName) $($_.Id)" }) -join ', ' }
 
 function Clear-ForInstall([datetime]$ClosedAt) {
   # A T3 reopened right after it quit holds the old files and would make the install fail or be
-  # skipped: close it again. Then give its helpers (resource monitor, backend) a moment to exit.
+  # skipped: close it again. Then give its helpers (resource monitor, backend) a moment to exit,
+  # end what is left, and check by PID that it is gone. The installer never starts while any T3
+  # process runs: NSIS exits 2 on held files, and on 2026-11-02 that cost 15 minutes twice.
   if (Test-AppRunning) {
     Log "T3 was reopened $([int]((Get-Date) - $ClosedAt).TotalSeconds) s after it quit; closing it again so the install runs"
     Close-App 45
   }
-  $until = (Get-Date).AddSeconds(15)
-  while ((Get-AppProcesses) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 500 }
-  $left = @(Get-AppProcesses)
+  $left = Wait-AppProcessesGone $LeftoverWaitSeconds
   if ($left) {
-    Log "ending $(($left | ForEach-Object ProcessName | Sort-Object -Unique) -join ', ') left from the old app"
-    $left | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
+    Log "ending $(Format-Procs $left) left from the old app"
+    Stop-AppProcesses $left
+    $left = Wait-AppProcessesGone $KillWaitSeconds
+    if ($left) {
+      Log "still running after being ended: $(Format-Procs $left); trying once more"
+      Stop-AppProcesses $left
+      $left = Wait-AppProcessesGone $KillWaitSeconds
+    }
+    if (-not $left) { Start-Sleep -Seconds 1 }
   }
+  if ($left) { throw "T3 Code processes are still running ($(Format-Procs $left)) and could not be ended, so the installer was not started. End them in Task Manager and run the restart again." }
 }
 
 function Start-App {

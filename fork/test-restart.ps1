@@ -395,6 +395,53 @@ try {
   $done = Wait-Test 60 $waiter
   Check 'not running: installs at once and starts T3' ($done -and (Get-InstalledBuild) -eq $v2 -and (Get-Mains).Count -eq 1)
 
+  # --- WMI reads empty while T3 runs (the 2026-11-02 false "quit on its own") --------------------------------
+  # Under load the CIM query fails or returns nothing; an empty read must not count as T3 having quit.
+  function Get-CimInstance { if ($script:blindWmi) { return }; CimCmdlets\Get-CimInstance @args }
+  Reset-Case
+  $first = Start-Standin
+  $script:blindWmi = $true
+  try {
+    $q = Wait-AppQuit (Get-Date).AddSeconds(3)
+    $seen = Get-AppMain | Select-Object -First 1
+    $runs = Test-AppRunning
+  } finally { $script:blindWmi = $false }
+  Check 'blind WMI: no quit is reported while T3 runs' ($null -eq $q -and -not $first.HasExited) "quit at $q"
+  Check 'blind WMI: the main process is still found' ($runs -and $seen.ProcessId -eq $first.Id) "seen $($seen.ProcessId), expected $($first.Id)"
+  $script:blindWmi = $true
+  try {
+    Close-Standin $first
+    $q = Wait-AppQuit (Get-Date).AddSeconds(15)
+  } finally { $script:blindWmi = $false }
+  Check 'blind WMI: the real quit is still reported' ($q -and $first.HasExited)
+
+  # --- A process survives the kill: the installer must not start ---------------------------------------------
+  Reset-Case
+  $first = Start-Standin
+  function Stop-Process {
+    [CmdletBinding()] param([Parameter(ValueFromPipeline)]$InputObject, [int]$Id, [switch]$Force)
+    process {
+      $target = $InputObject ? $InputObject.Id : $Id
+      if ($script:immortal -contains $target) { Write-Error "Access is denied ($target)"; return }
+      Microsoft.PowerShell.Management\Stop-Process -Id $target -Force
+    }
+  }
+  $script:immortal = @($first.Id)
+  $realCloseApp = ${function:Close-App}
+  ${function:Close-App} = { param([int]$Seconds) }
+  $LeftoverWaitSeconds = 1; $KillWaitSeconds = 1
+  $threw = $null
+  try { [void](Complete-Install (Get-OurInstaller) $v2 (Get-Date).AddSeconds(-10) 6>$null) } catch { $threw = "$_" }
+  $log = Get-RunLog
+  $survived = -not $first.HasExited
+  $script:immortal = @()
+  ${function:Close-App} = $realCloseApp
+  Remove-Item Function:\Stop-Process
+  $LeftoverWaitSeconds = 15; $KillWaitSeconds = 10
+  Check 'survivor: the installer was not started' ((-not (Test-Path $marker)) -and $log -notmatch '\] installing ') $log
+  Check 'survivor: it fails and names the process that is still running' ($survived -and $threw -match "\b$($first.Id)\b" -and $threw -match 'T3 Code') "threw: $threw"
+  Check 'survivor: it tried to end the process twice' (([regex]::Matches($log, "could not end .*\b$($first.Id)\b")).Count -ge 2) $log
+
   # --- restart -Now: close T3, install, reopen ------------------------------------------------------------
   function Start-RestartRun([string]$Installer, [string]$Ver) {
     # What the restart task runs, with no thread to wait for or report to.
