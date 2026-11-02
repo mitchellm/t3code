@@ -5,6 +5,7 @@ import type {
   ProjectId,
   RuntimeMode,
   ScheduledTask,
+  ScheduledTaskPrecheck,
   ScheduledTaskUpsertSchedule,
   ScheduledTaskWebhookSignature,
 } from "@t3tools/contracts";
@@ -210,7 +211,23 @@ export type ScheduledTaskDraft = {
   readonly enabled: boolean;
   readonly startFromOrigin: boolean;
   readonly runtimeMode: RuntimeMode;
+  /** Shell command run before each run. Empty: none. */
+  readonly precheckCommand: string;
 };
+
+/**
+ * The precheck to send: the edited command with the stored timeout kept, or
+ * `null` to clear it. The run model override is not edited here, and an
+ * upsert that leaves it out keeps what is stored.
+ */
+export function precheckFromDraft(
+  draft: Pick<ScheduledTaskDraft, "task" | "precheckCommand">,
+): ScheduledTaskPrecheck | null {
+  const command = draft.precheckCommand.trim();
+  if (command === "") return null;
+  const timeoutMs = draft.task?.precheck?.timeoutMs;
+  return timeoutMs === undefined ? { command } : { command, timeoutMs };
+}
 
 function draftSignature(draft: ScheduledTaskDraft): string {
   return JSON.stringify([
@@ -238,6 +255,7 @@ function draftSignature(draft: ScheduledTaskDraft): string {
     draft.enabled,
     draft.startFromOrigin,
     draft.runtimeMode,
+    draft.precheckCommand,
   ]);
 }
 
@@ -266,6 +284,7 @@ export function createDraft(
     enabled: true,
     startFromOrigin: true,
     runtimeMode: "full-access",
+    precheckCommand: "",
   };
 }
 
@@ -290,5 +309,6 @@ export function editDraft(task: ScheduledTask): ScheduledTaskDraft {
         ? (task.workspaceStrategy.startFromOrigin ?? false)
         : true,
     runtimeMode: task.runtimeMode,
+    precheckCommand: task.precheck?.command ?? "",
   };
 }

@@ -1,10 +1,13 @@
 import { isWebhookDedupeTemplate } from "@t3tools/contracts";
 import {
   EnvironmentId,
+  MAX_SCHEDULED_TASK_PRECHECK_COMMAND_CHARS,
+  MAX_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS,
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
+  type ScheduledTaskPrecheck,
   type ScheduledTaskUpsertSchedule,
   type ModelSelection,
   type RuntimeMode,
@@ -79,6 +82,13 @@ export interface DraftState {
   readonly interactionMode: ProviderInteractionMode;
   /** Retain the source selection's provider options when the picker leaves instanceId:model unchanged. */
   readonly baseModelSelection: ModelSelection | null;
+  /** The model the runs use instead of the thread's own, as `instanceId:model`. Empty: none. */
+  readonly overrideModelKey: string;
+  readonly baseOverrideSelection: ModelSelection | null;
+  /** Shell command run before each run. Empty: none. */
+  readonly precheckCommand: string;
+  /** Whole seconds. Empty: the server default. */
+  readonly precheckTimeoutSeconds: string;
   readonly signatureEnabled: boolean;
   readonly signatureHeader: string;
   readonly signatureEncoding: "hex" | "base64";
@@ -144,6 +154,38 @@ export function scheduleDraftErrors(draft: DraftState) {
       description: "Coalesce window must be whole seconds from 10 to 3600.",
     });
   return errors;
+}
+
+/** The precheck to save, `null` to clear it, or an error to show. */
+export function precheckFromDraft(
+  draft: Pick<DraftState, "precheckCommand" | "precheckTimeoutSeconds">,
+):
+  | { readonly precheck: ScheduledTaskPrecheck | null }
+  | { readonly error: { readonly title: string; readonly description: string } } {
+  const command = draft.precheckCommand.trim();
+  if (command === "") return { precheck: null };
+  if (command.length > MAX_SCHEDULED_TASK_PRECHECK_COMMAND_CHARS)
+    return {
+      error: {
+        title: "Precheck is too long",
+        description: `Keep it under ${MAX_SCHEDULED_TASK_PRECHECK_COMMAND_CHARS} characters, or move it into a script.`,
+      },
+    };
+  const seconds = draft.precheckTimeoutSeconds.trim();
+  if (seconds === "") return { precheck: { command } };
+  const timeoutMs = Number(seconds) * 1000;
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1_000 ||
+    timeoutMs > MAX_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS
+  )
+    return {
+      error: {
+        title: "Invalid precheck timeout",
+        description: `Enter whole seconds from 1 to ${MAX_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS / 1000}, or leave it blank.`,
+      },
+    };
+  return { precheck: { command, timeoutMs } };
 }
 
 export function webhookDeliveryLabel(delivery: {
@@ -268,6 +310,13 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     runtimeMode: task.runtimeMode,
     interactionMode: task.interactionMode,
     baseModelSelection: task.modelSelection,
+    overrideModelKey: task.modelOverride
+      ? `${task.modelOverride.instanceId}:${task.modelOverride.model}`
+      : "",
+    baseOverrideSelection: task.modelOverride ?? null,
+    precheckCommand: task.precheck?.command ?? "",
+    precheckTimeoutSeconds:
+      task.precheck?.timeoutMs === undefined ? "" : String(task.precheck.timeoutMs / 1000),
     ...(schedule.type === "webhook" && schedule.signature !== null
       ? {
           signatureEnabled: true,

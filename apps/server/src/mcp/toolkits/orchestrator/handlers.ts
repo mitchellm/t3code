@@ -118,7 +118,16 @@ const handlers = {
       { refused: "schedule tasks in this environment" },
     ),
     McpToolAccess.writes(
-      ({ scheduledTaskId, prompt, title, schedule, enabled, bindToCurrentThread }) =>
+      ({
+        scheduledTaskId,
+        prompt,
+        title,
+        schedule,
+        enabled,
+        bindToCurrentThread,
+        precheck,
+        modelOverride,
+      }) =>
         Effect.gen(function* () {
           if (scheduledTaskId === undefined) return yield* Effect.die("unreachable");
           // Fork: Investigate mode locks work-starting tools; an update can re-enable or
@@ -133,6 +142,8 @@ const handlers = {
             schedule,
             enabled,
             bindToCurrentThread,
+            precheck,
+            modelOverride,
           });
         }),
     ),

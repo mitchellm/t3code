@@ -89,6 +89,7 @@ import {
   webhookDeliveryLabel,
   defaultScheduledTaskProjectId,
   matchesScheduledTaskScope,
+  precheckFromDraft,
   scheduleFromDraft,
   scheduledTaskDefaultModel,
   taskToDraft,
@@ -157,6 +158,10 @@ const EMPTY_DRAFT: DraftState = {
   runtimeMode: "full-access",
   interactionMode: "default",
   baseModelSelection: null,
+  overrideModelKey: "",
+  baseOverrideSelection: null,
+  precheckCommand: "",
+  precheckTimeoutSeconds: "",
   signatureEnabled: false,
   ...WEBHOOK_SIGNATURE_DEFAULTS,
   signatureSecret: "",
@@ -783,7 +788,16 @@ function ScheduledTaskRow({
             )}
           </span>
           {task.lastRunStatus !== "never" ? (
-            <Badge variant={statusVariant(task.lastRunStatus)}>{task.lastRunStatus}</Badge>
+            task.lastRunStatus === "succeeded" && task.lastRunQuiet === true ? (
+              <Badge variant="outline">quiet</Badge>
+            ) : (
+              <Badge variant={statusVariant(task.lastRunStatus)}>{task.lastRunStatus}</Badge>
+            )
+          ) : null}
+          {task.quietRunCount ? (
+            <span>
+              {task.quietRunCount} of {task.runCount} runs quiet
+            </span>
           ) : null}
           {task.lastRunError ? <span className="text-destructive">{task.lastRunError}</span> : null}
         </div>
@@ -1263,6 +1277,13 @@ function ScheduledTaskEditorForm({
     activeInstanceId,
     activeModel,
   );
+  const overrideSelection = draft.overrideModelKey ? splitModelKey(draft.overrideModelKey) : null;
+  const overrideOptionsByInstance = getCustomModelOptionsByInstance(
+    settings,
+    providers,
+    overrideSelection?.instanceId ?? activeInstanceId,
+    overrideSelection?.model ?? activeModel,
+  );
 
   const reportFailure = (title: string, error: unknown) => {
     toastManager.add(
@@ -1302,6 +1323,21 @@ function ScheduledTaskEditorForm({
     const schedule = scheduleFromDraft(draft);
     if (schedule === null) {
       for (const error of scheduleDraftErrors(draft)) reportFailure(error.title, error.description);
+      return;
+    }
+    const parsedPrecheck = precheckFromDraft(draft);
+    if ("error" in parsedPrecheck) {
+      reportFailure(parsedPrecheck.error.title, parsedPrecheck.error.description);
+      return;
+    }
+    if (
+      overrideSelection !== null &&
+      !instanceEntries.some((entry) => entry.instanceId === overrideSelection.instanceId)
+    ) {
+      reportFailure(
+        "Run model is unavailable",
+        "Pick a model for the runs, or turn the option off.",
+      );
       return;
     }
     if (
@@ -1358,6 +1394,16 @@ function ScheduledTaskEditorForm({
       threadId: draft.threadId ? (draft.threadId as ThreadId) : null,
       workspaceStrategy,
       modelSelection,
+      // Always sent, so turning an option off clears it on the server.
+      modelOverride:
+        overrideSelection === null
+          ? null
+          : draft.baseOverrideSelection !== null &&
+              draft.baseOverrideSelection.instanceId === overrideSelection.instanceId &&
+              draft.baseOverrideSelection.model === overrideSelection.model
+            ? draft.baseOverrideSelection
+            : overrideSelection,
+      precheck: parsedPrecheck.precheck,
       // Tasks have no mode picker; a mode above the administrator's ceiling would fail every run.
       runtimeMode:
         clampManagedRuntimeMode(environment?.serverConfig?.managedPolicy, draft.runtimeMode) ??
@@ -1409,6 +1455,8 @@ function ScheduledTaskEditorForm({
                   projectId: defaultScheduledTaskProjectId(projectsOn(next.environmentId), scope),
                   modelKey: "",
                   baseModelSelection: null,
+                  overrideModelKey: "",
+                  baseOverrideSelection: null,
                   baseRef: "main",
                   startFromOrigin: true,
                   existingWorktreePath: "",
@@ -1598,6 +1646,78 @@ function ScheduledTaskEditorForm({
                   setDraft((current) => ({ ...current, modelKey: `${instanceId}:${model}` }))
                 }
               />
+            </div>
+          </Field>
+
+          <Field label="Run model" htmlFor="scheduled-task-override">
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="scheduled-task-override"
+                  checked={overrideSelection !== null}
+                  disabled={saving || !connected}
+                  onCheckedChange={(checked) =>
+                    setDraft((current) => ({
+                      ...current,
+                      overrideModelKey: checked ? `${activeInstanceId}:${activeModel}` : "",
+                    }))
+                  }
+                />
+                <span className="text-sm text-muted-foreground">
+                  Use a different model for each run, such as a small one for quiet checks
+                </span>
+              </div>
+              {overrideSelection !== null ? (
+                <ProviderModelPicker
+                  environmentId={environmentId}
+                  disabled={saving || !connected}
+                  activeInstanceId={overrideSelection.instanceId}
+                  model={overrideSelection.model}
+                  lockedProvider={null}
+                  instanceEntries={instanceEntries}
+                  modelOptionsByInstance={overrideOptionsByInstance}
+                  isComposerOwned={false}
+                  triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                  onInstanceModelChange={(instanceId, model) =>
+                    setDraft((current) => ({
+                      ...current,
+                      overrideModelKey: `${instanceId}:${model}`,
+                    }))
+                  }
+                />
+              ) : null}
+            </div>
+          </Field>
+
+          <Field label="Precheck command" htmlFor="scheduled-task-precheck">
+            <div className="space-y-2">
+              <Textarea
+                id="scheduled-task-precheck"
+                className="max-h-32 overflow-y-auto"
+                placeholder="Optional. Runs in the project folder before each run."
+                value={draft.precheckCommand}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, precheckCommand: event.target.value }))
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Output and exit code 0 start the run with the output added to the prompt. No output
+                skips the run. A failure or timeout starts the run with the error.
+              </p>
+              {draft.precheckCommand.trim() ? (
+                <Input
+                  aria-label="Precheck timeout in seconds"
+                  inputMode="numeric"
+                  placeholder="Timeout in seconds (default 120)"
+                  value={draft.precheckTimeoutSeconds}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      precheckTimeoutSeconds: event.target.value,
+                    }))
+                  }
+                />
+              ) : null}
             </div>
           </Field>
 

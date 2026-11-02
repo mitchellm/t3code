@@ -331,6 +331,11 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     schedule: task.schedule,
     nextRunAt: task.nextRunAt,
     lastRunStatus: task.lastRunStatus,
+    ...(task.precheck === undefined ? {} : { precheck: task.precheck }),
+    ...(task.modelOverride === undefined ? {} : { modelOverride: task.modelOverride }),
+    ...(task.quietRunCount === undefined
+      ? {}
+      : { lastRunQuiet: task.lastRunQuiet ?? false, quietRunCount: task.quietRunCount }),
     ...(task.webhook?.url == null || !mayRun || task.blockedByPolicy !== undefined
       ? {}
       : { webhookUrl: task.webhook.url }),
@@ -2028,7 +2033,13 @@ const make = Effect.gen(function* () {
 
   const scheduledTaskRunModes = Effect.fn("OrchestratorMcpService.scheduledTaskRunModes")(
     function* (task: ScheduledTask) {
-      const modes = [{ runtimeMode: task.runtimeMode, interactionMode: task.interactionMode }];
+      // A precheck is a shell command with no approval step, whatever mode the run has.
+      const modes = [
+        {
+          runtimeMode: task.precheck === undefined ? task.runtimeMode : ("full-access" as const),
+          interactionMode: task.interactionMode,
+        },
+      ];
       if (task.threadId === null) return modes;
       const bound = yield* threadManagement
         .getThreadShell(task.threadId)
@@ -2365,6 +2376,7 @@ const make = Effect.gen(function* () {
       const derivedTitle = input.prompt.split("\n")[0]?.trim() ?? "";
       const title =
         input.title ?? (derivedTitle.length > 0 ? derivedTitle.slice(0, 80) : "Scheduled task");
+      if (input.precheck != null) yield* resolveRuntimeMode(limits.runtimeMode, "full-access");
       const upsertInput: ScheduledTaskUpsertInput = {
         title,
         prompt: input.prompt,
@@ -2374,6 +2386,8 @@ const make = Effect.gen(function* () {
         threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
         workspaceStrategy: yield* scheduledTaskWorkspaceStrategy(bindToCurrentThread, projectId),
         modelSelection,
+        ...(input.modelOverride == null ? {} : { modelOverride: input.modelOverride }),
+        ...(input.precheck == null ? {} : { precheck: input.precheck }),
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
         createdBy: "agent",
@@ -2445,6 +2459,7 @@ const make = Effect.gen(function* () {
           input.bindToCurrentThread === undefined
             ? existing.workspaceStrategy
             : yield* scheduledTaskWorkspaceStrategy(input.bindToCurrentThread, existing.projectId);
+        if (input.precheck != null) yield* resolveRuntimeMode(limits.runtimeMode, "full-access");
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -2455,6 +2470,9 @@ const make = Effect.gen(function* () {
           threadId,
           workspaceStrategy,
           modelSelection: existing.modelSelection,
+          // Omitted keeps the stored value; null clears it.
+          ...(input.modelOverride === undefined ? {} : { modelOverride: input.modelOverride }),
+          ...(input.precheck === undefined ? {} : { precheck: input.precheck }),
           runtimeMode: existing.runtimeMode,
           interactionMode: existing.interactionMode,
           createdBy: existing.createdBy,

@@ -76,6 +76,7 @@ import { useSettingsEnvironmentFilter, type SettingsTarget } from "./settings-en
 import {
   editDraft,
   parseIntervalMinutes,
+  precheckFromDraft,
   scheduledTaskDefaultModel,
   scheduleFromDraft,
   type ScheduledTaskDraft as Draft,
@@ -792,6 +793,8 @@ function TaskForm({
       prompt: draft.prompt.trim(),
       projectId: draft.projectId,
       modelSelection: draft.modelSelection,
+      // Always sent, so emptying the field clears it. The run model override is left out, which keeps it.
+      precheck: precheckFromDraft(draft),
       schedule,
       enabled: draft.enabled,
       threadId: draft.task?.threadId ?? null,
@@ -879,6 +882,13 @@ function TaskForm({
             onChange={(title) => setDraft({ ...draft, title })}
           />
           {promptField}
+          <FormField
+            label="Precheck"
+            disabled={saving}
+            value={draft.precheckCommand}
+            placeholder="Optional shell command. No output skips the run."
+            onChange={(precheckCommand) => setDraft({ ...draft, precheckCommand })}
+          />
         </SettingsSection>
 
         <SettingsSection title="Context">
@@ -1485,6 +1495,12 @@ function EnvironmentTasks({
               {task.lastRunError ? (
                 <Text className="text-sm text-danger-foreground" numberOfLines={2}>
                   Last run failed: {task.lastRunError}
+                </Text>
+              ) : null}
+              {task.quietRunCount ? (
+                <Text className="text-sm text-foreground-muted" numberOfLines={1}>
+                  {task.lastRunQuiet ? "Last run quiet · " : ""}
+                  {task.quietRunCount} of {task.runCount} runs quiet
                 </Text>
               ) : null}
             </Pressable>

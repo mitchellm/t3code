@@ -3,9 +3,12 @@ import {
   MessageId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ProjectId,
+  ModelSelection,
   ScheduledTask,
   ScheduledTaskError,
   ScheduledTaskId,
+  ScheduledTaskPrecheck,
+  DEFAULT_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS,
   ThreadId,
   ScheduledTaskWebhookDeliveryId,
   type ScheduledTaskDeleteInput,
@@ -55,6 +58,7 @@ import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as DueHint from "../scheduling/DueHint.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
+import { interpretPrecheck, ScheduledTaskPrecheckRunner, withPrecheckSection } from "./precheck.ts";
 import {
   redactHeaders,
   redactQuery,
@@ -181,6 +185,8 @@ const decodeWorkspaceStrategyJson = Schema.decodeUnknownEffect(
 const decodeModelSelectionJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ScheduledTask.fields.modelSelection),
 );
+const decodePrecheckJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ScheduledTaskPrecheck));
+const decodeModelOverrideJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ModelSelection));
 const HeadersJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String));
 const MissingFieldsJson = Schema.fromJsonString(Schema.Array(Schema.String));
 const decodeHeadersJson = Schema.decodeUnknownOption(HeadersJson);
@@ -209,6 +215,10 @@ interface ScheduledTaskRow {
   readonly last_run_status: string;
   readonly last_run_error: string | null;
   readonly run_count: number;
+  readonly precheck_json: string | null;
+  readonly model_override_json: string | null;
+  readonly last_run_quiet: number;
+  readonly quiet_run_count: number;
   readonly webhook_token: string | null;
   readonly webhook_secret: string | null;
 }
@@ -281,6 +291,16 @@ function taskError(message: string, input?: { taskId?: ScheduledTaskId; cause?: 
     ...(input?.taskId === undefined ? {} : { taskId: input.taskId }),
     ...(input?.cause === undefined ? {} : { cause: input.cause }),
   });
+}
+
+/** `undefined` keeps the stored value, `null` clears it, anything else replaces it. */
+function optionalField<K extends string, V>(
+  key: K,
+  input: V | null | undefined,
+  stored: V | undefined,
+): { [P in K]?: V } {
+  const value = input === undefined ? stored : (input ?? undefined);
+  return value === undefined ? {} : ({ [key]: value } as { [P in K]?: V });
 }
 
 function iso(value: DateTime.DateTime): string {
@@ -362,6 +382,12 @@ const decodeRow = Effect.fnUntraced(
     const webhook = schedule.type === "webhook" ? webhookEndpoint(row, origin) : undefined;
     const workspaceStrategy = yield* decodeWorkspaceStrategyJson(row.workspace_strategy_json);
     const modelSelection = yield* decodeModelSelectionJson(row.model_selection_json);
+    const precheck =
+      row.precheck_json === null ? undefined : yield* decodePrecheckJson(row.precheck_json);
+    const modelOverride =
+      row.model_override_json === null
+        ? undefined
+        : yield* decodeModelOverrideJson(row.model_override_json);
     return yield* decodeTask({
       id: row.task_id,
       title: row.title,
@@ -372,6 +398,8 @@ const decodeRow = Effect.fnUntraced(
       threadId: row.thread_id,
       workspaceStrategy,
       modelSelection,
+      ...(modelOverride === undefined ? {} : { modelOverride }),
+      ...(precheck === undefined ? {} : { precheck }),
       runtimeMode: row.runtime_mode,
       interactionMode: row.interaction_mode,
       createdBy: row.created_by,
@@ -382,6 +410,10 @@ const decodeRow = Effect.fnUntraced(
       lastRunAt: row.last_run_at,
       lastRunStatus: row.last_run_status,
       lastRunError: row.last_run_error,
+      // Unset for tasks that have never had a quiet run, so their shape is unchanged.
+      ...(row.quiet_run_count > 0
+        ? { lastRunQuiet: row.last_run_quiet === 1, quietRunCount: row.quiet_run_count }
+        : {}),
       runCount: row.run_count,
       ...(webhook === undefined ? {} : { webhook }),
     });
@@ -442,6 +474,7 @@ export const layer = Layer.effect(
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
+    const precheckRunner = yield* ScheduledTaskPrecheckRunner;
     const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
     const webhookPolicyOrganization = ManagedPolicy.deniedBy(managedPolicy, "webhookTasks");
     // Existing webhook tasks stay stored but report why they do not run.
@@ -503,6 +536,10 @@ export const layer = Layer.effect(
         last_run_status,
         last_run_error,
         run_count,
+        precheck_json,
+        model_override_json,
+        last_run_quiet,
+        quiet_run_count,
         webhook_token,
         webhook_secret
       FROM scheduled_tasks
@@ -544,6 +581,10 @@ export const layer = Layer.effect(
         last_run_status,
         last_run_error,
         run_count,
+        precheck_json,
+        model_override_json,
+        last_run_quiet,
+        quiet_run_count,
         webhook_token,
         webhook_secret
       FROM scheduled_tasks
@@ -621,6 +662,10 @@ export const layer = Layer.effect(
           last_run_status,
           last_run_error,
           run_count,
+          precheck_json,
+          model_override_json,
+          last_run_quiet,
+          quiet_run_count,
           webhook_token,
           webhook_secret
         )
@@ -645,6 +690,10 @@ export const layer = Layer.effect(
           ${task.lastRunStatus},
           ${task.lastRunError},
           ${task.runCount},
+          ${task.precheck === undefined ? null : JSON.stringify(task.precheck)},
+          ${task.modelOverride === undefined ? null : JSON.stringify(task.modelOverride)},
+          ${task.lastRunQuiet === true ? 1 : 0},
+          ${task.quietRunCount ?? 0},
           ${webhook.token},
           ${webhook.secret}
         WHERE ${requireExisting ? 0 : 1} = 1
@@ -659,6 +708,8 @@ export const layer = Layer.effect(
           thread_id = excluded.thread_id,
           workspace_strategy_json = excluded.workspace_strategy_json,
           model_selection_json = excluded.model_selection_json,
+          model_override_json = excluded.model_override_json,
+          precheck_json = excluded.precheck_json,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
           creation_source = excluded.creation_source,
@@ -717,6 +768,7 @@ export const layer = Layer.effect(
             last_run_at = ${startedAtIso},
             last_run_webhook_delivery_id = ${webhookDeliveryId ?? null},
             last_run_status = 'running',
+            last_run_quiet = 0,
             last_run_error = NULL
         WHERE task_id = ${id}
         RETURNING task_id
@@ -736,6 +788,7 @@ export const layer = Layer.effect(
       readonly status: "succeeded" | "failed";
       readonly error: string | null;
       readonly startedAtIso: string;
+      readonly quiet: boolean;
     }) =>
       sql`
         UPDATE scheduled_tasks
@@ -743,6 +796,8 @@ export const layer = Layer.effect(
             next_run_at = ${input.nextRunAtIso},
             last_run_status = ${input.status},
             last_run_error = ${input.error},
+            last_run_quiet = ${input.quiet ? 1 : 0},
+            quiet_run_count = quiet_run_count + ${input.quiet ? 1 : 0},
             run_count = run_count + 1
         WHERE task_id = ${input.id}
           AND last_run_status = 'running'
@@ -881,7 +936,29 @@ export const layer = Layer.effect(
         const commandId = CommandId.make(`scheduled-task:${fireKey}`);
         const messageId = MessageId.make(`scheduled-task-message:${fireKey}`);
         // A webhook prompt was rendered from the row when the request arrived.
-        const prompt = webhook?.prompt ?? active.prompt;
+        const basePrompt = webhook?.prompt ?? active.prompt;
+        // Cheap gate before the model: only news (or a broken check) starts a turn.
+        const verdict =
+          active.precheck === undefined
+            ? undefined
+            : interpretPrecheck(
+                active.precheck.command,
+                yield* precheckRunner({
+                  command: active.precheck.command,
+                  timeoutMs:
+                    active.precheck.timeoutMs ?? DEFAULT_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS,
+                  projectId: active.projectId,
+                  threadId: active.threadId === null ? null : ThreadId.make(active.threadId),
+                }),
+              );
+        const quiet = verdict?._tag === "quiet";
+        const prompt =
+          verdict === undefined || verdict._tag === "quiet"
+            ? basePrompt
+            : withPrecheckSection(basePrompt, verdict.section);
+        // The override applies to the turn this run starts; without one a fresh
+        // thread seeds from the stored selection and a bound thread keeps its own.
+        const modelOverride = active.modelOverride;
 
         // A bound thread can move to another project (No project to a project) while
         // this fires. Follow it; one move needs at most two retries. Same ids replay safely.
@@ -900,6 +977,7 @@ export const layer = Layer.effect(
               text: prompt,
               attachments: [],
               mode: "queue",
+              ...(modelOverride === undefined ? {} : { modelSelection: modelOverride }),
               createdBy: active.createdBy,
               creationSource: active.creationSource,
             })
@@ -920,15 +998,16 @@ export const layer = Layer.effect(
             );
 
         // Capture defects and interrupts too so dispatch failures still reach markCompleted.
-        const result =
-          active.threadId === null
+        const result = quiet
+          ? Exit.succeed(null)
+          : active.threadId === null
             ? yield* Effect.exit(
                 threadLaunch
                   .launch({
                     commandId,
                     projectId: active.projectId,
                     title: active.title,
-                    modelSelection: active.modelSelection,
+                    modelSelection: modelOverride ?? active.modelSelection,
                     runtimeMode: active.runtimeMode,
                     interactionMode: active.interactionMode,
                     workspaceStrategy: active.workspaceStrategy,
@@ -945,7 +1024,7 @@ export const layer = Layer.effect(
               )
             : yield* Effect.exit(
                 // The stored selection only seeds fresh threads. A bound run
-                // follows the thread's current provider, so it passes none.
+                // follows the thread's current provider unless the task has an override.
                 sendBound(ThreadId.make(active.threadId), active.projectId, 2).pipe(
                   Effect.as(ThreadId.make(active.threadId)),
                 ),
@@ -976,6 +1055,12 @@ export const layer = Layer.effect(
             ),
             lastRunStatus,
             lastRunError,
+            ...(quiet || (scheduleSource.quietRunCount ?? 0) > 0
+              ? {
+                  lastRunQuiet: quiet,
+                  quietRunCount: (scheduleSource.quietRunCount ?? 0) + (quiet ? 1 : 0),
+                }
+              : {}),
             runCount: scheduleSource.runCount + 1,
           };
           if (current === null) return { recorded: completed, written: false };
@@ -989,6 +1074,7 @@ export const layer = Layer.effect(
             status: lastRunStatus,
             error: lastRunError,
             startedAtIso,
+            quiet,
           });
           let written = false;
           if (webhook === undefined) written = yield* completion;
@@ -1327,6 +1413,10 @@ export const layer = Layer.effect(
         threadId: input.threadId ?? null,
         workspaceStrategy,
         modelSelection: input.modelSelection,
+        // Omitted keeps the stored value, so a client that predates these
+        // fields can re-save a task without clearing them. null clears.
+        ...optionalField("modelOverride", input.modelOverride, existingTask?.modelOverride),
+        ...optionalField("precheck", input.precheck, existingTask?.precheck),
         runtimeMode: input.runtimeMode,
         interactionMode: input.interactionMode,
         createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
@@ -1339,6 +1429,12 @@ export const layer = Layer.effect(
         lastRunAt: existingTask?.lastRunAt ?? null,
         lastRunStatus: existingTask?.lastRunStatus ?? "never",
         lastRunError: existingTask?.lastRunError ?? null,
+        ...(existingTask?.quietRunCount === undefined
+          ? {}
+          : {
+              lastRunQuiet: existingTask.lastRunQuiet ?? false,
+              quietRunCount: existingTask.quietRunCount,
+            }),
         runCount: existingTask?.runCount ?? 0,
       };
       yield* saveTask(
