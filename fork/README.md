@@ -137,9 +137,13 @@ agent-kit's `t3` CLI (`config.json` `t3Cli`, or `T3_CLI`, else
 
 When T3 quits with a downloaded update, it starts its own installer, and a waiting `install` or
 `restart` would start a second one. Both now watch for T3's installer (it runs from the updater's
-cache, `%LOCALAPPDATA%\t3code-updater`) in the 5 seconds after T3 quits. If it runs, they wait
-for it to finish and install their build on top only if T3 installed something older (or the
-build asked for is an older one, a rollback). A rollback lasts until T3's next quit, when it
+cache, `%LOCALAPPDATA%\t3code-updater`, and hands the work to NSIS copies of itself in a temp
+`nsXXXX.tmp` folder) in the 5 seconds after T3 quits. If it runs, they wait up to 20 minutes for
+every one of those processes to be gone (the first one can exit minutes before the install ends,
+which on 2026-11-02 made a waiter read the old build and start a second install that exited 2),
+then wait for the new build to show in `app.asar`, and install their build on top only if T3
+installed something older (or the build asked for is an older one, a rollback). An installer that
+exits 2 (files held by another install) is retried once after the other installers finish. A rollback lasts until T3's next quit, when it
 installs the newest build again; set `T3CODE_DISABLE_AUTO_UPDATE=1` for T3 to stay on it.
 
 ### Why the wait watches the main process

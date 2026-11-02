@@ -118,8 +118,12 @@ static class P {
   static int Main(string[] a) {
     string self = Process.GetCurrentProcess().MainModule.FileName;
     if (File.Exists(self + ".cfg")) {
-      // An installer: <asar to install>|<where>|<delay ms>|<marker or ->|<app to reopen or ->
+      // An installer: <asar to install>|<where>|<delay ms>|<marker or ->|<exe to start when done or ->[|<fail-once file>]
+      // The exe to start is the app, or another installer stub (a launcher that hands the work to a child).
+      // With a fail-once file: the first run creates it and exits 2 without installing, as NSIS does when files are held; "always" exits 2 every time.
       string[] c = File.ReadAllText(self + ".cfg").Trim().Split('|');
+      if (c.Length > 5 && c[5] == "always") return 2;
+      if (c.Length > 5 && c[5] != "-" && !File.Exists(c[5])) { File.WriteAllText(c[5], "x"); return 2; }
       Thread.Sleep(int.Parse(c[2]));
       File.Copy(c[0], c[1], true);
       if (c[3] != "-") File.WriteAllText(c[3], "ran");
@@ -158,7 +162,7 @@ function Test-AppApi { $true }
 
 function Start-TestPwsh([string]$Body) {
   # A waiter or runner as its task runs it, in a process of its own, with no console window.
-  Start-HiddenProcess (Get-Process -Id $PID).Path @('-NoProfile', '-NonInteractive', '-Command', ". '$fork' -Quiet; . '$overrides'; $Body")
+  Start-HiddenProcess (Get-Process -Id $PID).Path @('-NoProfile', '-NonInteractive', '-Command', ". '$fork' -Quiet; . '$overrides'; `$InstallerSettleSeconds = 1; $Body")
 }
 
 $failures = 0
@@ -197,9 +201,9 @@ try {
   $liveAsar = Join-Path $standinDir 'resources\app.asar'
   $marker = Join-Path $testRoot 'our-installer-ran'
 
-  function New-Installer([string]$Path, [string]$Asar, [int]$DelayMs, [string]$Marker = '-', [string]$Reopen = '-') {
+  function New-Installer([string]$Path, [string]$Asar, [int]$DelayMs, [string]$Marker = '-', [string]$Reopen = '-', [string]$FailOnce = '-') {
     Copy-Item $stub $Path -Force
-    Set-Content "$Path.cfg" -Encoding ASCII -NoNewline -Value "$Asar|$liveAsar|$DelayMs|$Marker|$Reopen"
+    Set-Content "$Path.cfg" -Encoding ASCII -NoNewline -Value "$Asar|$liveAsar|$DelayMs|$Marker|$Reopen|$FailOnce"
     $Path
   }
   function Get-OurInstaller([int]$DelayMs = 0) { New-Installer (Join-Path $testRoot 'T3-Code-test-x64.exe') (Join-Path $testRoot "$v2.asar") $DelayMs $marker }
@@ -306,6 +310,68 @@ try {
   Check 'own update: T3 has the newer build it installed itself' ((Get-InstalledBuild) -eq $v3) "build $(Get-InstalledBuild)"
   Check 'own update: exactly one T3 runs' ((Get-Mains).Count -eq 1) "mains: $((Get-Mains).Count)"
   Remove-Item $pending, "$pending.cfg" -Force -ErrorAction SilentlyContinue
+
+  # --- T3's installer is a launcher: it exits and a child keeps installing (the 2026-11-02 race) ----------
+  # The launcher exits after 3 s without touching the files; its child writes the new build 6 s later.
+  # The waiter must not read the build, or start its own installer, when the launcher alone is gone.
+  Reset-Case
+  $first = Start-Standin
+  $waiter = Start-Waiter (Get-OurInstaller) $v2
+  [void](Wait-Test 4)
+  $child = New-Installer (Join-Path $updaterDir 'pending\child-installer.exe') (Join-Path $testRoot "$v2.asar") 6000 '-' $standinApp
+  $launcher = New-Installer (Join-Path $updaterDir "pending\T3-Code-$v2-x64.exe") (Join-Path $testRoot "$v1.asar") 3000 '-' $child
+  [void](Start-HiddenProcess $launcher @('--updated', '/S', '--force-run'))
+  Close-Standin $first
+  $done = Wait-Test 120 $waiter
+  $log = Get-RunLog
+  [void](Wait-Test 1)
+  Check 'launcher: the waiter finished' $done $log
+  Check 'launcher: it kept waiting after the launcher exited' ($log -match 'installing the update it downloaded') $log
+  Check 'launcher: T3 installed the target build itself, so no second installer ran' ((-not (Test-Path $marker)) -and (Get-InstalledBuild) -eq $v2 -and $log -match 'installed .+ itself' -and $log -notmatch 'over it') "build $(Get-InstalledBuild)`n$log"
+  Check 'launcher: exactly one T3 runs' ((Get-Mains).Count -eq 1) "mains: $((Get-Mains).Count)"
+  Remove-Item $launcher, "$launcher.cfg", $child, "$child.cfg" -Force -ErrorAction SilentlyContinue
+
+  # --- T3 installs an older build than the one asked for ---------------------------------------------------
+  Reset-Case
+  $first = Start-Standin
+  $ours = New-Installer (Join-Path $testRoot 'T3-Code-test-x64.exe') (Join-Path $testRoot "$v3.asar") 0 $marker
+  $waiter = Start-Waiter $ours $v3
+  [void](Wait-Test 4)
+  $pending = New-Installer (Join-Path $updaterDir "pending\T3-Code-$v2-x64.exe") (Join-Path $testRoot "$v2.asar") 3000 '-' $standinApp
+  [void](Start-HiddenProcess $pending @('--updated', '/S', '--force-run'))
+  Close-Standin $first
+  $done = Wait-Test 120 $waiter
+  $log = Get-RunLog
+  Check 'older update: the waiter finished' $done $log
+  Check 'older update: it waited for T3''s installer, then installed over it' ($log -match 'installing the update it downloaded' -and $log -match "installed $([regex]::Escape($v2)) itself; installing $([regex]::Escape($v3)) over it") $log
+  Check 'older update: our installer ran after it and the newer build is in place' ((Test-Path $marker) -and (Get-InstalledBuild) -eq $v3 -and (Get-Mains).Count -eq 1) "build $(Get-InstalledBuild), mains $((Get-Mains).Count)"
+  Remove-Item $pending, "$pending.cfg", $ours, "$ours.cfg" -Force -ErrorAction SilentlyContinue
+
+  # --- The installer exits 2 once (files held by another install) ------------------------------------------
+  Reset-Case
+  $first = Start-Standin
+  $failFile = Join-Path $testRoot 'exit2-seen'
+  Remove-Item $failFile -Force -ErrorAction SilentlyContinue
+  $flaky = New-Installer (Join-Path $testRoot 'T3-Code-flaky-x64.exe') (Join-Path $testRoot "$v2.asar") 0 $marker '-' $failFile
+  $waiter = Start-Waiter $flaky $v2
+  [void](Wait-Test 4)
+  Close-Standin $first
+  $done = Wait-Test 120 $waiter
+  $log = Get-RunLog
+  Check 'exit 2: the waiter finished' $done $log
+  Check 'exit 2: it retried once and installed' ((Test-Path $failFile) -and (Test-Path $marker) -and (Get-InstalledBuild) -eq $v2 -and ([regex]::Matches($log, '\] installing ')).Count -eq 2 -and $log -notmatch 'FAILED') $log
+  Check 'exit 2: one T3 runs afterwards' ((Get-Mains).Count -eq 1) "mains: $((Get-Mains).Count)"
+
+  # --- The installer exits 2 every time: one retry, then it fails with the code ---------------------------------
+  Reset-Case
+  $first = Start-Standin
+  $stuck = New-Installer (Join-Path $testRoot 'T3-Code-stuck-x64.exe') (Join-Path $testRoot "$v2.asar") 0 $marker '-' 'always'
+  $waiter = Start-Waiter $stuck $v2
+  [void](Wait-Test 4)
+  Close-Standin $first
+  $done = Wait-Test 120 $waiter
+  $log = Get-RunLog
+  Check 'exit 2 twice: one retry, then the waiter fails with the code' ($done -and ([regex]::Matches($log, '\] installing ')).Count -eq 2 -and (-not (Test-Path $marker))) $log
 
   # --- T3 opened while the installer runs --------------------------------------------------------------
   Reset-Case
