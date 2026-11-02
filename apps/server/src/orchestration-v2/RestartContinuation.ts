@@ -16,6 +16,7 @@ import type { ProjectionRuntimeRecoveryState } from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { isNativeMaintenanceCommand } from "./CommandPolicy.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { ScheduledTaskArming } from "./ScheduledTaskArming.ts";
 import {
   awaitingProviderThreadId,
   cancelledRosterTaskWork,
@@ -274,6 +275,9 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         subagentIds: [taskId],
       })).subagents.find((candidate) => candidate.id === taskId);
       // A settled task no longer owns later work in its thread.
+      // A cut judge has no turn worth resuming: the settle below hands its item back, and the
+      // agent asks for a fresh verdict.
+      if (task?.role === "judge") return;
       const parentRunId =
         task !== undefined && task.result === null && isOrchestrationV2WorkActive(task.status)
           ? task.runId
@@ -297,6 +301,13 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       projection.providerTurns,
       projection.attempts,
     );
+    // A tick the scheduler will fire again carries itself on; only work it was waiting for needs a turn.
+    if (
+      sourceMessage?.scheduledTaskId !== undefined &&
+      !note.work.some(isAwaitedWork) &&
+      (yield* (yield* ScheduledTaskArming).isArmed(sourceMessage.scheduledTaskId))
+    )
+      return;
     const noteText =
       note.work.length === 0 ? undefined : restartCancelledBackgroundWorkNote(note.work);
     const text =

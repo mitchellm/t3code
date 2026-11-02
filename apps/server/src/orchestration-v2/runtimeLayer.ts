@@ -50,6 +50,7 @@ import * as LedgerAutoContinue from "./LedgerAutoContinue.ts";
 import * as LedgerJudgeRunner from "./LedgerJudgeRunner.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
+import * as ScheduledTaskArming from "./ScheduledTaskArming.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
@@ -399,7 +400,11 @@ export const layerProduction = Layer.mergeAll(
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(
-  Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
+  Layer.provide(
+    Layer.merge(ResourceCleanupService.layer, ScheduledTaskArming.layer).pipe(
+      Layer.provide(layerScheduledTaskProvided),
+    ),
+  ),
   Layer.provide(Scheduler.layer),
   Layer.provideMerge(layerEventInfrastructure),
 );
