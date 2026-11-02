@@ -107,6 +107,7 @@ import {
   recordMetrics,
   withMetrics,
 } from "../observability/Metrics.ts";
+import * as BranchChangeTotalsCache from "./BranchChangeTotalsCache.ts";
 import * as GitMetadataFastPath from "./GitMetadataFastPath.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { removeEmptyDirectory } from "./removeEmptyDirectory.ts";
@@ -173,6 +174,9 @@ const LIST_REFS_SNAPSHOT_CACHE_CAPACITY = 64;
 const LIST_REFS_SNAPSHOT_CACHE_TTL = Duration.minutes(2);
 const LIST_REFS_REFRESH_COALESCE_TTL = Duration.seconds(5);
 const LIST_REFS_REFRESH_FAILURE_COOLDOWN = Duration.seconds(30);
+// A slow Changes read must not hold up the status that carries it; the read keeps going and the
+// next status serves its result.
+const BRANCH_CHANGE_TOTALS_TIMEOUT = Duration.seconds(4);
 const STATUS_DEFAULT_BRANCH_CACHE_TTL = Duration.minutes(5);
 const STATUS_ORIGIN_EXISTS_CACHE_TTL = Duration.minutes(5);
 const STATUS_UPSTREAM_REFRESH_ENV = Object.freeze({
@@ -2435,9 +2439,21 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
             }).pipe(Effect.orElseSucceed(() => 0))
           : Effect.succeed(0),
         options?.includeBranchChanges
-          ? readBranchChangeTotals(repositoryPaths?.worktreeRoot ?? cwd, refName, {
-              knownOriginDefaultBranch: defaultBranch,
-              untrackedRoots,
+          ? Effect.gen(function* () {
+              const root = repositoryPaths?.worktreeRoot ?? cwd;
+              const worktreeFingerprint = yield* BranchChangeTotalsCache.worktreeFingerprint({
+                crypto,
+                fileSystem,
+                path,
+                root,
+                statusStdout,
+                changedPaths: changedFilesWithoutNumstat,
+              });
+              return yield* readBranchChangeTotals(root, refName, {
+                knownOriginDefaultBranch: defaultBranch,
+                untrackedRoots,
+                worktreeFingerprint,
+              });
             }).pipe(Effect.orElseSucceed(() => undefined))
           : Effect.undefined,
       ],
@@ -3324,12 +3340,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return { baseRef, mergeBase };
   });
 
+  const branchChangeTotalsCache = BranchChangeTotalsCache.make<{
+    readonly baseRef: string | null;
+    readonly insertions: number;
+    readonly deletions: number;
+  }>({ timeout: BRANCH_CHANGE_TOTALS_TIMEOUT, scope: serviceScope });
+
   const readBranchChangeTotals = Effect.fn("readBranchChangeTotals")(function* (
     cwd: string,
     branch: string | null,
     options?: {
       readonly knownOriginDefaultBranch: string | null;
       readonly untrackedRoots: ReadonlyArray<string>;
+      /** Working tree state from the status read; absent means the totals are not cacheable. */
+      readonly worktreeFingerprint?: string | undefined;
     },
   ) {
     const { baseRef, mergeBase } = yield* resolveReviewMergeBase(
@@ -3338,7 +3362,37 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       undefined,
       options?.knownOriginDefaultBranch ?? null,
     );
-    const roots = options?.untrackedRoots ?? [];
+    const compute = computeBranchChangeTotals(
+      cwd,
+      baseRef,
+      mergeBase,
+      options?.untrackedRoots ?? [],
+    );
+    if (options?.worktreeFingerprint === undefined) return yield* compute;
+    // The merge base moves when the base ref or HEAD moves, but two base refs can share one, and
+    // the result names the ref. The fingerprint covers everything else.
+    const totals = yield* branchChangeTotalsCache.read({
+      cwd,
+      key: `${baseRef ?? ""}\0${mergeBase}\0${options.worktreeFingerprint}`,
+      compute,
+    });
+    if (totals === undefined) {
+      return yield* new GitCommandError({
+        operation: "GitVcsDriver.readBranchChangeTotals",
+        command: "git diff --numstat",
+        cwd,
+        detail: "Could not read Changes totals.",
+      });
+    }
+    return totals;
+  });
+
+  const computeBranchChangeTotals = Effect.fn("computeBranchChangeTotals")(function* (
+    cwd: string,
+    baseRef: string | null,
+    mergeBase: string,
+    roots: ReadonlyArray<string>,
+  ) {
     // Bound pathspec matching work and stay below Windows' command-line limit.
     const pathspecs =
       roots.length <= 128 && roots.reduce((length, root) => length + root.length + 16, 0) < 8_000
@@ -3385,6 +3439,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       deletions += file.deletions;
     }
     return { baseRef, insertions, deletions };
+    // Owns the temp review index, so a read abandoned at the timeout cannot lose it mid-run.
   }, Effect.scoped);
 
   const reviewCommitError = (cwd: string, detail: string) =>
