@@ -13,7 +13,10 @@ import {
   type RelayAgentActivityState,
 } from "@t3tools/contracts/relay";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
-import { turnItemUpdateCanEndBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  isWatchedPullRequest,
+  turnItemUpdateCanEndBackgroundWork,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
 import {
@@ -166,6 +169,39 @@ export const makeAgentAwarenessPublishWorker = Effect.fnUntraced(function* <R>(
     }).pipe(Effect.uninterruptible);
   return { enqueue, drain: worker.drain };
 });
+
+/**
+ * The thread-record fields the published card is built from: where it lives, its title and model,
+ * whether it is archived or settled, and which watched pull requests hold a completion open. A
+ * thread event whose payload matches what the last publish read cannot change the card.
+ */
+function awarenessThreadInputs(
+  thread: Pick<
+    OrchestrationV2ThreadShell,
+    | "projectId"
+    | "title"
+    | "modelSelection"
+    | "archivedAt"
+    | "settledOverride"
+    | "lineage"
+    | "activeProviderThreadId"
+    | "pullRequests"
+  >,
+): string {
+  return JSON.stringify([
+    thread.projectId,
+    thread.title,
+    thread.modelSelection.model,
+    thread.archivedAt !== null,
+    thread.settledOverride,
+    thread.lineage,
+    thread.activeProviderThreadId,
+    (thread.pullRequests ?? [])
+      .filter(isWatchedPullRequest)
+      .map((link) => `${link.host}/${link.repository}#${link.number}`)
+      .toSorted(),
+  ]);
+}
 
 function agentAwarenessPublishIdentity(state: RelayAgentActivityState | null): string {
   if (state === null) {
@@ -384,6 +420,9 @@ export const make = Effect.gen(function* () {
   const startedAt = (yield* DateTime.now).epochMilliseconds;
   const catchUpRequests = yield* Queue.dropping<void>(1);
   const publishedStateByThreadRef = yield* Ref.make(new Map<ThreadId, string>());
+  // Thread-record inputs of the state last confirmed published, so a thread event that changes
+  // none of them skips the shell and project reads. Only a read of a listed thread seeds it.
+  const publishedThreadInputs = new Map<ThreadId, string>();
   const unlistedThreads = new Set<ThreadId>();
   const rememberUnlistedThread = (threadId: ThreadId) => {
     // Bounded so a long-lived server cannot grow it without limit; a miss only costs one shell read.
@@ -479,6 +518,7 @@ export const make = Effect.gen(function* () {
     cachedRelayClient = undefined;
     publishConfirmDeadlines.clear();
     heldCompletions.clear();
+    publishedThreadInputs.clear();
     yield* Ref.set(publishedStateByThreadRef, new Map());
   });
 
@@ -594,7 +634,15 @@ export const make = Effect.gen(function* () {
     ) {
       if (Option.isNone(thread) || !terminalWorkSinceStart(thread.value, startedAt)) return;
     }
+    const rememberPublishedInputs = () => {
+      if (threadShell !== null && snapshot.reason === "snapshot") {
+        publishedThreadInputs.set(threadId, awarenessThreadInputs(threadShell));
+      } else {
+        publishedThreadInputs.delete(threadId);
+      }
+    };
     if (publishedStateByThread.get(threadId) === publishIdentity) {
+      rememberPublishedInputs();
       // Clear moot deadlines so later transient nulls cannot skip their deferral window.
       publishConfirmDeadlines.delete(threadId);
       heldCompletions.delete(threadId);
@@ -690,6 +738,7 @@ export const make = Effect.gen(function* () {
       state: snapshot.state,
       reason: snapshot.reason,
     }).pipe(withRelayClientTracing);
+    rememberPublishedInputs();
     publishConfirmDeadlines.delete(threadId);
     heldCompletions.delete(threadId);
     yield* Ref.update(publishedStateByThreadRef, (publishedStates) => {
@@ -890,8 +939,20 @@ export const make = Effect.gen(function* () {
             rememberUnlistedThread(threadId);
           } else if (event.type === "thread.deleted") {
             unlistedThreads.delete(threadId);
+            publishedThreadInputs.delete(threadId);
           }
           if (!shouldPublishAgentAwarenessEvent(event)) {
+            return Effect.void;
+          }
+          // These carry the whole thread record and fire often (PR syncs, branch and title
+          // churn), so the payload can prove nothing published moved. Every other type, and any
+          // thread without a confirmed publish, still reads: only a read sees run, request and
+          // background-task state.
+          if (
+            (event.type === "thread.metadata-updated" ||
+              event.type === "thread.pull-request-synced") &&
+            publishedThreadInputs.get(threadId) === awarenessThreadInputs(event.payload)
+          ) {
             return Effect.void;
           }
           return Effect.logDebug("agent activity publishing queued thread publish", {

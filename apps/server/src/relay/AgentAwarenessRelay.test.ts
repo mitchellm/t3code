@@ -178,6 +178,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
   });
   const currentShell = yield* Ref.make<OrchestrationV2ThreadShell | null>(shell());
   const shellReads: ThreadId[] = [];
+  const projectReads: ProjectId[] = [];
   const catchUp = { shellSnapshotReads: 0 };
   const threads = ThreadManagementService.ThreadManagementService.of({
     getThreadShell: (threadId) =>
@@ -275,21 +276,34 @@ const makeTestRelay = Effect.fnUntraced(function* (
       getShell: unused,
       listShells: unused,
       getById: () =>
-        Effect.succeedSome({
-          id: PROJECT_ID,
-          title: "Project",
-          workspaceRoot: "/workspace",
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: NOW,
-          updatedAt: NOW,
-          deletedAt: null,
-        }),
+        Effect.sync(() => void projectReads.push(PROJECT_ID)).pipe(
+          Effect.andThen(
+            Effect.succeedSome({
+              id: PROJECT_ID,
+              title: "Project",
+              workspaceRoot: "/workspace",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: NOW,
+              updatedAt: NOW,
+              deletedAt: null,
+            }),
+          ),
+        ),
     }),
     Effect.provideService(FetchHttpClient.Fetch, fetch),
     Effect.provide(NodeCrypto.layer),
   );
-  return { relay, secrets, secretReads, currentShell, shellReads, publications, catchUp };
+  return {
+    relay,
+    secrets,
+    secretReads,
+    currentShell,
+    shellReads,
+    projectReads,
+    publications,
+    catchUp,
+  };
 });
 
 describe("AgentAwarenessRelay", () => {
@@ -508,6 +522,148 @@ describe("AgentAwarenessRelay", () => {
       assert.equal(publications.length, 0);
     }).pipe(Effect.scoped),
   );
+
+  describe("events that cannot move a published field", () => {
+    const threadRecord = (overrides: Record<string, unknown> = {}) => ({
+      createdBy: "user",
+      creationSource: "web",
+      id: THREAD_ID,
+      projectId: PROJECT_ID,
+      title: "Thread",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-model" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: { rootThreadId: THREAD_ID, parentThreadId: null, relationshipToParent: null },
+      forkedFrom: null,
+      createdAt: DateTime.makeUnsafe(NOW),
+      updatedAt: DateTime.makeUnsafe(NOW),
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      lastVisitedAt: null,
+      deletedAt: null,
+      ...overrides,
+    });
+
+    // Publishes once so the relay has confirmed state, then hands back a way to feed one event at
+    // a time and wait until the relay has handled it and drained its worker.
+    const startPublishedRelay = Effect.fnUntraced(function* () {
+      const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+      const pulls = yield* Queue.unbounded<void>();
+      const test = yield* makeTestRelay({
+        domainEvents: Stream.fromEffectRepeat(
+          Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
+        ),
+      });
+      yield* test.relay.start();
+      yield* Queue.take(pulls);
+      yield* test.relay.publishThread(THREAD_ID);
+      assert.equal(test.publications.length, 1);
+      assert.equal(test.shellReads.length, 1);
+      assert.equal(test.projectReads.length, 1);
+      const emit = Effect.fnUntraced(function* (type: string, payload: unknown) {
+        yield* Queue.offer(events, {
+          id: EventId.make(`event:${type}:${yield* Queue.size(events)}`),
+          type,
+          threadId: THREAD_ID,
+          occurredAt: yield* DateTime.now,
+          payload,
+        } as unknown as OrchestrationV2DomainEvent);
+        yield* Queue.take(pulls);
+        yield* test.relay.drain;
+      });
+      return { ...test, emit };
+    });
+
+    it.effect(
+      "does no shell or project read and no publish when a thread event carries the same published fields",
+      () =>
+        Effect.gen(function* () {
+          const { emit, shellReads, projectReads, publications, secretReads } =
+            yield* startPublishedRelay();
+          const secretReadsBefore = secretReads.length;
+          yield* emit("thread.metadata-updated", threadRecord({ branch: "feature/new" }));
+          yield* emit(
+            "thread.pull-request-synced",
+            threadRecord({ updatedAt: DateTime.makeUnsafe("2026-09-04T13:00:00Z") }),
+          );
+          assert.equal(shellReads.length, 1);
+          assert.equal(projectReads.length, 1);
+          assert.equal(publications.length, 1);
+          assert.equal(secretReads.length, secretReadsBefore);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect("reads and publishes when a thread event changes a published field", () =>
+      Effect.gen(function* () {
+        const { emit, currentShell, shellReads, projectReads, publications } =
+          yield* startPublishedRelay();
+        yield* Ref.set(currentShell, shell({ title: "Renamed thread" }));
+        yield* emit("thread.metadata-updated", threadRecord({ title: "Renamed thread" }));
+        assert.equal(shellReads.length, 2);
+        assert.equal(projectReads.length, 2);
+        assert.equal(publications.length, 2);
+        assert.equal(publications[1]?.state?.threadTitle, "Renamed thread");
+        // The rename is now the published baseline, so repeating it reads nothing.
+        yield* emit("thread.metadata-updated", threadRecord({ title: "Renamed thread" }));
+        assert.equal(shellReads.length, 2);
+        assert.equal(publications.length, 2);
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "reads when a pull request watch appears, since a watch holds a completion open",
+      () =>
+        Effect.gen(function* () {
+          const { emit, shellReads } = yield* startPublishedRelay();
+          yield* emit(
+            "thread.pull-request-synced",
+            threadRecord({
+              pullRequests: [
+                {
+                  host: "github.com",
+                  repository: "acme/widgets",
+                  number: 7,
+                  url: "https://github.com/acme/widgets/pull/7",
+                  source: "manual",
+                  watch: {},
+                },
+              ],
+            }),
+          );
+          assert.equal(shellReads.length, 2);
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect("still reads for event types whose payload cannot show the card is unchanged", () =>
+      Effect.gen(function* () {
+        const { emit, shellReads, projectReads, publications } = yield* startPublishedRelay();
+        yield* emit("run.updated", { id: RunId.make("run-1"), status: "running" });
+        yield* emit("provider-thread.updated", { id: "provider-thread-1" });
+        yield* emit("thread.pull-request-link-updated", { number: 7 });
+        assert.equal(shellReads.length, 4);
+        assert.equal(projectReads.length, 4);
+        assert.equal(publications.length, 1);
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect("reads again after the relay link is reset", () =>
+      Effect.gen(function* () {
+        const { emit, relay, secrets, shellReads } = yield* startPublishedRelay();
+        yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, new TextEncoder().encode("false"));
+        yield* relay.requestCatchUp();
+        yield* relay.publishThread(THREAD_ID);
+        yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, new TextEncoder().encode("true"));
+        yield* relay.requestCatchUp();
+        yield* emit("thread.metadata-updated", threadRecord({ branch: "feature/new" }));
+        assert.equal(shellReads.length, 2);
+      }).pipe(Effect.scoped),
+    );
+  });
 
   it.effect.each(["completed", "failed"] as const)(
     "publishes a tombstone when a %s thread is settled through a domain event",
