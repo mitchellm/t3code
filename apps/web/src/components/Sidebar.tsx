@@ -9,6 +9,7 @@ import {
 } from "./chat/threadContextDrag";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
+import { resolveThreadFolderChoice } from "./ThreadFolderDialog";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
@@ -140,6 +141,7 @@ import {
 } from "../state/environments";
 import {
   readThreadShell,
+  readThreadShells,
   useAllEnvironmentProjectSnapshotsReady,
   useDelegatedUnderParent,
   useProjects,
@@ -264,6 +266,8 @@ import {
   SearchScopeToggle,
   SidebarViewToolbar,
 } from "./sidebar/SidebarViewControls";
+import { SidebarFolderHeader } from "./sidebar/SidebarFolderHeader";
+import { folderIndent, listFolderPaths } from "./sidebar/sidebarFolders";
 import { threadEmojiForTitle } from "./sidebar/threadEmoji";
 import { useSidebarViewStore } from "./sidebar/sidebarViewStore";
 import { useThreadsViewOptions } from "./explorer/useThreadsViewOptions"; // Fork
@@ -1329,6 +1333,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const viewGroupOf = threadsView.groupOf;
   const collapsedProjectKeys = useSidebarViewStore((state) => state.collapsedProjectKeys);
   const toggleProjectCollapsed = useSidebarViewStore((state) => state.toggleProjectCollapsed);
+  const collapsedFolderKeys = useSidebarViewStore((state) => state.collapsedFolderKeys);
+  const toggleFolderCollapsed = useSidebarViewStore((state) => state.toggleFolderCollapsed);
   const threadListArranged = sidebarGroupByProject || sidebarThreadSort.field !== "manual";
   // "Pins stay grouped" only means anything while the folders are drawn: it folds
   // the pinned block into the project groups instead of listing it on top.
@@ -1429,6 +1435,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             return group === undefined ? null : { key: group.projectKey, label: group.displayName };
           }),
         collapsedGroupKeys: new Set(collapsedProjectKeys),
+        // Folders belong to a project; a view grouped by something else has no project to file under.
+        ...(viewGroupOf === null
+          ? {
+              folderOf: (thread) => thread.folder,
+              collapsedFolderKeys: new Set(collapsedFolderKeys),
+            }
+          : {}),
         pinnedThreads: sidebarPinsInGroups ? pinned : null,
       }),
     pinsInGroups: sidebarPinsInGroups,
@@ -2812,6 +2825,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 snooze: configLoaded,
                 pinning: configLoaded,
                 titleRegeneration: configLoaded,
+                folders: configLoaded,
+              },
+              folder: {
+                current: thread.folder ?? null,
+                existing: listFolderPaths(
+                  readThreadShells()
+                    .filter(
+                      (candidate) =>
+                        candidate.environmentId === thread.environmentId &&
+                        candidate.projectId === thread.projectId,
+                    )
+                    .map((candidate) => candidate.folder),
+                ),
               },
               snoozePresets,
             }),
@@ -2831,6 +2857,25 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   thread.environmentId,
                 );
           if (preset) attemptSnooze(threadRef, preset);
+          return;
+        }
+        if (clicked.value.startsWith("folder:")) {
+          const choice = await resolveThreadFolderChoice(clicked.value);
+          if (choice === null) return;
+          const result = await updateThreadMetadata({
+            environmentId: threadRef.environmentId,
+            input: { threadId: threadRef.threadId, folder: choice.folder },
+          });
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Failed to move thread",
+                description: error instanceof Error ? error.message : "An error occurred.",
+              }),
+            );
+          }
           return;
         }
         switch (clicked.value) {
@@ -3448,6 +3493,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         // Fork: the row sits under a fork project group header.
                         indented = false,
                         nested = false,
+                        folderDepth = 0,
                       ) => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
@@ -3486,13 +3532,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             hideProjectIcon={!showProjectIcons}
                             grouped={indented}
                             // A nested row must look nested even when the user's Indent is none.
-                            indent={
+                            indent={folderIndent(
                               nested && threadIndent === "none"
                                 ? "small"
                                 : indented || nested
                                   ? threadIndent
-                                  : "none"
-                            }
+                                  : "none",
+                              folderDepth,
+                            )}
                             propertiesText={threadsView.propertiesTextOf(threadKey)}
                             navigationParent={
                               folderRow ??
@@ -3745,8 +3792,31 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                   onDraftContextMenu={handleDraftContextMenu}
                                 />,
                               );
-                              for (const thread of group.threads) {
-                                items.push(renderThreadRow(thread, "active", undefined, true));
+                              for (const row of group.rows) {
+                                if (row.kind === "folder") {
+                                  items.push(
+                                    <SidebarFolderHeader
+                                      key={`folder:${row.key}`}
+                                      name={row.name}
+                                      path={row.path}
+                                      count={row.count}
+                                      collapsed={row.collapsed}
+                                      indent={folderIndent(threadIndent, row.depth)}
+                                      onToggle={() => toggleFolderCollapsed(row.key)}
+                                    />,
+                                  );
+                                  continue;
+                                }
+                                items.push(
+                                  renderThreadRow(
+                                    row.thread,
+                                    "active",
+                                    undefined,
+                                    true,
+                                    false,
+                                    row.depth,
+                                  ),
+                                );
                               }
                             }
                             break;

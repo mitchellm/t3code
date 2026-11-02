@@ -58,6 +58,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   latestProviderTurnForAttempt,
+  normalizeThreadFolder,
   parseGoalCommand,
   orchestrationV2RunWorkStartedAt,
   ProviderInstanceId,
@@ -3751,6 +3752,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : command.regenerateTitle === false || command.title !== undefined
                 ? { titleRegeneration: null }
                 : {}),
+            ...(command.folder === undefined
+              ? {}
+              : { folder: normalizeThreadFolder(command.folder) }),
             ...loadoutPatch,
             updatedAt: now,
           };

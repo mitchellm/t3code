@@ -37,6 +37,21 @@ function recordEffect(action: string) {
 vi.mock("../components/chat/guestShareAvailability", () => ({ canShareWithGuestAtom: vi.fn() }));
 vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: { get: () => false } }));
 vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn() }));
+// The real module draws a dialog; only the choice-parsing half matters here, and "New folder…"
+// (which opens that dialog) counts as cancelled.
+vi.mock("../components/ThreadFolderDialog", async () => {
+  const logic = await import("../components/threadActionMenu.logic");
+  return {
+    resolveThreadFolderChoice: async (action: ThreadActionMenuId) => {
+      const parsed = logic.parseFolderMenuAction(action);
+      return parsed?.kind === "path"
+        ? { folder: parsed.path }
+        : parsed?.kind === "none"
+          ? { folder: null }
+          : null;
+    },
+  };
+});
 vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
@@ -61,6 +76,7 @@ vi.mock("../state/entities", () => ({
     runtime: null,
     latestRun: null,
   }),
+  readThreadShells: () => [],
   useProjects: () => [{ id: "project", environmentId: "secondary" }],
 }));
 vi.mock("../state/environments", () => ({ usePrimaryEnvironmentId: () => "primary" }));
@@ -168,19 +184,32 @@ beforeEach(() => {
 });
 
 describe("thread menu permissions", () => {
-  it.each(["rename", "regenerate-title", "delete", "pin", "settle", "archive"] as const)(
-    "%s rechecks after the native menu closes",
-    async (action) => {
-      state.granted.add("secondary");
-      const choice = deferred<ThreadActionMenuId | null>();
-      state.show.mockReturnValue(choice.promise);
-      createMenu().openMenu(position);
-      state.granted.delete("secondary");
-      choice.resolve(action);
-      await state.completed.promise;
-      expect(state.effects).toEqual([]);
-    },
-  );
+  it("moves the thread to the chosen folder", async () => {
+    state.granted.add("secondary");
+    state.show.mockResolvedValue("folder:path:Update 82");
+    createMenu().openMenu(position);
+    await state.completed.promise;
+    expect(state.effects).toEqual(["metadata"]);
+  });
+
+  it.each([
+    "rename",
+    "regenerate-title",
+    "delete",
+    "pin",
+    "settle",
+    "archive",
+    "folder:path:Update 82",
+  ] as const)("%s rechecks after the native menu closes", async (action) => {
+    state.granted.add("secondary");
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.granted.delete("secondary");
+    choice.resolve(action);
+    await state.completed.promise;
+    expect(state.effects).toEqual([]);
+  });
 
   it("offers find only to a header that can open it, without task permission", async () => {
     createMenu().openMenu(position);

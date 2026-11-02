@@ -11,6 +11,7 @@ import {
   sortSidebarThreads,
   type SidebarThreadDisplayStatus,
 } from "./sidebarArrangement";
+import { sidebarFolderKey } from "./sidebarFolders";
 
 type Fixture = Parameters<typeof resolveSidebarThreadDisplayStatus>[0] & {
   readonly id: string;
@@ -148,6 +149,33 @@ describe("arrangeSidebarActiveThreads", () => {
       ["Other", ["unknown"], false],
     ]);
     expect(ids(arranged.threads)).toEqual(["vault-new", "vault-old", "unknown"]);
+  });
+
+  it("files threads under folders inside their project and drops folded folders from navigation", () => {
+    const threads = [
+      thread("vault-loose", { projectId: "vault", latestRun: turn(50) }),
+      thread("vault-proto", { projectId: "vault", folder: "Update 82/Prototypes" }),
+      thread("vault-update", { projectId: "vault", folder: "Update 82", latestRun: turn(10) }),
+      thread("flux-a", { projectId: "flux", folder: "Update 82" }),
+    ];
+    const arrange = (collapsedFolderKeys: ReadonlySet<string>) =>
+      arrangeSidebarActiveThreads(threads, {
+        sort: { field: "activity", reversed: false },
+        groupByProject: true,
+        projectSort: DEFAULT_SIDEBAR_PROJECT_SORT,
+        statusOf: noStatus,
+        groupOf,
+        collapsedGroupKeys: new Set(),
+        folderOf: (entry) => (entry as unknown as { folder?: string }).folder,
+        collapsedFolderKeys,
+      });
+    const open = arrange(new Set());
+    expect(ids(open.threads)).toEqual(["vault-loose", "vault-update", "vault-proto", "flux-a"]);
+
+    const folded = arrange(new Set([sidebarFolderKey("vault", "Update 82")]));
+    expect(ids(folded.threads)).toEqual(["vault-loose", "flux-a"]);
+    // The header still counts what the folder hides.
+    expect(folded.groups?.[0]?.threads).toHaveLength(3);
   });
 
   it("keeps pins in their project, above the sorted rows, in pin order", () => {

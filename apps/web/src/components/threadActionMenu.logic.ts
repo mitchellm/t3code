@@ -19,6 +19,10 @@ export type ThreadActionMenuId =
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
+  | "folder"
+  | "folder:none"
+  | "folder:new"
+  | `folder:path:${string}`
   | "rename"
   | "regenerate-title"
   | "mark-unread"
@@ -97,12 +101,35 @@ export interface ThreadActionMenuState {
     readonly snooze: boolean;
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
+    readonly folders: boolean;
+  };
+  /** The thread's folder and the folders its project already has, for "Move to folder". */
+  readonly folder: {
+    readonly current: string | null;
+    readonly existing: ReadonlyArray<string>;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
   /** Guest links need their own grant, so the caller checks it instead of `canOperate`. */
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+}
+
+const FOLDER_PATH_PREFIX = "folder:path:";
+
+export function folderMenuId(path: string): ThreadActionMenuId {
+  return `${FOLDER_PATH_PREFIX}${path}`;
+}
+
+/** What a "Move to folder" choice means: a path, no folder, or "ask for a new one". */
+export function parseFolderMenuAction(
+  action: ThreadActionMenuId,
+): { readonly kind: "path"; readonly path: string } | { readonly kind: "none" | "new" } | null {
+  if (action === "folder:none") return { kind: "none" };
+  if (action === "folder:new") return { kind: "new" };
+  return action.startsWith(FOLDER_PATH_PREFIX)
+    ? { kind: "path", path: action.slice(FOLDER_PATH_PREFIX.length) }
+    : null;
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -179,6 +206,28 @@ export function buildThreadActionMenuItems(
                   },
                 ],
               },
+        ]
+      : []),
+    ...(state.supports.folders
+      ? [
+          {
+            id: "folder" as const,
+            label: "Move to folder",
+            icon: "folder",
+            children: [
+              {
+                id: "folder:none" as const,
+                label: "No folder",
+                checked: state.folder.current === null,
+              },
+              ...state.folder.existing.map((path) => ({
+                id: folderMenuId(path),
+                label: path,
+                checked: path === state.folder.current,
+              })),
+              { id: "folder:new" as const, label: "New folder…", separatorBefore: true },
+            ],
+          },
         ]
       : []),
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },

@@ -183,6 +183,8 @@ export interface EnvironmentThreadShell {
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
   readonly autoSettleDisabledAt?: string | null;
+  /** Null while the thread is unfiled. */
+  readonly folder?: string | null;
   /** Null while the thread runs solo. */
   readonly loadout?: import("@t3tools/contracts").ThreadLoadout | null;
   /** Fork: closed/total of the thread's ledger; null or absent when it has none. */
@@ -347,6 +349,7 @@ export function presentThreadShell(
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
+    folder: thread.folder ?? null,
     loadout: thread.loadout ?? null,
     ledgerProgress: thread.ledgerProgress ?? null,
     pinOrderKey: thread.pinOrderKey ?? null,

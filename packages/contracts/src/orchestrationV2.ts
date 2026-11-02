@@ -85,6 +85,7 @@ import {
 } from "./investigation.ts";
 import { ThreadLoadout } from "./loadout.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { ThreadFolder } from "./threadFolder.ts";
 import {
   ThreadLinkedPullRequest,
   ThreadPullRequestLink,
@@ -564,6 +565,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   /** Absent on threads and servers from before rule pins; read as empty. */
   rulePins: Schema.optional(Schema.Array(ThreadRulePin)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** Absent or null means unfiled. A path such as `Update 82/Prototypes`; see threadFolder.ts. */
+  folder: Schema.optional(Schema.NullOr(ThreadFolder)),
   /** Absent means solo: every thread starts without delegated roles. */
   loadout: Schema.optional(Schema.NullOr(ThreadLoadout)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -2266,6 +2269,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  folder: Schema.optional(Schema.NullOr(ThreadFolder)),
   loadout: Schema.optional(Schema.NullOr(ThreadLoadout)),
   /** Fork: absent from older servers, which clients read as no ledger. */
   ledgerProgress: Schema.optional(Schema.NullOr(LedgerProgress)),
@@ -3233,6 +3237,8 @@ export const OrchestrationV2Command = Schema.Union([
      * proposal (`setBy: "agent"`) is rejected while the user's explicit choice stands.
      */
     loadout: Schema.optional(Schema.NullOr(ThreadLoadout)),
+    /** File the thread under a folder path, or unfile it (null). The server normalizes the path. */
+    folder: Schema.optional(Schema.NullOr(ThreadFolder)),
   }),
   // Pin free text, or a message by `sourceMessageId`, whose text the server
   // copies at pin time. The two are exclusive so the pinned text is never

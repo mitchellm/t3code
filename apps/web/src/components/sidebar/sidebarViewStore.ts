@@ -24,9 +24,12 @@ interface PersistedSidebarView {
   /** How the project groups are ordered while grouped. */
   readonly projectSort: SidebarProjectSort;
   readonly collapsedProjectKeys: readonly string[];
+  /** Folded folders, keyed by `sidebarFolderKey` (project group plus folder path). */
+  readonly collapsedFolderKeys: readonly string[];
 }
 
 interface SidebarViewState extends PersistedSidebarView {
+  readonly toggleFolderCollapsed: (folderKey: string) => void;
   readonly toggleGroupByProject: () => void;
   readonly togglePinsStayGrouped: () => void;
   /** Picking a field starts it in its natural order; picking it again keeps the order. */
@@ -45,7 +48,12 @@ const DEFAULT_VIEW: PersistedSidebarView = {
   sort: MANUAL_SIDEBAR_THREAD_SORT,
   projectSort: DEFAULT_SIDEBAR_PROJECT_SORT,
   collapsedProjectKeys: [],
+  collapsedFolderKeys: [],
 };
+
+function readStringArray(raw: unknown): readonly string[] {
+  return Array.isArray(raw) ? raw.filter((key): key is string => typeof key === "string") : [];
+}
 
 function readSort(raw: unknown): SidebarThreadSort | null {
   const sort = raw as Record<string, unknown> | null | undefined;
@@ -66,9 +74,8 @@ function readPersistedView(): PersistedSidebarView {
       pinsStayGrouped: value.pinsStayGrouped === true,
       sort: readSort(value.sort) ?? MANUAL_SIDEBAR_THREAD_SORT,
       projectSort: readSort(value.projectSort) ?? DEFAULT_SIDEBAR_PROJECT_SORT,
-      collapsedProjectKeys: Array.isArray(value.collapsedProjectKeys)
-        ? value.collapsedProjectKeys.filter((key): key is string => typeof key === "string")
-        : [],
+      collapsedProjectKeys: readStringArray(value.collapsedProjectKeys),
+      collapsedFolderKeys: readStringArray(value.collapsedFolderKeys),
     };
   } catch {
     return DEFAULT_VIEW;
@@ -110,6 +117,12 @@ export const useSidebarViewStore = create<SidebarViewState>((set) => ({
         ? state.collapsedProjectKeys.filter((key) => key !== projectKey)
         : [...state.collapsedProjectKeys, projectKey],
     })),
+  toggleFolderCollapsed: (folderKey) =>
+    set((state) => ({
+      collapsedFolderKeys: state.collapsedFolderKeys.includes(folderKey)
+        ? state.collapsedFolderKeys.filter((key) => key !== folderKey)
+        : [...state.collapsedFolderKeys, folderKey],
+    })),
 }));
 
 useSidebarViewStore.subscribe((state) => {
@@ -120,6 +133,7 @@ useSidebarViewStore.subscribe((state) => {
     sort: state.sort,
     projectSort: state.projectSort,
     collapsedProjectKeys: state.collapsedProjectKeys,
+    collapsedFolderKeys: state.collapsedFolderKeys,
   };
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));

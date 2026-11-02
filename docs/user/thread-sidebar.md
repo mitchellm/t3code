@@ -128,6 +128,14 @@ rename a thread, regenerate its title, or link and unlink a pull request. These 
 appear on web, desktop, and mobile without requiring the originating browser to remain
 open.
 
+### Organize threads in folders
+
+Open a thread's menu and choose **Move to folder** to file it under a topic, such as an update you are shipping or a prototype you are still testing. Pick one of the project's existing folders, or choose **New folder…** and type a name. Use `/` to nest one folder inside another, like `Update 82/Prototypes`. **No folder** puts the thread back where it was.
+
+Folders show in the sidebar when threads are grouped by project. Each project lists its unfiled threads first, in your usual order, then its folders A to Z, so a folder stays in the same place instead of moving with activity. Click a folder to fold it; its thread count shows while it is folded. A folder exists while a thread is in it, so there is nothing to delete: move the last thread out and the folder is gone.
+
+Folders belong to the thread, so they follow it to every device. Mobile does not show folders yet. They need a server update on remote environments; the menu item is hidden until the environment supports it. Agents can file a thread with the **Organize** tool's `move_to_folder` action.
+
 ### Fold working threads (beta)
 
 Threads that are working or waiting on work they will resume from move into a collapsed

@@ -6715,6 +6715,73 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
   );
 });
 
+it.layer(layerSharedApplicationDataPlaneTest)("folder projection", (it) => {
+  it.effect("files a thread under a normalized folder and unfiles it again", () =>
+    Effect.gen(function* () {
+      const projects = yield* ProjectService.ProjectService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projectId = ProjectId.make("runtime-layer-folder-project");
+      const threadId = ThreadId.make("runtime-layer-folder-thread");
+
+      yield* projects.create({
+        commandId: CommandId.make("runtime-layer-folder-project-create"),
+        projectId,
+        title: "Folder projection",
+        workspaceRoot: "/tmp/runtime-layer-folder-project",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-folder-thread-create"),
+        threadId,
+        projectId,
+        title: "Folder thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      const shellFolder = Effect.map(
+        orchestrator.getShellSnapshot(),
+        (shell) => shell.threads.find((candidate) => candidate.id === threadId)?.folder,
+      );
+      assert.isNull(yield* shellFolder);
+
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("runtime-layer-folder-thread-file"),
+        threadId,
+        folder: " Update 82 // Prototypes/ ",
+      });
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.folder,
+        "Update 82/Prototypes",
+      );
+      assert.equal(yield* shellFolder, "Update 82/Prototypes");
+
+      // Leaving folder out must not unfile the thread.
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("runtime-layer-folder-thread-rename"),
+        threadId,
+        title: "Renamed folder thread",
+      });
+      assert.equal(yield* shellFolder, "Update 82/Prototypes");
+
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("runtime-layer-folder-thread-unfile"),
+        threadId,
+        folder: null,
+      });
+      assert.isNull((yield* orchestrator.getThreadProjection(threadId)).thread.folder);
+      assert.isNull(yield* shellFolder);
+    }),
+  );
+});
+
 it.layer(layerSharedApplicationDataPlaneTest)("visited projection", (it) => {
   it.effect("carries the visited watermark through the V2 shell projection", () =>
     Effect.gen(function* () {

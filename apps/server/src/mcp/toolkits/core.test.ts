@@ -556,6 +556,61 @@ it.effect("a client caller targets any thread within its ceiling and cannot act 
   ),
 );
 
+it.effect("files a thread in a folder, unfiles it with null, and refuses a missing folder", () => {
+  const commands: Array<unknown> = [];
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const organize = (args: Record<string, unknown>) =>
+      server
+        .callTool({
+          name: "t3_thread_organize",
+          arguments: { action: "move_to_folder", threadId: "other-project-thread", ...args },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("auto")),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+
+    expect((yield* organize({ folder: "Update 82/Prototypes" })).isError).toBe(false);
+    expect((yield* organize({ folder: null })).isError).toBe(false);
+    expect(commands).toMatchObject([
+      { type: "thread.metadata.update", folder: "Update 82/Prototypes" },
+      { type: "thread.metadata.update", folder: null },
+    ]);
+
+    expect(declaredFailure(yield* organize({}))).toMatchObject({ code: "invalid_request" });
+    expect(commands).toHaveLength(2);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) =>
+              Effect.succeed(McpToolAccessTestkit.liveThreadShell(id, { runtimeMode: "auto" })),
+            getProjectThreadRecords: () =>
+              Effect.succeed({
+                thread: {
+                  id: ThreadId.make("other-project-thread"),
+                  projectId: "other-project",
+                  runtimeMode: "auto",
+                  interactionMode: "default",
+                  deletedAt: null,
+                },
+              } as never),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                commands.push(command);
+                return { sequence: 7, storedEvents: [] };
+              }),
+          }),
+        ),
+      ),
+    ),
+  );
+});
+
 it.effect("a read-only client reads threads and is refused every write before it runs", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;

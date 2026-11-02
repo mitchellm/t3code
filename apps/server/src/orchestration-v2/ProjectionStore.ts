@@ -1620,6 +1620,7 @@ export function threadShellFromProjection(
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
+    folder: projection.thread.folder ?? null,
     loadout: projection.thread.loadout ?? null,
     ledgerProgress: summarizeLedgerProgress(projection.ledger),
     pinOrderKey: projection.thread.pinOrderKey ?? null,
@@ -1892,6 +1893,7 @@ function shellFromState(input: {
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
+    folder: input.state.thread.folder ?? null,
     loadout: input.state.thread.loadout ?? null,
     ledgerProgress: input.ledgerProgress,
     pinOrderKey: input.state.thread.pinOrderKey ?? null,

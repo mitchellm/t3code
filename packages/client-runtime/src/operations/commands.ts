@@ -132,6 +132,8 @@ export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly expectedEmpty?: boolean;
   /** Sets the thread's loadout, or clears it with null so it runs solo again. */
   readonly loadout?: import("@t3tools/contracts").ThreadLoadout | null;
+  /** Files the thread under a folder path such as `Update 82/Prototypes`, or unfiles it with null. */
+  readonly folder?: string | null;
 }
 
 /** Pin free text, or a message whose text the server copies at pin time. */
@@ -655,12 +657,14 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       input.regenerateTitle !== undefined ||
       input.linkedPullRequest !== undefined ||
       input.limitRecovery !== undefined ||
-      input.loadout !== undefined
+      input.loadout !== undefined ||
+      input.folder !== undefined
     ) {
       result = yield* dispatch({
         type: "thread.metadata.update",
         ...(input.limitRecovery === undefined ? {} : { limitRecovery: input.limitRecovery }),
         ...(input.loadout === undefined ? {} : { loadout: input.loadout }),
+        ...(input.folder === undefined ? {} : { folder: input.folder }),
         commandId,
         threadId: input.threadId,
         ...(input.title === undefined ? {} : { title: input.title }),

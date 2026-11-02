@@ -18,6 +18,8 @@ import {
 import { useRouter } from "@tanstack/react-router";
 
 import { pickSnoozePreset, resolveSnoozePresets } from "../components/Sidebar.snooze";
+import { listFolderPaths } from "../components/sidebar/sidebarFolders";
+import { resolveThreadFolderChoice } from "../components/ThreadFolderDialog";
 import {
   buildThreadActionMenuItems,
   threadActionRequiresOperate,
@@ -34,6 +36,7 @@ import {
   readEnvironmentServerConfigLoaded,
   readEnvironmentSupportsAutoSettleOptOut,
   readThreadShell,
+  readThreadShells,
   useProjects,
 } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
@@ -142,6 +145,7 @@ export function useThreadActionMenu(input: {
         snooze: configLoaded,
         pinning: configLoaded,
         titleRegeneration: configLoaded,
+        folders: configLoaded,
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat, threadRef.environmentId);
@@ -159,6 +163,18 @@ export function useThreadActionMenu(input: {
         isRegeneratingTitle,
         isRunning: !threadRuntimeCanArchive(thread.runtime),
         supports,
+        folder: {
+          current: thread.folder ?? null,
+          existing: listFolderPaths(
+            readThreadShells()
+              .filter(
+                (candidate) =>
+                  candidate.environmentId === thread.environmentId &&
+                  candidate.projectId === thread.projectId,
+              )
+              .map((candidate) => candidate.folder),
+          ),
+        },
         snoozePresets,
         canShareWithGuest:
           canShareWithGuest ?? appAtomRegistry.get(canShareWithGuestAtom(threadRef.environmentId)),
@@ -204,6 +220,17 @@ export function useThreadActionMenu(input: {
           failureToast(title, squashAtomCommandFailure(result));
         }
       };
+      if (action.startsWith("folder:")) {
+        const choice = await resolveThreadFolderChoice(action);
+        if (choice === null) return;
+        await reportFailure("Failed to move thread", () =>
+          updateThreadMetadata({
+            environmentId: threadRef.environmentId,
+            input: { threadId: threadRef.threadId, folder: choice.folder },
+          }),
+        );
+        return;
+      }
       switch (action) {
         case "find":
           onFind?.(threadRef);

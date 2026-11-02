@@ -12,6 +12,8 @@ import { hasUnseenCompletion, resolveSidebarThreadStatus } from "~/components/Si
 import { parseTimestampDate } from "~/timestampFormat";
 import type { SidebarThreadSummary } from "~/types";
 
+import { layoutSidebarGroupFolders, type SidebarGroupRow } from "./sidebarFolders";
+
 export const SIDEBAR_THREAD_ROW_DENSITY_LABELS: Record<SidebarThreadRowDensity, string> = {
   comfortable: "Comfortable",
   compact: "Compact",
@@ -246,6 +248,8 @@ export interface SidebarActiveThreadGroup<T> {
   readonly label: string;
   /** Every thread in the group, collapsed or not, so a header can count them. */
   readonly threads: readonly T[];
+  /** What the group renders under its header: threads and folder headers, in order. */
+  readonly rows: readonly SidebarGroupRow<T>[];
   readonly collapsed: boolean;
 }
 
@@ -278,6 +282,10 @@ export function arrangeSidebarActiveThreads<T extends SortableThread>(
      * block renders, so a pin is recognized by identity.
      */
     readonly pinnedThreads?: readonly T[] | null;
+    /** A thread's folder path. Folders only apply inside project groups, so ignored when not grouping. */
+    readonly folderOf?: (thread: T) => string | null | undefined;
+    /** Folder keys (see `sidebarFolderKey`) whose rows are folded away. */
+    readonly collapsedFolderKeys?: ReadonlySet<string>;
   },
 ): SidebarActiveArrangement<T> {
   const sorted = sortSidebarThreads(threads, options.sort, options.statusOf, options.openedAtOf);
@@ -311,17 +319,37 @@ export function arrangeSidebarActiveThreads<T extends SortableThread>(
     (pinRank.get(right) ?? Number.MAX_SAFE_INTEGER);
   // Groups follow the project sort. Ties keep the order the groups' first threads
   // sort in. Threads whose project is not loaded yet trail the named groups.
+  const { folderOf } = options;
+  const noCollapsedFolders: ReadonlySet<string> = new Set();
   const groups = sortSidebarProjectGroups([...byKey.values()], options).map(
-    (entry): SidebarActiveThreadGroup<T> => ({
-      key: entry.ref.key,
-      label: entry.ref.label,
+    (entry): SidebarActiveThreadGroup<T> => {
       // A stable sort, so unpinned rows keep the sort's order behind the pins.
-      threads: pinRank.size === 0 ? entry.threads : [...entry.threads].sort(pinOrder),
-      collapsed: options.collapsedGroupKeys.has(entry.ref.key),
-    }),
+      const threads = pinRank.size === 0 ? entry.threads : [...entry.threads].sort(pinOrder);
+      const layout =
+        folderOf === undefined
+          ? null
+          : layoutSidebarGroupFolders(threads, {
+              groupKey: entry.ref.key,
+              folderOf,
+              collapsedFolderKeys: options.collapsedFolderKeys ?? noCollapsedFolders,
+            });
+      return {
+        key: entry.ref.key,
+        label: entry.ref.label,
+        threads: layout?.ordered ?? threads,
+        rows:
+          layout?.rows ?? threads.map((thread) => ({ kind: "thread" as const, thread, depth: 0 })),
+        collapsed: options.collapsedGroupKeys.has(entry.ref.key),
+      };
+    },
   );
   return {
-    threads: groups.flatMap((group) => (group.collapsed ? [] : group.threads)),
+    // Rows folded into a collapsed folder or group are out of keyboard navigation too.
+    threads: groups.flatMap((group) =>
+      group.collapsed
+        ? []
+        : group.rows.flatMap((row) => (row.kind === "thread" ? [row.thread] : [])),
+    ),
     groups,
   };
 }

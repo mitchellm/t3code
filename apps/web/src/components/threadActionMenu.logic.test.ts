@@ -2,6 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildThreadActionMenuItems,
+  folderMenuId,
+  parseFolderMenuAction,
   type ThreadActionMenuState,
   withoutThreadActionMenuItem,
 } from "./threadActionMenu.logic";
@@ -24,7 +26,9 @@ const baseState: ThreadActionMenuState = {
     snooze: true,
     pinning: true,
     titleRegeneration: true,
+    folders: false,
   },
+  folder: { current: null, existing: [] },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
   ],
@@ -89,6 +93,53 @@ describe("buildThreadActionMenuItems", () => {
       ).toBe(true);
     },
   );
+
+  describe("Move to folder", () => {
+    const withFolders: ThreadActionMenuState = {
+      ...baseState,
+      supports: { ...baseState.supports, folders: true },
+      folder: { current: "Update 82", existing: ["Update 82", "Update 82/Prototypes"] },
+    };
+    const folderItem = (state: ThreadActionMenuState) =>
+      buildThreadActionMenuItems(state).find((item) => item.id === "folder");
+
+    it("is hidden on a server that cannot store folders", () => {
+      expect(ids(baseState)).not.toContain("folder");
+    });
+
+    it("lists no folder, the project's folders and new folder, checking the current one", () => {
+      const children = folderItem(withFolders)?.children ?? [];
+      expect(children.map((child) => [child.id, child.label, child.checked ?? false])).toEqual([
+        ["folder:none", "No folder", false],
+        ["folder:path:Update 82", "Update 82", true],
+        ["folder:path:Update 82/Prototypes", "Update 82/Prototypes", false],
+        ["folder:new", "New folder…", false],
+      ]);
+    });
+
+    it("checks no folder for an unfiled thread", () => {
+      const children =
+        folderItem({ ...withFolders, folder: { ...withFolders.folder, current: null } })
+          ?.children ?? [];
+      expect(children.find((child) => child.id === "folder:none")?.checked).toBe(true);
+    });
+
+    it("is disabled, children included, without permission", () => {
+      const item = folderItem({ ...withFolders, canOperate: false });
+      expect(item?.disabled).toBe(true);
+      expect(item?.children?.every((child) => child.disabled)).toBe(true);
+    });
+
+    it("round-trips a folder path through its menu id", () => {
+      expect(parseFolderMenuAction(folderMenuId("Update 82/Prototypes"))).toEqual({
+        kind: "path",
+        path: "Update 82/Prototypes",
+      });
+      expect(parseFolderMenuAction("folder:none")).toEqual({ kind: "none" });
+      expect(parseFolderMenuAction("folder:new")).toEqual({ kind: "new" });
+      expect(parseFolderMenuAction("pin")).toBeNull();
+    });
+  });
 
   it("disables archive and turning into a project while the thread is running", () => {
     const items = buildThreadActionMenuItems({
