@@ -155,11 +155,36 @@ export function causeErrorTag(cause: Cause.Cause<unknown>): string {
   return cause.reasons[0]?._tag ?? "Empty";
 }
 
+/**
+ * Successful spans faster than this are not written to a trace file. They were 82% of server
+ * trace bytes and cut the rotated history to 42 minutes; slow, failed and interrupted spans stay.
+ */
+export const TRACE_FILE_MIN_SUCCESS_SPAN_MS = 5;
+
+const FAILURE_LOG_LEVELS: ReadonlySet<unknown> = new Set(["Warn", "Error", "Fatal"]);
+
+const isFailureEvent = (event: TraceRecordEvent): boolean =>
+  event.name === "exception" ||
+  event.attributes["effect.cause"] !== undefined ||
+  FAILURE_LOG_LEVELS.has(event.attributes["effect.logLevel"]);
+
+/** Whether a record is a successful span that finished under `minSuccessSpanMs` and carries no failure signal. */
+export function isDroppableFastSuccessSpan(record: TraceRecord, minSuccessSpanMs: number): boolean {
+  if (record.durationMs >= minSuccessSpanMs) return false;
+  if (record.events.some(isFailureEvent)) return false;
+  if (record.type === "effect-span") return record.exit._tag === "Success";
+  // OTLP status codes: 0 unset, 1 ok, 2 error.
+  const code = record.status?.code;
+  return code === undefined || code === "0" || code === "1";
+}
+
 export interface TraceSinkOptions {
   readonly filePath: string;
   readonly maxBytes: number;
   readonly maxFiles: number;
   readonly batchWindowMs: number;
+  /** Skip successful spans under this many milliseconds. Defaults to keeping every span. */
+  readonly minSuccessSpanMs?: number;
   readonly onFlush?: (stats: TraceSinkFlushStats) => Effect.Effect<void>;
 }
 
@@ -527,6 +552,12 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     filePath: options.filePath,
     push(record) {
       try {
+        if (
+          options.minSuccessSpanMs !== undefined &&
+          isDroppableFastSuccessSpan(record, options.minSuccessSpanMs)
+        ) {
+          return;
+        }
         const text = `${redactUrlCredentials(JSON.stringify(record))}\n`;
         const bytes = Buffer.byteLength(text);
         if (bytes > options.maxBytes) return;

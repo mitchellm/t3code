@@ -44,6 +44,7 @@ export const layer = Layer.unwrap(
           maxBytes: config.traceMaxBytes,
           maxFiles: config.traceMaxFiles,
           batchWindowMs: config.traceBatchWindowMs,
+          minSuccessSpanMs: SharedObservability.TRACE_FILE_MIN_SUCCESS_SPAN_MS,
           onFlush: (stats) =>
             attribution.record({
               component: "server-trace",

@@ -21,6 +21,8 @@ import {
   compactTraceAttributes,
   decodeOtlpTraceRecords,
   errorTag,
+  isDroppableFastSuccessSpan,
+  TRACE_FILE_MIN_SUCCESS_SPAN_MS,
   makeLocalFileTracer,
   makeTraceSink,
   type EffectTraceRecord,
@@ -74,7 +76,7 @@ const TraceRecordLine = Schema.Struct({
 
 const decodeTraceRecordLine = Schema.decodeUnknownSync(Schema.fromJsonString(TraceRecordLine));
 
-const makeRecord = (name: string, suffix = ""): TraceRecord => ({
+const makeRecord = (name: string, suffix = ""): EffectTraceRecord => ({
   type: "effect-span",
   name,
   traceId: `trace-${name}-${suffix}`,
@@ -119,6 +121,56 @@ const layerTest = (tracePath: string) =>
   );
 
 const nodeServicesIt = it.layer(NodeServices.layer);
+
+describe("isDroppableFastSuccessSpan", () => {
+  const fast = (overrides: Partial<EffectTraceRecord>): EffectTraceRecord => ({
+    ...makeRecord("fast"),
+    ...overrides,
+  });
+  const min = TRACE_FILE_MIN_SUCCESS_SPAN_MS;
+
+  it("drops only successful spans under the threshold", () => {
+    expect(isDroppableFastSuccessSpan(fast({ durationMs: min - 0.1 }), min)).toBe(true);
+    expect(isDroppableFastSuccessSpan(fast({ durationMs: min }), min)).toBe(false);
+  });
+
+  it("keeps fast spans that failed, were interrupted, or logged a failure", () => {
+    const failure = { _tag: "Failure", cause: "boom" } as const;
+    const interrupted = { _tag: "Interrupted", cause: "interrupted" } as const;
+    expect(isDroppableFastSuccessSpan(fast({ exit: failure }), min)).toBe(false);
+    expect(isDroppableFastSuccessSpan(fast({ exit: interrupted }), min)).toBe(false);
+    const withEvent = (attributes: Record<string, unknown>, name = "log") =>
+      fast({ events: [{ name, timeUnixNano: "1", attributes }] });
+    expect(isDroppableFastSuccessSpan(withEvent({ "effect.logLevel": "Error" }), min)).toBe(false);
+    expect(isDroppableFastSuccessSpan(withEvent({ "effect.cause": "x" }), min)).toBe(false);
+    expect(isDroppableFastSuccessSpan(withEvent({}, "exception"), min)).toBe(false);
+    expect(isDroppableFastSuccessSpan(withEvent({ "effect.logLevel": "Info" }), min)).toBe(true);
+  });
+
+  it("applies the same rule to OTLP spans by status code", () => {
+    const otlp = (code: string | undefined): TraceRecord => ({
+      type: "otlp-span",
+      name: "renderer",
+      traceId: "t",
+      spanId: "s",
+      sampled: true,
+      kind: "internal",
+      startTimeUnixNano: "1",
+      endTimeUnixNano: "2",
+      durationMs: 1,
+      attributes: {},
+      events: [],
+      links: [],
+      resourceAttributes: {},
+      scope: { attributes: {} },
+      status: code === undefined ? undefined : { code },
+    });
+    expect(isDroppableFastSuccessSpan(otlp("0"), min)).toBe(true);
+    expect(isDroppableFastSuccessSpan(otlp("1"), min)).toBe(true);
+    expect(isDroppableFastSuccessSpan(otlp(undefined), min)).toBe(true);
+    expect(isDroppableFastSuccessSpan(otlp("2"), min)).toBe(false);
+  });
+});
 
 describe("truncateTraceAttributes", () => {
   it("clamps oversized strings at any depth without mutating the input", () => {
@@ -304,6 +356,33 @@ describe("observability", () => {
             assert.isTrue(yield* Ref.get(closed));
           }),
         ),
+    );
+
+    it.effect("skips fast successful spans when the sink has a threshold", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const tempDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-trace-min-" });
+          const tracePath = path.join(tempDir, "trace.ndjson");
+          const sink = yield* makeTraceSink({
+            filePath: tracePath,
+            maxBytes: 1_000_000,
+            maxFiles: 2,
+            batchWindowMs: 10_000,
+            minSuccessSpanMs: TRACE_FILE_MIN_SUCCESS_SPAN_MS,
+          });
+          sink.push(makeRecord("fast-ok"));
+          sink.push({ ...makeRecord("fast-failed"), exit: { _tag: "Failure", cause: "boom" } });
+          sink.push({ ...makeRecord("slow-ok"), durationMs: TRACE_FILE_MIN_SUCCESS_SPAN_MS });
+          yield* sink.close();
+          const records = yield* readTraceRecords(tracePath);
+          assert.deepStrictEqual(
+            records.map((entry) => entry.name),
+            ["fast-failed", "slow-ok"],
+          );
+        }),
+      ),
     );
 
     it.effect("keeps every trace file within the configured limit for threshold flushes", () =>
