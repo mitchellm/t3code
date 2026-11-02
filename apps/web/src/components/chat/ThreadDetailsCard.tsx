@@ -163,13 +163,21 @@ export function ThreadDetailsCard({
       )}
     </div>
   );
-  // The details card shrinks before the ledger does, so a long plan keeps its room.
+  // The aside has only a max height, so the stack carries its own cap; without it the cards
+  // grow to their content and run off the window instead of scrolling.
   const stack =
     secondary == null ? (
       card
     ) : (
-      <div className="flex max-h-full min-h-0 flex-col items-end gap-2 *:min-h-0">
-        <div className="w-full shrink">{card}</div>
+      <div
+        className={cn(
+          "flex min-h-0 flex-col items-end gap-2",
+          mode === "popover" &&
+            "max-h-[min(calc(100dvh-6.5rem),calc(var(--available-height,100dvh)-1rem))]",
+        )}
+        style={placement ? { maxHeight: height } : undefined}
+      >
+        <div className="flex min-h-0 w-full shrink flex-col *:min-h-0">{card}</div>
         {secondary}
       </div>
     );
