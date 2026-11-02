@@ -434,13 +434,9 @@ it.effect("does nothing once the ledger is closed", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const threadId = yield* setup("closed-ledger");
+    // Dropping the last item closes the ledger itself.
     for (const name of ["a", "b"]) yield* updateItem(threadId, name, "dropped");
-    yield* orchestrator.dispatch({
-      type: "ledger.close",
-      commandId: CommandId.make(nextId("close")),
-      threadId,
-      ledgerId,
-    });
+    assert.isNotNull((yield* orchestrator.getThreadProjection(threadId)).ledger?.closedAt);
     yield* sendUserMessage(threadId);
     yield* completeLatest(threadId);
     assert.equal((yield* autoContinues(threadId)).length, 0);

@@ -188,6 +188,33 @@ describe("investigation state machine", () => {
     assert.deepStrictEqual(investigationEffects({ commandId, threadId }, planned), []);
   });
 
+  it("leaves closing a running investigation's ledger to the investigation", () => {
+    let ledger = running();
+    for (const name of ["a", "b", "c", "approaches"]) {
+      const result = step(
+        ledger,
+        {
+          type: "ledger.item.update",
+          commandId,
+          threadId,
+          ledgerId,
+          itemId: id(name),
+          status: "dropped",
+          dropReason: "stopped by hand",
+        },
+        at(3),
+      );
+      assert.notInclude(
+        result.planned.map(({ type }) => type),
+        "ledger.closed",
+      );
+      ledger = result.ledger;
+    }
+    // Every item is finished, yet only the investigation's own end closes its ledger.
+    assert.isTrue(ledger.items.every((item) => item.status === "dropped"));
+    assert.strictEqual(ledger.closedAt, null);
+  });
+
   it("the first PASS solves it, drops the other approaches and stops every child", () => {
     const { ledger, planned } = step(running(), recordVerdict(running(), "a", "pass"), at(4));
     assert.strictEqual(ledger.investigation?.status, "solved");
