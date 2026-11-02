@@ -7,6 +7,7 @@ import {
   ThreadId,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
 import {
@@ -53,6 +54,85 @@ it.effect("reads a watched pull request as a wait, but not an unwatched or dismi
         pullRequest(3, { source: "stack-dismissed" }),
       ])).pullRequestWatched,
     ).toBe(false);
+  }),
+);
+
+const at = (minutes: number) => DateTime.makeUnsafe(Date.UTC(2026, 9, 26, 0, minutes));
+
+// A thread whose only ledger finished at minute 10, with the given messages and a stopped run.
+const finishedLedgerState = (messages: ReadonlyArray<Record<string, unknown>>) => {
+  const reads: Array<ReadonlyArray<string>> = [];
+  const state = makeHarnessThreadReads(
+    {
+      getThreadRecords: (_threadId: unknown, fields: ReadonlyArray<string>) => {
+        reads.push(fields);
+        if (fields.includes("messages")) return Effect.succeed({ messages });
+        return Effect.succeed({
+          thread: { pullRequests: [] },
+          ledger: {
+            title: "Done",
+            closedAt: at(10),
+            updatedAt: at(10),
+            investigation: undefined,
+            items: [{ status: "closed", closedAt: at(10), updatedAt: at(10) }],
+          },
+          subagents: [],
+          runs: [{ id: "run-1", status: "completed", completedAt: at(12) }],
+          turnItems: [],
+        });
+      },
+    } as unknown as Parameters<typeof makeHarnessThreadReads>[0],
+    ThreadId.make("thread"),
+    "Stopped by the user",
+  ).readLedgerState();
+  return { state, reads };
+};
+
+const typed = (minutes: number, extra: Record<string, unknown> = {}) => ({
+  createdBy: "user",
+  creationSource: "web",
+  createdAt: at(minutes),
+  ...extra,
+});
+
+it.effect("reads when a person last typed once the ledger has no open item", () =>
+  Effect.gen(function* () {
+    const wrote = finishedLedgerState([typed(5), typed(11), typed(8)]);
+    expect(DateTime.toEpochMillis((yield* wrote.state).latestUserMessageAt!)).toBe(
+      DateTime.toEpochMillis(at(11)),
+    );
+    // A scheduled run's copy of the user's message is not a person typing.
+    const scheduled = finishedLedgerState([typed(11, { scheduledTaskId: "task" })]);
+    expect((yield* scheduled.state).latestUserMessageAt).toBeNull();
+  }),
+);
+
+it.effect("skips the message read while the ledger has an open item", () =>
+  Effect.gen(function* () {
+    const reads: Array<ReadonlyArray<string>> = [];
+    const open = yield* makeHarnessThreadReads(
+      {
+        getThreadRecords: (_threadId: unknown, fields: ReadonlyArray<string>) => {
+          reads.push(fields);
+          return Effect.succeed({
+            thread: { pullRequests: [] },
+            ledger: {
+              title: "Doing",
+              closedAt: null,
+              updatedAt: at(1),
+              items: [{ status: "in_progress", closedAt: null, updatedAt: at(1) }],
+            },
+            subagents: [],
+            runs: [],
+            turnItems: [],
+          });
+        },
+      } as unknown as Parameters<typeof makeHarnessThreadReads>[0],
+      ThreadId.make("thread"),
+      "Stopped by the user",
+    ).readLedgerState();
+    expect(open.latestUserMessageAt).toBeUndefined();
+    expect(reads).toHaveLength(1);
   }),
 );
 

@@ -41,6 +41,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
@@ -514,6 +515,12 @@ export interface ProviderAdapterV2HarnessLedgerState {
   readonly delegatedWorkActive: boolean;
   /** A watched pull request will wake the thread, so the agent may be waiting on it. */
   readonly pullRequestWatched: boolean;
+  /**
+   * When a person last typed on the thread, read only while the ledger has no open item (the one
+   * time a hook asks whether a finished ledger still covers the user's request). Null: nobody
+   * since the ledger finished, or no ledger; absent: not read.
+   */
+  readonly latestUserMessageAt?: DateTime.Utc | null;
 }
 
 export interface ProviderAdapterV2SteerInput {

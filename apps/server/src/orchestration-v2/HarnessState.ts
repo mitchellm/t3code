@@ -4,6 +4,7 @@
  */
 import {
   isOrchestrationV2WorkActive,
+  type Ledger,
   type LoadoutSetBy,
   type OrchestrationV2Run,
   type ProjectId,
@@ -19,7 +20,13 @@ import { loadoutStructure, resolveLoadout } from "@t3tools/shared/loadouts";
 import { isWatchedPullRequest } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Effect from "effect/Effect";
 
+import { ledgerFinishedAt } from "./Adapters/HarnessHooks.ts";
+import { latestPersonMessageAt } from "./Investigation.ts";
 import type * as ProjectionStore from "./ProjectionStore.ts";
+
+const hasOpenItem = (ledger: Ledger) =>
+  ledger.closedAt === null &&
+  ledger.items.some((item) => item.status === "open" || item.status === "in_progress");
 
 const LIVE_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
   "starting",
@@ -59,11 +66,11 @@ export function makeHarnessThreadReads(
           turnItemTypes: ["run_interrupt_request"],
         })
         .pipe(
-          Effect.map(({ thread, ledger, subagents, runs, turnItems }) => {
+          Effect.flatMap(({ thread, ledger, subagents, runs, turnItems }) => {
             const liveRunIds = new Set(
               runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).map(({ id }) => id),
             );
-            return {
+            const state: ProviderAdapterV2HarnessLedgerState = {
               ledger: ledger ?? null,
               userInterrupted: turnItems.some(
                 (item) =>
@@ -77,6 +84,23 @@ export function makeHarnessThreadReads(
               ),
               pullRequestWatched: (thread.pullRequests ?? []).some(isWatchedPullRequest),
             };
+            // Only a ledger with no open item asks whether the user has written since it finished
+            // (the plan before editing gate), so the open-ledger path stays one read.
+            if (ledger == null || hasOpenItem(ledger)) return Effect.succeed(state);
+            return latestPersonMessageAt(
+              {
+                runs: () => Effect.succeed(runs),
+                userMessages: (id, runIds) =>
+                  projectionStore
+                    .getThreadRecords(id, ["messages"], {
+                      messageRoles: ["user"],
+                      messageRunIds: runIds,
+                    })
+                    .pipe(Effect.map(({ messages }) => messages)),
+              },
+              threadId,
+              ledgerFinishedAt(ledger),
+            ).pipe(Effect.map((latestUserMessageAt) => ({ ...state, latestUserMessageAt })));
           }),
         ),
     readThreadLoadout: () =>
