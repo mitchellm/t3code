@@ -262,7 +262,7 @@ it.effect("unlinks on startup and refuses to link when the policy turns Connect 
         remove: (name) => Effect.sync(() => void stored.delete(name)),
       }),
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
-      Layer.mock(AgentAwarenessRelay.AgentAwarenessRelay)({}),
+      Layer.mock(AgentAwarenessRelay.AgentAwarenessRelay)({ requestCatchUp: () => Effect.void }),
       Layer.mock(ManagedEndpointRuntime.CloudManagedEndpointRuntime)({
         withLinkStateLock: (effect) => effect,
         applyConfig: (config) =>
