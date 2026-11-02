@@ -35,16 +35,20 @@ export const ledgerLinksTasks = (ledger: Ledger) =>
 
 /**
  * The compact ledger view every ledger tool result carries. Items come in tree order with a
- * depth rather than nested, so a ledger of thousands stays one flat, scannable list.
+ * depth rather than nested, so a ledger of thousands stays one flat, scannable list. `onlyItemIds`
+ * keeps just those items (still with their tree depth and ledger-wide blockers) for a write's
+ * result, so one update does not echo the whole ledger back into the agent's context.
  */
 export function snapshotLedger(
   ledger: Ledger,
   taskRecords: ReadonlyArray<LedgerTaskStatusRecord> = [],
+  onlyItemIds?: ReadonlyArray<string>,
 ): LedgerMcpSnapshot {
   const counts = { open: 0, in_progress: 0, closed: 0, dropped: 0, deferred: 0 };
   for (const item of ledger.items) counts[item.status] += 1;
   const released = releasedLedgerItemIds(ledger);
   const statusOf = new Map(taskRecords.map(({ id, status }) => [id as string, status]));
+  const shown = onlyItemIds === undefined ? undefined : new Set<string>(onlyItemIds);
   return {
     ledgerId: ledger.id,
     title: ledger.title,
@@ -55,25 +59,28 @@ export function snapshotLedger(
     counts,
     unfinished: counts.open + counts.in_progress,
     checkpoints: ledger.checkpoints.map(({ id, title, reached }) => ({ id, title, reached })),
-    items: orderLedgerTree(ledger.items).map(({ item, depth }) => ({
-      id: item.id,
-      title: item.title,
-      acceptance: item.acceptance,
-      status: item.status,
-      depth,
-      parentItemId: item.parentItemId ?? null,
-      blockedBy: item.blockedBy ?? [],
-      waitingOn: unreleasedBlockers(item, released),
-      evidence: item.evidence,
-      dropReason: item.dropReason,
-      deferReason: item.deferReason ?? null,
-      judging: item.judging === true,
-      ...(item.setAside === undefined ? {} : { setAside: item.setAside }),
-      verdict: item.verdict?.outcome ?? null,
-      verdictNotes: item.verdict?.notes ?? null,
-      judgeError: item.judgeError ?? null,
-      judgements: item.judgements ?? 0,
-      ...snapshotTasks(item, statusOf),
-    })),
+    ...(shown === undefined ? {} : { changedOnly: true as const }),
+    items: orderLedgerTree(ledger.items)
+      .filter(({ item }) => shown === undefined || shown.has(item.id))
+      .map(({ item, depth }) => ({
+        id: item.id,
+        title: item.title,
+        acceptance: item.acceptance,
+        status: item.status,
+        depth,
+        parentItemId: item.parentItemId ?? null,
+        blockedBy: item.blockedBy ?? [],
+        waitingOn: unreleasedBlockers(item, released),
+        evidence: item.evidence,
+        dropReason: item.dropReason,
+        deferReason: item.deferReason ?? null,
+        judging: item.judging === true,
+        ...(item.setAside === undefined ? {} : { setAside: item.setAside }),
+        verdict: item.verdict?.outcome ?? null,
+        verdictNotes: item.verdict?.notes ?? null,
+        judgeError: item.judgeError ?? null,
+        judgements: item.judgements ?? 0,
+        ...snapshotTasks(item, statusOf),
+      })),
   };
 }

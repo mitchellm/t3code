@@ -8,6 +8,7 @@ import {
   LedgerItemId,
   MessageId,
   NodeId,
+  type LedgerMcpSnapshot,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2Run,
   ProviderInstanceId,
@@ -395,6 +396,93 @@ it.effect("maps orchestrator rejections to clear tool errors and applies valid t
       expect((yield* call("ledger_reopen", {})).structuredContent).toMatchObject({
         ledger: { closed: false },
       });
+    }),
+  );
+});
+
+it.effect("returns only the changed items with the whole ledger's counts from a write", () => {
+  const fake = makeFakeThreads();
+  const ten = Array.from({ length: 10 }, (_, index) => ({
+    id: `L${index + 1}`,
+    title: `Item ${index + 1}`,
+    acceptance: `Item ${index + 1} works`,
+  }));
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      yield* call("ledger_create", { title: "Ship", items: ten });
+      const updated = yield* call("ledger_update_item", {
+        itemId: "L4",
+        status: "closed",
+        evidence: "parser.test.ts: 12 passed",
+      });
+      expect(failureOf(updated)).toBeUndefined();
+      const delta = (updated.structuredContent as { ledger: LedgerMcpSnapshot }).ledger;
+      expect(delta.items.map(({ id }) => id)).toEqual(["L4"]);
+      expect(delta).toMatchObject({
+        changedOnly: true,
+        closed: false,
+        requiresJudge: false,
+        counts: { open: 9, closed: 1 },
+        unfinished: 9,
+        items: [
+          {
+            id: "L4",
+            status: "closed",
+            evidence: "parser.test.ts: 12 passed",
+            waitingOn: [],
+            judging: false,
+            verdict: null,
+            verdictNotes: null,
+          },
+        ],
+      });
+
+      const added = yield* call("ledger_add_items", {
+        items: [
+          { id: "L11", title: "Docs", acceptance: "README updated", parentItemId: "L1" },
+          { id: "L12", title: "Later", acceptance: "", deferReason: "Out of scope" },
+        ],
+      });
+      const addedDelta = (added.structuredContent as { ledger: LedgerMcpSnapshot }).ledger;
+      expect(addedDelta.items.map(({ id, depth, status }) => [id, depth, status])).toEqual([
+        ["L11", 1, "open"],
+        ["L12", 0, "deferred"],
+      ]);
+      expect(addedDelta).toMatchObject({
+        changedOnly: true,
+        counts: { open: 10, closed: 1, deferred: 1 },
+        unfinished: 10,
+      });
+
+      // ledger_read still lists every item, and says nothing about being partial.
+      const read = (yield* call("ledger_read", {})).structuredContent as {
+        ledger: LedgerMcpSnapshot;
+      };
+      expect(read.ledger.items).toHaveLength(12);
+      expect(read.ledger.changedOnly).toBeUndefined();
+    }),
+  );
+});
+
+it.effect("shows the judge state of the item a write changed", () => {
+  const fake = makeFakeThreads();
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      yield* call("ledger_create", { title: "Ship", items: twoItems });
+      fake.ledgers.set(ownThread, { ...fake.ledgers.get(ownThread)!, requiresJudge: true });
+      const closing = yield* call("ledger_update_item", {
+        itemId: "L1",
+        status: "closed",
+        evidence: "parser.test.ts: 12 passed",
+      });
+      const delta = (closing.structuredContent as { ledger: LedgerMcpSnapshot }).ledger;
+      expect(delta).toMatchObject({
+        changedOnly: true,
+        requiresJudge: true,
+        counts: { open: 1, in_progress: 1 },
+        items: [{ id: "L1", status: "in_progress", judging: true, verdict: null }],
+      });
+      expect(delta.items).toHaveLength(1);
     }),
   );
 });

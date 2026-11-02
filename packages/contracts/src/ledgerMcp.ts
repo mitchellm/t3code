@@ -147,6 +147,12 @@ export const LedgerMcpSnapshot = Schema.Struct({
   checkpoints: Schema.Array(
     Schema.Struct({ id: Schema.String, title: Schema.String, reached: Schema.Boolean }),
   ),
+  changedOnly: Schema.optionalKey(
+    Schema.Literal(true).annotate({
+      description:
+        "Present on ledger_update_item and ledger_add_items results: items lists only the items this call changed, while the counts, unfinished and closed describe the whole ledger. ledger_read shows every item.",
+    }),
+  ),
   items: Schema.Array(
     Schema.Struct({
       id: Schema.String,
