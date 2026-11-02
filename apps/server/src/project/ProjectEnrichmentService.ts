@@ -22,6 +22,9 @@ const DEFAULT_SUCCESS_TTL = Duration.minutes(1);
 // Frequent shell reads scan ~20 files per project; icons change rarely, so cache longer than identities.
 const DEFAULT_FAVICON_TTL = Duration.minutes(15);
 const DEFAULT_FAILURE_TTL = Duration.seconds(5);
+// A deleted project folder stays missing; re-probing it on every shell read cost two failing
+// lookups a minute. Project updates and clones call `invalidate`, which drops this entry.
+const DEFAULT_MISSING_WORKSPACE_TTL = Duration.minutes(10);
 
 export interface ProjectEnrichment {
   readonly repositoryIdentity: RepositoryIdentity | null;
@@ -107,7 +110,15 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
       capacity: cacheCapacity,
       timeToLive: Exit.match({
         onFailure: () => DEFAULT_FAILURE_TTL,
-        onSuccess: (result) => (Exit.isSuccess(result) ? DEFAULT_FAVICON_TTL : DEFAULT_FAILURE_TTL),
+        onSuccess: (result) =>
+          Exit.isSuccess(result)
+            ? DEFAULT_FAVICON_TTL
+            : Option.exists(
+                  Exit.findErrorOption(result),
+                  ProjectFaviconResolver.isMissingWorkspaceRoot,
+                )
+              ? DEFAULT_MISSING_WORKSPACE_TTL
+              : DEFAULT_FAILURE_TTL,
       }),
     },
   );

@@ -4,8 +4,11 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as TestClock from "effect/testing/TestClock";
 
+import { WorkspaceRootNotExistsError } from "../workspace/WorkspacePaths.ts";
 import * as ProjectEnrichment from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
@@ -256,4 +259,51 @@ it.effect("deduplicates requests, bounds pending work, and reloads invalidated r
       ),
     );
   }),
+);
+
+it.effect(
+  "backs off from a deleted project folder until it is invalidated or ten minutes pass",
+  () =>
+    Effect.gen(function* () {
+      const probes = yield* Queue.unbounded<string>();
+      const missing = new ProjectFaviconResolver.ProjectFaviconResolutionError({
+        operation: "normalize-workspace",
+        workspaceRoot: "/gone",
+        cause: new WorkspaceRootNotExistsError({
+          workspaceRoot: "/gone",
+          normalizedWorkspaceRoot: "/gone",
+        }),
+      });
+      const layerMetadata = Layer.merge(
+        Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+          resolve: () => Effect.succeed(null),
+        }),
+        Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+          invalidate: () => Effect.void,
+          resolvePath: (workspaceRoot) =>
+            Queue.offer(probes, workspaceRoot).pipe(Effect.andThen(Effect.fail(missing))),
+        }),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+        yield* service.request("/gone");
+        yield* Queue.take(probes);
+
+        // Shell reads call request on every pass; a minute of them must not probe again.
+        yield* TestClock.adjust("1 minute");
+        yield* service.request("/gone");
+        yield* TestClock.adjust("8 minutes");
+        yield* service.request("/gone");
+        assert.equal(yield* Queue.size(probes), 0);
+
+        yield* TestClock.adjust("2 minutes");
+        yield* service.request("/gone");
+        yield* Queue.take(probes);
+
+        yield* service.invalidate(["/gone"]);
+        yield* service.request("/gone");
+        yield* Queue.take(probes);
+      }).pipe(Effect.provide(layer(layerMetadata)));
+    }),
 );
