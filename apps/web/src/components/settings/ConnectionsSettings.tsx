@@ -25,6 +25,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 
+import { notifyDesktopTopologyChanged } from "../../connection/desktopLocal";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import {
   applyWslEnableSelection,
@@ -670,6 +671,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
       await apply();
       refreshDesktopWslState();
     });
+    notifyDesktopTopologyChanged();
     if (settled._tag === "Failure") {
       const error = Cause.squash(settled.cause);
       const message = error instanceof Error ? error.message : "Failed to update WSL backend.";
