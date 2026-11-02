@@ -1092,4 +1092,136 @@ describe("VcsStatusBroadcaster", () => {
       assert.isTrue(Option.isSome(yield* Deferred.poll(remoteInterrupted)));
     }).pipe(Effect.provide(layerTest));
   });
+
+  describe("staleWhileRevalidate refresh", () => {
+    const freshState = (): Parameters<typeof layerTestFor>[0] => ({
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+      fileSystem: FileSystem.makeNoop({ realPath: (cwd) => Effect.succeed(cwd) }),
+    });
+    const staleWhileRevalidate = { staleWhileRevalidate: true } as const;
+
+    it.effect("concurrent callers for one checkout share a single git run", () => {
+      const state = freshState();
+      return Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        state.beforeRemoteStatus = Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        );
+        const callers = yield* Effect.all(
+          [
+            broadcaster.refreshStatus("/repo", staleWhileRevalidate),
+            broadcaster.refreshStatus("/repo", staleWhileRevalidate),
+          ],
+          { concurrency: "unbounded" },
+        ).pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(started);
+        yield* Deferred.succeed(release, undefined);
+
+        const [first, second] = yield* Fiber.join(callers);
+        assert.deepStrictEqual(first, second);
+        assert.strictEqual(state.remoteStatusCalls, 1);
+      }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+    });
+
+    it.effect("the first call with nothing cached waits for the read", () => {
+      const state = freshState();
+      return Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        state.beforeLocalStatus = Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        );
+        const caller = yield* broadcaster
+          .refreshStatus("/repo", staleWhileRevalidate)
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(started);
+        assert.isUndefined(caller.pollUnsafe());
+
+        yield* Deferred.succeed(release, undefined);
+        assert.strictEqual((yield* Fiber.join(caller)).refName, baseLocalStatus.refName);
+      }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+    });
+
+    it.effect("a cached call returns at once and the refresh still lands on the stream", () => {
+      const state = freshState();
+      return Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        yield* broadcaster.getStatus({ cwd: "/repo" });
+
+        const subscribed = yield* Deferred.make<void>();
+        const events = yield* broadcaster.streamStatus({ cwd: "/repo", includeRemote: false }).pipe(
+          Stream.tap((event) =>
+            event._tag === "snapshot" ? Deferred.succeed(subscribed, undefined) : Effect.void,
+          ),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(subscribed);
+
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        state.currentLocalStatus = { ...baseLocalStatus, hasWorkingTreeChanges: true };
+        state.beforeLocalStatus = Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        );
+
+        // The git read stays blocked until `release`, so this returning proves it did not wait.
+        const immediate = yield* broadcaster.refreshStatus("/repo", staleWhileRevalidate);
+        assert.isFalse(immediate.hasWorkingTreeChanges);
+        yield* Deferred.await(started);
+
+        yield* Deferred.succeed(release, undefined);
+        const published = yield* Fiber.join(events);
+        assert.deepStrictEqual(published[1], {
+          _tag: "localUpdated",
+          local: state.currentLocalStatus,
+        });
+        assert.isTrue((yield* broadcaster.getStatus({ cwd: "/repo" })).hasWorkingTreeChanges);
+      }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+    });
+
+    it.effect("a caller that stops waiting does not cancel the shared read", () => {
+      const state = freshState();
+      return Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        state.beforeRemoteStatus = Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        );
+        const subscribed = yield* Deferred.make<void>();
+        const remoteLanded = yield* broadcaster
+          .streamStatus({ cwd: "/repo", includeRemote: false })
+          .pipe(
+            Stream.tap((event) =>
+              event._tag === "snapshot" ? Deferred.succeed(subscribed, undefined) : Effect.void,
+            ),
+            Stream.filter((event) => event._tag === "remoteUpdated"),
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+        yield* Deferred.await(subscribed);
+        const abandoned = yield* broadcaster
+          .refreshStatus("/repo", staleWhileRevalidate)
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(started);
+        yield* Fiber.interrupt(abandoned);
+
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(remoteLanded);
+        assert.strictEqual(state.remoteStatusCalls, 1);
+        assert.deepStrictEqual((yield* broadcaster.getStatus({ cwd: "/repo" })).hasUpstream, true);
+      }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+    });
+  });
 });

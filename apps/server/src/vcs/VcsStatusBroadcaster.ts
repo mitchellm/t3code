@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -211,9 +212,15 @@ export class VcsStatusBroadcaster extends Context.Service<
     readonly refreshLocalStatus: (
       cwd: string,
     ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
+    /**
+     * `staleWhileRevalidate` is for display refreshes whose caller ignores the result: concurrent
+     * callers share one git run, and a cached status is returned at once while the run continues
+     * and publishes its changes on the stream. The first call with nothing cached still waits.
+     * Callers that need the state after a change they just made must not set it.
+     */
     readonly refreshStatus: (
       cwd: string,
-      options?: { readonly localOnly?: boolean },
+      options?: { readonly localOnly?: boolean; readonly staleWhileRevalidate?: boolean },
     ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
     readonly refreshPullRequestStatus: (
       cwd: string,
@@ -490,9 +497,10 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const refreshStatus: VcsStatusBroadcaster["Service"]["refreshStatus"] = Effect.fn(
-    "VcsStatusBroadcaster.refreshStatus",
-  )(function* (rawCwd, options) {
+  const refreshStatusNow = Effect.fn("VcsStatusBroadcaster.refreshStatusNow")(function* (
+    rawCwd: string,
+    options: { readonly localOnly?: boolean } | undefined,
+  ) {
     const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
     const previous = options?.localOnly ? yield* getCachedStatus(cwd) : null;
     const local = yield* refreshLocalStatusCore(cwd);
@@ -530,6 +538,49 @@ export const make = Effect.gen(function* () {
         return mergeGitStatusParts(parts.local, parts.remote);
       }),
     );
+  });
+
+  // One run per checkout and mode. It lives in the broadcaster scope, so a caller that stops
+  // waiting (the UI navigated away) does not discard a refresh that takes tens of seconds.
+  const statusFlights = new Map<
+    string,
+    Deferred.Deferred<VcsStatusResult, GitManagerServiceError>
+  >();
+  const refreshStatusShared = Effect.fn("VcsStatusBroadcaster.refreshStatusShared")(function* (
+    rawCwd: string,
+    options: { readonly localOnly?: boolean } | undefined,
+  ) {
+    const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
+    const flightKey = `${options?.localOnly ? "local" : "full"}\0${cwd}`;
+    let flight = statusFlights.get(flightKey);
+    if (flight === undefined) {
+      const started = yield* Deferred.make<VcsStatusResult, GitManagerServiceError>();
+      statusFlights.set(flightKey, started);
+      flight = started;
+      yield* refreshStatusNow(rawCwd, options).pipe(
+        // Leave the map before completing, so a caller after this run starts a fresh one.
+        Effect.onExit((exit) =>
+          Effect.sync(() => statusFlights.delete(flightKey)).pipe(
+            Effect.andThen(Deferred.done(started, exit)),
+          ),
+        ),
+        // Waiters see the failure through the Deferred; with a cached answer nobody does.
+        Effect.ignoreCause({ log: true }),
+        Effect.forkIn(broadcasterScope, { startImmediately: false }),
+      );
+    }
+    const cached = yield* getCachedStatus(cwd);
+    // Every change the run finds is published on the status stream, which is what the UI renders.
+    if (cached?.local) return mergeGitStatusParts(cached.local.value, cached.remote?.value ?? null);
+    return yield* Deferred.await(flight);
+  });
+
+  const refreshStatus: VcsStatusBroadcaster["Service"]["refreshStatus"] = Effect.fn(
+    "VcsStatusBroadcaster.refreshStatus",
+  )(function* (rawCwd, options) {
+    return yield* options?.staleWhileRevalidate
+      ? refreshStatusShared(rawCwd, options)
+      : refreshStatusNow(rawCwd, options);
   });
 
   const refreshPullRequestStatus: VcsStatusBroadcaster["Service"]["refreshPullRequestStatus"] =
