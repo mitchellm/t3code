@@ -7,6 +7,13 @@ import {
 
 const DESKTOP_LOCAL_CONNECTION_ID_PREFIX = "local:";
 
+/** The bridge has no topology event, so the renderer announces its own topology changes (WSL settings). */
+export const DESKTOP_TOPOLOGY_CHANGED_EVENT = "t3:desktop-topology-changed";
+
+export function notifyDesktopTopologyChanged(): void {
+  window.dispatchEvent(new Event(DESKTOP_TOPOLOGY_CHANGED_EVENT));
+}
+
 export function desktopLocalConnectionId(backendId: string): string {
   return `${DESKTOP_LOCAL_CONNECTION_ID_PREFIX}${backendId}`;
 }

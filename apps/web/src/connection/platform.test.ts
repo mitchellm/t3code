@@ -22,6 +22,7 @@ import {
   layer,
   isRejectedBootstrapCredentialError,
   isRejectedSecondaryBootstrap,
+  nextPlatformTopologyReadAtEpochMs,
   nextRejectedSecondaryBootstrap,
   primaryRegistrationToRetainAfterTopologyRead,
   prepareDesktopSshEnvironment,
@@ -430,6 +431,29 @@ describe("desktop-local bearer cache across token changes", () => {
       canRetainCachedPlatformRegistrationAfterRefreshFailure(cached, "http://a|ws://a", 16_000),
     ).toBe(true);
     expect(canReuseCachedPlatformRegistration(cached, "http://b|ws://b", 10_000)).toBe(false);
+  });
+});
+
+describe("platform topology read schedule", () => {
+  const base = { nowEpochMs: 1_000_000, refreshAtEpochMs: [], retryAtEpochMs: [] };
+
+  it("reads a settled topology every 30 s", () => {
+    expect(nextPlatformTopologyReadAtEpochMs({ ...base, settled: true })).toBe(1_030_000);
+  });
+
+  it("reads an unsettled topology on the next tick", () => {
+    expect(nextPlatformTopologyReadAtEpochMs({ ...base, settled: false })).toBe(1_000_000);
+  });
+
+  it("reads earlier when a bearer refresh or a rejected-bootstrap retry comes due", () => {
+    expect(
+      nextPlatformTopologyReadAtEpochMs({
+        ...base,
+        settled: true,
+        refreshAtEpochMs: [1_020_000, 1_040_000],
+        retryAtEpochMs: [1_010_000],
+      }),
+    ).toBe(1_010_000);
   });
 });
 

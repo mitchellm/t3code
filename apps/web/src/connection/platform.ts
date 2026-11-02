@@ -56,6 +56,7 @@ import { randomUUID } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { acknowledgeRpcRequest, trackRpcRequestSent } from "../rpc/requestLatencyState";
 import {
+  DESKTOP_TOPOLOGY_CHANGED_EVENT,
   desktopLocalConnectionId,
   readDesktopSecondaryBootstrapsResult,
   type DesktopSecondaryBootstrapsRead,
@@ -488,9 +489,46 @@ const loadSecondaryConnectionRegistration = Effect.fn(
   };
 });
 
-// The bridge has no topology event. Cache registrations until bearer credentials near expiry.
-const PLATFORM_POLL_INTERVAL = "3 seconds";
+// The bridge has no topology event, and every read is three synchronous IPC round trips
+// (93% of the desktop trace at one read per 3 s). The tick below only decides whether a read is
+// due; a settled topology is read every 30 s and otherwise on wakeups or when a bearer or a
+// rejected-bootstrap retry comes due. An unsettled one (backend still starting) keeps the 3 s pace.
+const PLATFORM_TICK_INTERVAL = "3 seconds";
+const PLATFORM_SETTLED_READ_INTERVAL_MS = 30_000;
 const SECONDARY_BEARER_REFRESH_SKEW_MS = 5_000;
+
+export function nextPlatformTopologyReadAtEpochMs(input: {
+  readonly nowEpochMs: number;
+  readonly settled: boolean;
+  readonly refreshAtEpochMs: ReadonlyArray<number>;
+  readonly retryAtEpochMs: ReadonlyArray<number>;
+}): number {
+  if (!input.settled) return input.nowEpochMs;
+  return Math.min(
+    input.nowEpochMs + PLATFORM_SETTLED_READ_INTERVAL_MS,
+    ...input.refreshAtEpochMs,
+    ...input.retryAtEpochMs,
+  );
+}
+
+const platformTopologyWakes = Stream.callback<"wake">((queue) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      const wake = () => Queue.offerUnsafe(queue, "wake");
+      const onVisibility = () => {
+        if (document.visibilityState === "visible") wake();
+      };
+      document.addEventListener("visibilitychange", onVisibility);
+      window.addEventListener(DESKTOP_TOPOLOGY_CHANGED_EVENT, wake);
+      return { wake, onVisibility };
+    }),
+    ({ wake, onVisibility }) =>
+      Effect.sync(() => {
+        document.removeEventListener("visibilitychange", onVisibility);
+        window.removeEventListener(DESKTOP_TOPOLOGY_CHANGED_EVENT, wake);
+      }),
+  ).pipe(Effect.asVoid),
+);
 
 function secondaryBearerExpiresAtEpochMs(
   issuedAtEpochMs: number,
@@ -631,12 +669,21 @@ const layerPlatformConnectionSource = Layer.effect(
     }
     const cacheRef = yield* Ref.make(new Map<string, CachedPlatformRegistration>());
     const rejectedRef = yield* Ref.make(new Map<string, RejectedSecondaryBootstrap>());
+    const scheduleRef = yield* Ref.make<
+      | {
+          readonly nextReadAtEpochMs: number;
+          readonly registrations: ReadonlyArray<PlatformConnectionRegistration>;
+        }
+      | undefined
+    >(undefined);
 
     const buildPlatformRegistrations = Effect.gen(function* () {
       const previous = yield* Ref.get(cacheRef);
       const nowEpochMs = yield* Clock.currentTimeMillis;
       const next = new Map<string, CachedPlatformRegistration>();
       const registrations: Array<PlatformConnectionRegistration> = [];
+      let settled = true;
+      let rejectedRetryAtEpochMs: ReadonlyArray<number> = [];
 
       const primaryTopologyRead = readPrimaryEnvironmentTargetResult();
       const retainedPrimary = primaryRegistrationToRetainAfterTopologyRead(
@@ -649,10 +696,14 @@ const layerPlatformConnectionSource = Layer.effect(
       }
 
       if (primaryTopologyRead._tag === "Failure") {
+        settled = false;
         yield* Effect.logWarning("Could not read the primary environment topology.", {
           cause: primaryTopologyRead.cause,
         });
-      } else if (primaryTopologyRead.target !== null) {
+      } else if (primaryTopologyRead.target === null) {
+        // On desktop a missing primary means its backend has not published a config yet.
+        if (window.desktopBridge !== undefined) settled = false;
+      } else {
         const primaryTarget = primaryTopologyRead.target;
         const signature = `primary|${primaryTarget.target.httpBaseUrl}|${primaryTarget.target.wsBaseUrl}`;
         const cached = previous.get(PRIMARY_LOCAL_ENVIRONMENT_ID);
@@ -673,6 +724,8 @@ const layerPlatformConnectionSource = Layer.effect(
             const cacheEntry = { signature, registration: built.value };
             next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, cacheEntry);
             registrations.push(built.value);
+          } else {
+            settled = false;
           }
         }
       }
@@ -688,6 +741,7 @@ const layerPlatformConnectionSource = Layer.effect(
       }
 
       if (topologyRead._tag === "Failure") {
+        settled = false;
         yield* Effect.logWarning("Could not read the desktop-local backend topology.", {
           cause: topologyRead.cause,
         });
@@ -761,29 +815,60 @@ const layerPlatformConnectionSource = Layer.effect(
             };
             next.set(bootstrap.id, cacheEntry);
             registrations.push(built.value.registration);
-          } else if (
-            cached !== undefined &&
-            canRetainCachedPlatformRegistrationAfterRefreshFailure(
-              cached,
-              endpointSignature,
-              nowEpochMs,
-            )
-          ) {
-            next.set(bootstrap.id, cached);
-            registrations.push(cached.registration);
+          } else {
+            // A rejected credential waits on its own retry time; anything else may clear soon.
+            if (!nextRejected.has(bootstrap.id)) settled = false;
+            if (
+              cached !== undefined &&
+              canRetainCachedPlatformRegistrationAfterRefreshFailure(
+                cached,
+                endpointSignature,
+                nowEpochMs,
+              )
+            ) {
+              next.set(bootstrap.id, cached);
+              registrations.push(cached.registration);
+            }
           }
         }
         yield* Ref.set(rejectedRef, nextRejected);
+        rejectedRetryAtEpochMs = [...nextRejected.values()].map((entry) => entry.retryAtEpochMs);
       }
 
       yield* Ref.set(cacheRef, next);
-      return registrations as ReadonlyArray<PlatformConnectionRegistration>;
+      const builtRegistrations: ReadonlyArray<PlatformConnectionRegistration> = registrations;
+      yield* Ref.set(scheduleRef, {
+        nextReadAtEpochMs: nextPlatformTopologyReadAtEpochMs({
+          nowEpochMs: yield* Clock.currentTimeMillis,
+          settled,
+          refreshAtEpochMs: [...next.values()].flatMap((entry) =>
+            entry.refreshAtEpochMs === undefined ? [] : [entry.refreshAtEpochMs],
+          ),
+          retryAtEpochMs: rejectedRetryAtEpochMs,
+        }),
+        registrations: builtRegistrations,
+      });
+      return builtRegistrations;
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
+    // Untraced: this runs on every 3 s tick and almost always just returns the cached list.
+    const registrationsWhenDue = Effect.fnUntraced(function* (wake: boolean) {
+      const schedule = yield* Ref.get(scheduleRef);
+      if (!wake && schedule !== undefined) {
+        const nowEpochMs = yield* Clock.currentTimeMillis;
+        if (nowEpochMs < schedule.nextReadAtEpochMs) return schedule.registrations;
+      }
+      return yield* buildPlatformRegistrations;
+    });
+
     return PlatformConnectionSource.PlatformConnectionSource.of({
-      registrations: Stream.tick(PLATFORM_POLL_INTERVAL).pipe(
-        Stream.mapEffect(() => buildPlatformRegistrations),
-      ),
+      registrations: Stream.mergeAll(
+        [
+          Stream.tick(PLATFORM_TICK_INTERVAL).pipe(Stream.map(() => false)),
+          platformTopologyWakes.pipe(Stream.map(() => true)),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Stream.mapEffect(registrationsWhenDue)),
     });
   }),
 );
