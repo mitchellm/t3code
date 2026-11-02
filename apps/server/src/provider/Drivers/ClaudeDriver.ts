@@ -24,6 +24,7 @@ import {
 import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
+import { ensureClaudeT3Plugin } from "../../orchestration-v2/Adapters/claudeT3Plugin.ts";
 import * as ClaudeResetCredits from "../claudeResetCredits.ts";
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
 import {
@@ -169,6 +170,18 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       continuationGroupKey,
     });
 
+    // Fork: sessions and the capability probe load T3's plugin, so its workflows run and appear in
+    // the composer's slash commands. Claude still works without them if the plugin cannot be written.
+    const pluginDirs = yield* ensureClaudeT3Plugin(stateDir).pipe(
+      Effect.map((pluginDir) => [pluginDir]),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Could not write the T3 Claude plugin.", { cause }).pipe(
+          Effect.as([] as ReadonlyArray<string>),
+        ),
+      ),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
     const scopedLimitNames = yield* makeClaudeScopedLimitNames;
     const orchestrationAdapter = yield* createClaudeAdapterV2(
       {
@@ -179,7 +192,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         enabled,
         config,
       },
-      { scopedLimitNames, onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+      {
+        scopedLimitNames,
+        onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+        pluginDirs,
+      },
     ).pipe(
       Effect.mapError(
         (cause) =>
@@ -203,7 +220,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     const lastGoodCapabilities = yield* Ref.make<ClaudeCapabilitiesProbe | undefined>(undefined);
     const capabilitiesProbeCache = yield* Cache.makeWith(
       () =>
-        probeClaudeCapabilities(effectiveConfig, processEnv, stateDir).pipe(
+        probeClaudeCapabilities(effectiveConfig, processEnv, stateDir, true, pluginDirs).pipe(
           Effect.flatMap((capabilities) =>
             ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
               Effect.map((workspaceId) => ({
@@ -400,7 +417,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       snapshotForCwd: (cwd: string) =>
         snapshot.getSnapshot.pipe(
           Effect.flatMap((machineSnapshot) =>
-            probeClaudeWorkspaceSnapshot(effectiveConfig, machineSnapshot, cwd, processEnv),
+            probeClaudeWorkspaceSnapshot(
+              effectiveConfig,
+              machineSnapshot,
+              cwd,
+              processEnv,
+              pluginDirs,
+            ),
           ),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),

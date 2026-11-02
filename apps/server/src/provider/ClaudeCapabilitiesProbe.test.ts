@@ -30,6 +30,19 @@ it("drops strict MCP mode, and only that, next to an administrator's managed-mcp
   assert.equal(options.env?.ENABLE_CLAUDEAI_MCP_SERVERS, "false");
 });
 
+it("loads T3's plugins so the probe reports their slash commands", () => {
+  const options = buildClaudeCapabilitiesProbeQueryOptions({
+    executablePath: "/usr/bin/claude",
+    abortController: new AbortController(),
+    environment: { HOME: "/home/user" },
+    cwd: undefined,
+    managedMcpConfig: false,
+    pluginDirs: ["/state/claude-plugin"],
+  });
+
+  assert.deepEqual(options.plugins, [{ type: "local", path: "/state/claude-plugin" }]);
+});
+
 it.effect("reports a deleted worktree's scan as finished, not pending", () =>
   Effect.gen(function* () {
     const snapshot = yield* probeClaudeWorkspaceSnapshot(

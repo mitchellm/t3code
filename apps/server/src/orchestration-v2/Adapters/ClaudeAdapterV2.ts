@@ -1538,6 +1538,8 @@ export function makeClaudeQueryOptions(input: {
   readonly claudeHome?: string;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
+  /** Fork: plugin directories T3 ships, such as the one holding the research workflow. */
+  readonly pluginDirs?: ReadonlyArray<string>;
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection);
   const {
@@ -1672,6 +1674,9 @@ export function makeClaudeQueryOptions(input: {
       : {}),
     ...(input.environment === undefined ? {} : { env: input.environment }),
     ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
+    ...(input.pluginDirs === undefined || input.pluginDirs.length === 0
+      ? {}
+      : { plugins: input.pluginDirs.map((path) => ({ type: "local" as const, path })) }),
     systemPrompt: {
       type: "preset" as const,
       preset: "claude_code" as const,
@@ -4642,6 +4647,8 @@ export interface ClaudeAdapterV2Options {
       request: ProviderContinuationRequests.ProviderContinuationRequest,
     ) => Effect.Effect<void>;
   };
+  /** Fork: plugin directories passed to every Claude session this adapter opens. */
+  readonly pluginDirs?: ReadonlyArray<string>;
 }
 
 export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
@@ -10556,6 +10563,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             onUserDialog,
             onElicitation,
             supportedDialogKinds: ["resume_return"],
+            ...(adapterOptions.pluginDirs === undefined
+              ? {}
+              : { pluginDirs: adapterOptions.pluginDirs }),
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
             ...(turnInput.pinnedRules === undefined ? {} : { pinnedRules: turnInput.pinnedRules }),
             ...(readPinnedRules === undefined
@@ -11884,7 +11894,7 @@ export type ClaudeAdapterV2DriverEnv =
 export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
   function* (
     input: ProviderAdapterDriverCreateInput<ClaudeSettings>,
-    hooks: Pick<ClaudeAdapterV2Options, "scopedLimitNames" | "onUsageLimits"> = {},
+    hooks: Pick<ClaudeAdapterV2Options, "scopedLimitNames" | "onUsageLimits" | "pluginDirs"> = {},
   ) {
     const { instanceId, environment, enabled, config } = input;
     const fileSystem = yield* FileSystem.FileSystem;

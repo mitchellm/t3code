@@ -274,6 +274,17 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     assert.isUndefined(options.extraArgs?.["dangerously-skip-permissions"]);
   });
 
+  it("loads T3's plugin directories into the Claude session", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "native-plugins",
+      resume: false,
+      cwd: "/workspace",
+      pluginDirs: ["/state/claude-plugin"],
+    });
+    assert.deepEqual(options.plugins, [{ type: "local", path: "/state/claude-plugin" }]);
+  });
+
   it("passes every --add-dir launch directory to Claude", () => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({
       modelSelection: CLAUDE_TEST_MODEL_SELECTION,

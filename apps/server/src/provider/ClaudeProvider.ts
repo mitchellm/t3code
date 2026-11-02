@@ -201,9 +201,14 @@ export function buildClaudeCapabilitiesProbeQueryOptions(input: {
   readonly environment: NodeJS.ProcessEnv;
   readonly cwd: string | undefined;
   readonly managedMcpConfig: boolean;
+  /** Fork: T3's plugins, so the slash commands it reports match what sessions can run. */
+  readonly pluginDirs?: ReadonlyArray<string>;
 }): ClaudeQueryOptions {
   return {
     persistSession: false,
+    ...(input.pluginDirs === undefined || input.pluginDirs.length === 0
+      ? {}
+      : { plugins: input.pluginDirs.map((path) => ({ type: "local" as const, path })) }),
     pathToClaudeCodeExecutable: input.executablePath,
     abortController: input.abortController,
     settingSources: [...CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES],
@@ -324,6 +329,7 @@ const probeClaudeCapabilities = (
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
   includeUsage = true,
+  pluginDirs: ReadonlyArray<string> = [],
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -345,6 +351,7 @@ const probeClaudeCapabilities = (
           environment: claudeEnvironment,
           cwd,
           managedMcpConfig,
+          pluginDirs,
         }),
       });
       const init = await q.initializationResult();
@@ -426,6 +433,7 @@ export const probeClaudeWorkspaceSnapshot = Effect.fn("probeClaudeWorkspaceSnaps
   machineSnapshot: ServerProvider,
   cwd: string,
   environment?: NodeJS.ProcessEnv,
+  pluginDirs: ReadonlyArray<string> = [],
 ): Effect.fn.Return<ProviderWorkspaceSnapshot, never, FileSystem.FileSystem | Path.Path> {
   if (!claudeSettings.enabled) return machineSnapshot;
   const skills = yield* discoverClaudeSkills(claudeSettings, cwd, environment);
@@ -433,7 +441,9 @@ export const probeClaudeWorkspaceSnapshot = Effect.fn("probeClaudeWorkspaceSnaps
   // A deleted worktree can never answer the probe. Pending would make clients rescan it forever.
   const cwdExists = yield* fileSystem.exists(cwd).pipe(Effect.orElseSucceed(() => true));
   const probeResult = cwdExists
-    ? yield* probeClaudeCapabilities(claudeSettings, environment, cwd, false).pipe(Effect.result)
+    ? yield* probeClaudeCapabilities(claudeSettings, environment, cwd, false, pluginDirs).pipe(
+        Effect.result,
+      )
     : undefined;
   const capabilities =
     probeResult && Result.isSuccess(probeResult) ? probeResult.success : undefined;

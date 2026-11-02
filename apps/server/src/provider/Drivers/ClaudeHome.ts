@@ -62,6 +62,8 @@ const CLAUDE_HOST_SESSION_VARIABLES = [
   "CLAUDE_AGENT_SDK_VERSION",
 ];
 
+export const CLAUDE_WORKFLOW_MAX_CONCURRENT_AGENTS_DEFAULT = "32";
+
 /**
  * Base env for the Claude processes T3 Code runs, before `makeClaudeEnvironment`.
  * Claude Code reads its entrypoint from the process env, not its settings `env`, so T3 Code applies that override itself.
@@ -72,6 +74,9 @@ export const mergeClaudeProcessEnvironment = Effect.fn("mergeClaudeProcessEnviro
   hostEnvironment: NodeJS.ProcessEnv,
 ) {
   const baseEnvironment: NodeJS.ProcessEnv = {
+    // Fork: Claude Code runs 8 workflow agents at a time by default, which serializes a research
+    // run's fan-out. The host, the instance environment and settings.json env all still win.
+    CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: CLAUDE_WORKFLOW_MAX_CONCURRENT_AGENTS_DEFAULT,
     ...hostEnvironment,
     CLAUDE_CODE_ENTRYPOINT: "t3-code",
   };

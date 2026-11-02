@@ -94,6 +94,25 @@ can still be started by you. Invoke those one per message: Claude directly runs
 only the last named skill and may try to start earlier ones through its Skill
 tool, which refuses skills reserved for manual invocation.
 
+## Research
+
+Claude threads can run `/t3:research`, a workflow that answers one question from
+sources you name. Write the question and where to look in the same message, for
+example `/t3:research what changed in the save format? use ~/exports/u80 and
+docs/saves.md`. Sources can be files, folders, URLs, threads (`thread:<id>`) or a
+plain description Claude can find. With no sources named, it searches the web.
+
+It splits the question into sub-questions, investigates each from the sources,
+checks every citation against the file or page it came from, and repeats while
+gaps remain. The answer comes first, then a section per sub-question with
+citations, then what the sources could not settle. To dig further, ask Claude to
+continue the previous research with a direction such as "dig harder on Q3".
+
+Up to 32 of its agents run at once. Set
+`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` under **Variables** in the Claude
+instance's **Environment** section to change that. Other providers do not have
+Claude's workflow engine, so research is Claude-only.
+
 ## Task lists
 
 To show Claude task lists in the web and desktop apps, add

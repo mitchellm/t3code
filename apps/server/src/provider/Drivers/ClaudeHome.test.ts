@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import {
+  CLAUDE_WORKFLOW_MAX_CONCURRENT_AGENTS_DEFAULT,
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
@@ -81,10 +82,12 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
 
         expect(yield* mergeClaudeProcessEnvironment({ homePath }, undefined, host)).toEqual({
           CLAUDE_CODE_ENTRYPOINT: "t3-code",
+          CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: CLAUDE_WORKFLOW_MAX_CONCURRENT_AGENTS_DEFAULT,
           KEEP: "1",
         });
         expect(yield* mergeClaudeProcessEnvironment({ homePath }, instance, host)).toEqual({
           CLAUDE_CODE_ENTRYPOINT: "instance",
+          CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: CLAUDE_WORKFLOW_MAX_CONCURRENT_AGENTS_DEFAULT,
           CLAUDE_EFFORT: "low",
           KEEP: "1",
         });
@@ -98,5 +101,31 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
             .CLAUDE_CODE_ENTRYPOINT,
         ).toBe("custom");
       }),
+  );
+
+  it.effect("lets the host and the instance override the workflow agent limit", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const homePath = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-home-" });
+      const limit = (environment: NodeJS.ProcessEnv) =>
+        environment.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS;
+
+      expect(
+        limit(
+          yield* mergeClaudeProcessEnvironment({ homePath }, undefined, {
+            CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4",
+          }),
+        ),
+      ).toBe("4");
+      expect(
+        limit(
+          yield* mergeClaudeProcessEnvironment(
+            { homePath },
+            [{ name: "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS", value: "64", sensitive: false }],
+            {},
+          ),
+        ),
+      ).toBe("64");
+    }),
   );
 });
