@@ -1,5 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - only node:perf_hooks exposes the event loop delay histogram, and node:os the load average.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeInspector from "node:inspector";
 import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodePerfHooks from "node:perf_hooks";
 
 import type { ServerEventLoopStall } from "@t3tools/contracts";
@@ -137,14 +140,100 @@ export interface StallLogOptions {
   readonly maxBytes: number;
 }
 
-const layerWith = (
+/**
+ * Profiles each sample window, because a stall is only known when the window ends. Each call ends the
+ * window just sampled, returns its profile, and starts the next one.
+ */
+export interface WindowProfiler {
+  readonly rotate: Effect.Effect<unknown | undefined>;
+}
+
+// 10 ms keeps the always-on cost low while still showing which synchronous call held the loop.
+const PROFILE_SAMPLING_INTERVAL_US = 10_000;
+const STALL_PROFILE_PREFIX = "event-loop-stall-";
+const STALL_PROFILE_SUFFIX = ".cpuprofile";
+const STALL_PROFILES_KEPT = 5;
+
+const inspectorPost = (session: NodeInspector.Session, method: string, params?: object) =>
+  new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
+    session.post(method, params, (error, result) =>
+      error ? reject(error) : resolve(result as Record<string, unknown> | undefined),
+    );
+  });
+
+const makeInspectorProfiler: Effect.Effect<WindowProfiler, never, Scope.Scope> = Effect.gen(
+  function* () {
+    const session = new NodeInspector.Session();
+    const started = yield* Effect.tryPromise(async () => {
+      session.connect();
+      await inspectorPost(session, "Profiler.enable");
+      await inspectorPost(session, "Profiler.setSamplingInterval", {
+        interval: PROFILE_SAMPLING_INTERVAL_US,
+      });
+      await inspectorPost(session, "Profiler.start");
+    }).pipe(
+      Effect.as(true),
+      Effect.catch((cause) =>
+        Effect.logWarning("event loop stall profiling unavailable", { cause: String(cause) }).pipe(
+          Effect.as(false),
+        ),
+      ),
+    );
+    if (!started) return { rotate: Effect.void };
+    yield* Effect.addFinalizer(() =>
+      Effect.tryPromise(() => inspectorPost(session, "Profiler.stop")).pipe(
+        Effect.ignore,
+        Effect.andThen(Effect.sync(() => session.disconnect())),
+      ),
+    );
+    return {
+      rotate: Effect.tryPromise(async () => {
+        const stopped = await inspectorPost(session, "Profiler.stop");
+        await inspectorPost(session, "Profiler.start");
+        return stopped?.profile;
+      }).pipe(Effect.orElseSucceed(() => undefined)),
+    };
+  },
+);
+
+const writeStallProfile = Effect.fn("EventLoopMonitor.writeStallProfile")(
+  function* (directory: string, detectedAt: string, profile: unknown) {
+    const body = yield* encodeStallLine(profile);
+    return yield* Effect.tryPromise(async () => {
+      const filePath = NodePath.join(
+        directory,
+        `${STALL_PROFILE_PREFIX}${detectedAt.replaceAll(":", "-")}${STALL_PROFILE_SUFFIX}`,
+      );
+      await NodeFSP.writeFile(filePath, body);
+      // ISO names sort by time, so the oldest sort first.
+      const existing = (await NodeFSP.readdir(directory))
+        .filter(
+          (name) => name.startsWith(STALL_PROFILE_PREFIX) && name.endsWith(STALL_PROFILE_SUFFIX),
+        )
+        .toSorted();
+      for (const name of existing.slice(0, Math.max(0, existing.length - STALL_PROFILES_KEPT))) {
+        await NodeFSP.rm(NodePath.join(directory, name), { force: true });
+      }
+      return filePath;
+    });
+  },
+  Effect.catch((cause) =>
+    Effect.logWarning("event loop stall profile write failed", { cause: String(cause) }).pipe(
+      Effect.as(undefined),
+    ),
+  ),
+);
+
+export const layerWith = (
   makeSampler: Effect.Effect<Effect.Effect<EventLoopReadings>, never, Scope.Scope>,
   stallLog: StallLogOptions,
+  makeProfiler: Effect.Effect<WindowProfiler, never, Scope.Scope> = makeInspectorProfiler,
 ) =>
   Layer.effect(
     EventLoopMonitor,
     Effect.gen(function* () {
       const sample = yield* makeSampler;
+      const profiler = yield* makeProfiler;
       // Clients sample on connect as well as the timer, and the sampler resets shared state.
       const sampling = yield* Semaphore.make(1);
       const warmedUp = yield* Ref.make(false);
@@ -168,12 +257,17 @@ const layerWith = (
       );
       const tick = Effect.gen(function* () {
         const readings = yield* sample;
+        const profile = yield* profiler.rotate;
         yield* recordGauges(readings);
         const delayMaxMs = stallMs(readings);
         if (delayMaxMs === undefined) return;
         const { utilization, usage, rssBytes, loadAverage, cpuCount } = readings;
         const now = yield* DateTime.now;
         const detectedAt = DateTime.formatIso(now);
+        const cpuProfile =
+          profile === undefined
+            ? undefined
+            : yield* writeStallProfile(NodePath.dirname(stallLog.filePath), detectedAt, profile);
         if (delayMaxMs >= NOTICEABLE_STALL_MS) {
           yield* Ref.set(latestNoticeableStall, {
             detectedAtMs: DateTime.toEpochMillis(now),
@@ -201,7 +295,11 @@ const layerWith = (
           Effect.withSpan("server.eventLoop.stall", { root: true, level: "Warn", attributes }),
         );
         if (stallSink !== undefined) {
-          yield* encodeStallLine({ time: detectedAt, ...attributes }).pipe(
+          yield* encodeStallLine({
+            time: detectedAt,
+            ...attributes,
+            ...(cpuProfile === undefined ? {} : { cpuProfile }),
+          }).pipe(
             Effect.flatMap((line) => Effect.try(() => stallSink.write(`${line}\n`))),
             Effect.catch(() =>
               Effect.logWarning("event loop stall log write failed", {
@@ -215,6 +313,7 @@ const layerWith = (
       // The first sample includes migrations and bootstrap; skip expected startup stalls.
       yield* wait.pipe(
         Effect.andThen(sampling.withPermits(1)(sample)),
+        Effect.andThen(profiler.rotate),
         Effect.andThen(Ref.set(warmedUp, true)),
         Effect.andThen(wait.pipe(Effect.andThen(tick), Effect.forever)),
         Effect.forkScoped,
