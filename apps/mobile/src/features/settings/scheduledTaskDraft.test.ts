@@ -9,6 +9,7 @@ import {
 import {
   scheduledTaskDefaultModel,
   DEFAULT_SCHEDULE,
+  precheckFromDraft,
   scheduleDraftForTask,
   scheduleFromDraft,
 } from "./scheduledTaskDraft";
@@ -206,4 +207,16 @@ it("rejects dedupe keys without valid request placeholders", () => {
   expect(
     scheduleFromDraft({ ...DEFAULT_SCHEDULE, mode: "webhook", coalesceKey: "{{body.bad" }),
   ).toBeNull();
+});
+
+describe("precheckFromDraft", () => {
+  it("keeps the stored timeout, and clears when the command is emptied", () => {
+    const task = { precheck: { command: "old", timeoutMs: 45_000 } } as never;
+    expect(precheckFromDraft({ task, precheckCommand: " new " })).toEqual({
+      command: "new",
+      timeoutMs: 45_000,
+    });
+    expect(precheckFromDraft({ task: null, precheckCommand: "new" })).toEqual({ command: "new" });
+    expect(precheckFromDraft({ task, precheckCommand: "" })).toBeNull();
+  });
 });
