@@ -31,6 +31,7 @@ import {
   LOADOUT_WITHDRAWN,
   PRE_TOOL_HOOK_TIMEOUT_SECONDS,
   PRE_TOOL_READ_DEADLINE_MS,
+  RECENT_LEDGER_WINDOW_MS,
 } from "./HarnessHooks.ts";
 
 const at = DateTime.makeUnsafe(Date.UTC(2026, 9, 26));
@@ -780,6 +781,132 @@ describe("plan before editing", () => {
       expect(reason).not.toContain("ledger_create");
       expect(reason).not.toContain("ledger_add_items");
     }
+  });
+
+  describe("once the ledger has finished", () => {
+    const finishedAtMs = DateTime.toEpochMillis(at);
+    const minutesAfter = (minutes: number) => () => finishedAtMs + minutes * 60_000;
+    const closedLedger = ledgerOf([item("L1", "closed")], { closedAt: at });
+    const reminderOf = (output: Record<string, unknown>) =>
+      (output.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext;
+    const investigated = (extra: Partial<Ledger> = {}) =>
+      ledgerOf([item("L1", "closed")], {
+        investigation: {
+          goal: "Why does the build flake",
+          solvedWhen: "A cause reproduces on demand",
+          budget: { minutes: 30 },
+          parallelApproaches: 4,
+          status: "stopped",
+          approachesItemId: LedgerItemId.make("L1"),
+          startedAt: at,
+          endedAt: at,
+        },
+        ...extra,
+      });
+    const laterThanFinish = DateTime.makeUnsafe(finishedAtMs + 60 * 60_000);
+    const beforeFinish = DateTime.makeUnsafe(finishedAtMs - 60 * 60_000);
+
+    it("lets an edit through with a reminder while the ledger closed within the window", async () => {
+      const { fire } = gated(
+        { value: state(closedLedger) },
+        { now: minutesAfter(RECENT_LEDGER_WINDOW_MS / 60_000) },
+      );
+      const first = await fire("PreToolUse", preToolUse("Edit"));
+      expect(decisionOf(first)?.permissionDecision).toBeUndefined();
+      expect(reminderOf(first)).toContain("ledger_create");
+      expect(reminderOf(first)).toContain("closed");
+      // Said once: 140 edits in a window must not each carry the paragraph.
+      expect(await fire("PreToolUse", preToolUse("Write"))).toEqual({});
+    });
+
+    it("names ledger_add_items when the ledger is open with every item finished", async () => {
+      const { fire } = gated(
+        { value: state(ledgerOf([item("L1", "closed"), item("L2", "dropped")])) },
+        { now: minutesAfter(5) },
+      );
+      const output = await fire("PreToolUse", preToolUse("Edit"));
+      expect(decisionOf(output)?.permissionDecision).toBeUndefined();
+      expect(reminderOf(output)).toContain("ledger_add_items");
+    });
+
+    it("denies again once the window has passed with no newer user message", async () => {
+      const { fire } = gated(
+        { value: state(closedLedger, { latestUserMessageAt: null }) },
+        { now: minutesAfter(RECENT_LEDGER_WINDOW_MS / 60_000 + 1) },
+      );
+      expect(decisionOf(await fire("PreToolUse", preToolUse("Edit")))?.permissionDecision).toBe(
+        "deny",
+      );
+      // A message from before the close is the work the ledger already covered.
+      const older = gated(
+        { value: state(closedLedger, { latestUserMessageAt: beforeFinish }) },
+        { now: minutesAfter(24 * 60) },
+      );
+      expect(
+        decisionOf(await older.fire("PreToolUse", preToolUse("Edit")))?.permissionDecision,
+      ).toBe("deny");
+    });
+
+    it("lets a long-closed ledger's follow-up edit through when the user wrote since", async () => {
+      const { fire } = gated(
+        { value: state(closedLedger, { latestUserMessageAt: laterThanFinish }) },
+        { now: minutesAfter(24 * 60) },
+      );
+      const output = await fire("PreToolUse", preToolUse("Edit"));
+      expect(decisionOf(output)?.permissionDecision).toBeUndefined();
+      expect(reminderOf(output)).toContain("ledger_create");
+    });
+
+    it("keeps an ended investigation closed to edits until the user writes, however recent", async () => {
+      const within = gated(
+        { value: state(investigated(), { latestUserMessageAt: null }) },
+        { now: minutesAfter(2) },
+      );
+      const denied = decisionOf(await within.fire("PreToolUse", preToolUse("Edit")));
+      expect(denied?.permissionDecision).toBe("deny");
+      expect(denied?.permissionDecisionReason).toContain("next message");
+
+      for (const ledger of [investigated(), investigated({ closedAt: at })]) {
+        const wrote = gated(
+          { value: state(ledger, { latestUserMessageAt: laterThanFinish }) },
+          { now: minutesAfter(24 * 60) },
+        );
+        const output = await wrote.fire("PreToolUse", preToolUse("Edit"));
+        expect(decisionOf(output)?.permissionDecision).toBeUndefined();
+        expect(reminderOf(output)).toContain("ledger");
+      }
+    });
+
+    it("still denies a thread that never had a ledger, even after the user wrote", async () => {
+      const { fire } = gated(
+        { value: state(null, { latestUserMessageAt: laterThanFinish }) },
+        { now: minutesAfter(1) },
+      );
+      expect(decisionOf(await fire("PreToolUse", preToolUse("Edit")))?.permissionDecision).toBe(
+        "deny",
+      );
+    });
+
+    it("lets a native subagent's edit through quietly, leaving the reminder to the main agent", async () => {
+      const { fire } = gated({ value: state(closedLedger) }, { now: minutesAfter(5) });
+      expect(await fire("PreToolUse", preToolUse("Edit", { agent_id: "sub" }))).toEqual({});
+      expect(reminderOf(await fire("PreToolUse", preToolUse("Edit")))).toContain("ledger_create");
+    });
+
+    it("reminds again when a later ledger finishes", async () => {
+      const current: Current = { value: state(closedLedger) };
+      const { fire } = gated(current, { now: minutesAfter(5) });
+      expect(reminderOf(await fire("PreToolUse", preToolUse("Edit")))).toContain("ledger_create");
+      current.value = state(ledgerOf([item("L1", "open")]));
+      expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+      current.value = state(
+        ledgerOf([item("L1", "closed")], {
+          id: LedgerId.make("ledger:second"),
+          closedAt: DateTime.makeUnsafe(finishedAtMs + 3 * 60_000),
+        }),
+      );
+      expect(reminderOf(await fire("PreToolUse", preToolUse("Edit")))).toContain("ledger_create");
+    });
   });
 
   it("tells a native subagent to report back instead of planning for the thread", async () => {

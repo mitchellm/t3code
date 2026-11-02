@@ -22,6 +22,7 @@ import type {
   ProviderAdapterV2HarnessThreadPolicy,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import { loadoutStructure } from "@t3tools/shared/loadouts";
+import * as DateTime from "effect/DateTime";
 // Hooks are plain promises and must judge a Windows path whatever the host, so they need both
 // path.win32 and path.posix rather than one Effect Path layer.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -247,15 +248,83 @@ const ledgerFingerprint = (ledger: Ledger) =>
 const plansCurrentWork = (ledger: Ledger | null) =>
   ledger !== null && ledger.closedAt === null && ledger.items.some(isOpen);
 
+/**
+ * How long after a ledger finishes its follow-up edits still go through (with a reminder to plan
+ * them). The retro saw 238 plan-before-editing denials, about 140 within minutes of a ledger
+ * closing: the same work's last fixes, a format pass, a rename. Half an hour covers those without
+ * making a closed ledger a standing pass; a later request from the user lifts the gate on its own.
+ */
+export const RECENT_LEDGER_WINDOW_MS = 30 * 60_000;
+
+/** When the ledger's work stopped: the investigation's end, the close, else its last item to finish. */
+export function ledgerFinishedAt(ledger: Ledger): DateTime.Utc {
+  const ended = ledger.investigation?.endedAt ?? null;
+  if (ended !== null) return ended;
+  if (ledger.closedAt !== null) return ledger.closedAt;
+  let latest: DateTime.Utc = ledger.updatedAt;
+  let found = false;
+  for (const item of ledger.items) {
+    const at = item.closedAt ?? item.updatedAt;
+    if (!found || DateTime.toEpochMillis(at) > DateTime.toEpochMillis(latest)) latest = at;
+    found = true;
+  }
+  return latest;
+}
+
+interface FinishedLedgerPass {
+  readonly key: string;
+  readonly reason: "recent" | "user-wrote";
+}
+
+/**
+ * Why an edit with no open item may go through anyway: the ledger finished within the window, or the
+ * user has written since it did (a new request the old plan never covered). An ended investigation
+ * is the exception to recency: it holds edits until a person types, however soon after the end.
+ * Null when neither applies, which includes a thread that never had a ledger.
+ */
+function finishedLedgerPass(
+  state: ProviderAdapterV2HarnessLedgerState,
+  now: number,
+): FinishedLedgerPass | null {
+  const ledger = state.ledger;
+  if (ledger === null) return null;
+  const finishedAt = ledgerFinishedAt(ledger);
+  const finishedMs = DateTime.toEpochMillis(finishedAt);
+  const key = `${ledger.id}@${finishedMs}`;
+  const wrote =
+    state.latestUserMessageAt != null &&
+    DateTime.toEpochMillis(state.latestUserMessageAt) > finishedMs;
+  if (wrote) return { key, reason: "user-wrote" };
+  const investigationEnded = (ledger.investigation?.endedAt ?? null) !== null;
+  if (!investigationEnded && now - finishedMs <= RECENT_LEDGER_WINDOW_MS) {
+    return { key, reason: "recent" };
+  }
+  return null;
+}
+
+// Said once per finished ledger, not per edit: a window of follow-up edits would repeat it.
+function lateEditReminder(ledger: Ledger, reason: FinishedLedgerPass["reason"]): string {
+  const state = ledger.closedAt === null ? `has no open or in-progress item` : `is closed`;
+  const why =
+    reason === "user-wrote"
+      ? "the user has written since it finished"
+      : "it finished only minutes ago";
+  const how =
+    ledger.closedAt === null
+      ? "Add an item for it with ledger_add_items"
+      : "Write the plan with ledger_create";
+  return `Plan before editing is on and the task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" ${state}, so no item covers this edit. It went through because ${why}. If this is new work, ${how}, with what done means, and close it with evidence. T3 MCP tools are deferred: load one with ToolSearch before you call it.`;
+}
+
 function planFirstReason(tool: string, ledger: Ledger | null, subagent: boolean): string {
   // The plan is the main agent's to write; a subagent creating the thread's ledger would bypass it.
   if (subagent) {
     return `This thread has no open or in-progress ledger item for this work, so a subagent's ${tool} is denied until the main agent plans it. Stop and report back that the plan comes first.`;
   }
   // ledger_create is refused after an ended investigation until the user writes again, so pointing
-  // at it would only earn a second refusal. The hook cannot see whether the user has written since.
+  // at it would only earn a second refusal. The hook lets an edit through once the user has.
   if ((ledger?.investigation?.endedAt ?? null) !== null) {
-    return `This thread's investigation is over, so ${tool} is denied: file edits wait for the user's next message. If the user has written since it ended, plan the work they asked for before editing.`;
+    return `This thread's investigation is over, so ${tool} is denied: file edits wait for the user's next message.`;
   }
   const denied = `Plan before editing is on and`;
   if (ledger !== null && ledger.closedAt === null) {
@@ -596,6 +665,8 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
   // own loadout change (see PostToolUse) ends the cache early. A failed read is not kept. A
   // loadout or setting the user changes mid-turn applies from the next prompt.
   let cachedPolicy: ProviderAdapterV2HarnessThreadPolicy | undefined;
+  // The finished ledger an edit was last let through for, so the reminder is said once per ledger.
+  let remindedFinishedLedger: string | undefined;
 
   if (readLoadout !== undefined || gatesToolCalls) {
     // Fires once per prompt before the model starts, and reads fresh, so a loadout the user or
@@ -667,7 +738,20 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           // next edit.
           const state = await readPlanLedger(signal);
           if (state === undefined || plansCurrentWork(state.ledger)) return {};
-          return deny(planFirstReason(tool, state.ledger, input.agent_id !== undefined));
+          const subagent = input.agent_id !== undefined;
+          const pass = finishedLedgerPass(state, (port.now ?? Date.now)());
+          if (pass === null || state.ledger === null) {
+            return deny(planFirstReason(tool, state.ledger, subagent));
+          }
+          // The reminder is the main agent's to act on; a subagent's edit goes through quietly.
+          if (subagent || pass.key === remindedFinishedLedger) return {};
+          remindedFinishedLedger = pass.key;
+          return {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              additionalContext: lateEditReminder(state.ledger, pass.reason),
+            },
+          };
         }),
         MANAGER_DENIED_TOOLS.join("|"),
         PRE_TOOL_HOOK_TIMEOUT_SECONDS,
