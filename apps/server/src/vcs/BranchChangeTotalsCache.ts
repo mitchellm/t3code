@@ -103,6 +103,7 @@ export const worktreeFingerprint = Effect.fn("BranchChangeTotals.worktreeFingerp
     readonly root: string;
     readonly statusStdout: string;
     readonly changedPaths: Iterable<string>;
+    readonly maxEntries?: number;
   }) {
     const parts: Array<string> = [];
     for (const record of input.statusStdout.split("\0")) {
@@ -126,11 +127,48 @@ export const worktreeFingerprint = Effect.fn("BranchChangeTotals.worktreeFingerp
       );
     });
 
-    let budget = MAX_FINGERPRINT_ENTRIES;
+    let budget = input.maxEntries ?? MAX_FINGERPRINT_ENTRIES;
     const sign = Effect.fnUntraced(function* (relativePath: string) {
       budget -= 1;
       parts.push(relativePath, yield* signature(input.path.join(input.root, relativePath)));
     });
+
+    // Lists the files under an untracked directory one level at a time and stops as soon as the
+    // walk passes the budget. A recursive listing reads the whole tree before the budget can apply,
+    // and an untracked folder of checkouts with node_modules holds millions of entries, enough to
+    // block the event loop for tens of seconds. Symlinks are signed, never followed.
+    const listFiles = Effect.fnUntraced(function* (directory: string) {
+      const files: Array<string> = [];
+      const pending = [directory];
+      let visited = 0;
+      while (pending.length > 0) {
+        const current = pending.shift() as string;
+        const names = yield* input.fileSystem
+          .readDirectory(input.path.join(input.root, current))
+          .pipe(Effect.orElseSucceed(() => null));
+        if (names === null) return null;
+        for (const name of names.toSorted()) {
+          visited += 1;
+          if (visited > budget) return null;
+          const child = `${current}${name}`;
+          const absolute = input.path.join(input.root, child);
+          const isLink = yield* input.fileSystem.readLink(absolute).pipe(
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          );
+          const isDirectory =
+            !isLink &&
+            (yield* input.fileSystem.stat(absolute).pipe(
+              Effect.map((info) => info.type === "Directory"),
+              Effect.orElseSucceed(() => false),
+            ));
+          if (isDirectory) pending.push(`${child}/`);
+          else files.push(child);
+        }
+      }
+      return files;
+    });
+
     for (const relativePath of input.changedPaths) {
       if (budget <= 0) return undefined;
       if (!relativePath.endsWith("/")) {
@@ -139,13 +177,9 @@ export const worktreeFingerprint = Effect.fn("BranchChangeTotals.worktreeFingerp
       }
       // Status collapses an untracked directory to one entry; editing a file inside it leaves the
       // directory's own mtime alone, so its files are signed individually.
-      const children = yield* input.fileSystem
-        .readDirectory(input.path.join(input.root, relativePath), { recursive: true })
-        .pipe(Effect.orElseSucceed(() => null));
-      if (children === null || children.length > budget) return undefined;
-      for (const child of children.toSorted()) {
-        yield* sign(`${relativePath}${child.replaceAll("\\", "/")}`);
-      }
+      const files = yield* listFiles(relativePath);
+      if (files === null || files.length > budget) return undefined;
+      for (const file of files) yield* sign(file);
     }
     return yield* input.crypto.digest("SHA-256", new TextEncoder().encode(parts.join("\0"))).pipe(
       Effect.map(Hex.encode),

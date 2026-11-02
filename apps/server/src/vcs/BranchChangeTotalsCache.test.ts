@@ -137,6 +137,46 @@ describe("worktreeFingerprint", () => {
     ),
   );
 
+  it.effect("gives up on an untracked tree past the budget without listing all of it", () =>
+    withWorktree(({ root, crypto, fileSystem, path }) =>
+      Effect.gen(function* () {
+        for (const sub of ["a", "b", "c"]) {
+          for (let i = 0; i < 20; i++) {
+            const file = path.join(root, "big", sub, `f${i}.txt`);
+            yield* fileSystem.makeDirectory(path.dirname(file), { recursive: true });
+            yield* fileSystem.writeFileString(file, "x");
+          }
+        }
+        let listed = 0;
+        const counting: FileSystem.FileSystem = {
+          ...fileSystem,
+          readDirectory: (directory, options) =>
+            fileSystem.readDirectory(directory, options).pipe(
+              Effect.tap((names) =>
+                Effect.sync(() => {
+                  listed += names.length;
+                }),
+              ),
+            ),
+        };
+
+        const fingerprint = yield* BranchChangeTotalsCache.worktreeFingerprint({
+          crypto,
+          fileSystem: counting,
+          path,
+          root,
+          statusStdout: "# branch.oid abc\0? big/\0",
+          changedPaths: ["big/"],
+          maxEntries: 5,
+        });
+
+        assert.strictEqual(fingerprint, undefined);
+        // The top level (3 dirs) and the first sub-directory (20 files), not all 63 entries.
+        assert.isAtMost(listed, 23);
+      }),
+    ),
+  );
+
   it.effect("moves with HEAD and a tracked edit, and ignores ahead/behind counts", () =>
     withWorktree(({ root, crypto, fileSystem, path }) =>
       Effect.gen(function* () {
