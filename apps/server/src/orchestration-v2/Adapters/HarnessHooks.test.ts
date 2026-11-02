@@ -29,6 +29,8 @@ import {
   HARNESS_STOP_BLOCK_CEILING,
   HARNESS_STOP_BLOCK_LIMIT,
   LOADOUT_WITHDRAWN,
+  PRE_TOOL_HOOK_TIMEOUT_SECONDS,
+  PRE_TOOL_READ_DEADLINE_MS,
 } from "./HarnessHooks.ts";
 
 const at = DateTime.makeUnsafe(Date.UTC(2026, 9, 26));
@@ -554,7 +556,9 @@ describe("managers structure", () => {
   const structured = (structure: LoadoutStructure | undefined, delegatedChild = false) =>
     make({
       readThreadPolicy: async () =>
-        structure === undefined ? undefined : { structure, planBeforeEditing: false },
+        structure === undefined
+          ? undefined
+          : { structure, planBeforeEditing: false, runtimeMode: "full-access" },
       delegatedChild,
     });
 
@@ -598,7 +602,11 @@ describe("managers structure", () => {
   it("in plan mode, lets a managers thread write its plan file and nothing else", async () => {
     for (const [plansDirectory, planFile, repoFile] of PLAN_FILES) {
       const { fire } = make({
-        readThreadPolicy: async () => ({ structure: "managers", planBeforeEditing: false }),
+        readThreadPolicy: async () => ({
+          structure: "managers",
+          planBeforeEditing: false,
+          runtimeMode: "full-access",
+        }),
         plansDirectory,
       });
       expect(await fire("PreToolUse", planModeEdit("Write", planFile))).toEqual({});
@@ -628,11 +636,20 @@ describe("plan before editing", () => {
     const { policy, ...port } = extra;
     // An explicit undefined is a failed read, not the default.
     const read =
-      "policy" in extra ? policy : { structure: "solo" as const, planBeforeEditing: true };
+      "policy" in extra
+        ? policy
+        : {
+            structure: "solo" as const,
+            planBeforeEditing: true,
+            runtimeMode: "full-access" as const,
+          };
     return make({
       ...ledgerReader(current),
       readThreadPolicy: async () => read,
       ledgerTools: true,
+      // A day after the fixtures' `at`, so no ledger counts as recently finished unless a test
+      // moves the clock.
+      now: () => DateTime.toEpochMillis(at) + 24 * 60 * 60_000,
       ...port,
     });
   };
@@ -781,7 +798,11 @@ describe("plan before editing", () => {
   });
 
   it("allows edits when the setting is off or a read fails", async () => {
-    const off = { structure: "solo" as const, planBeforeEditing: false };
+    const off = {
+      structure: "solo" as const,
+      planBeforeEditing: false,
+      runtimeMode: "full-access" as const,
+    };
     for (const policy of [off, undefined]) {
       expect(
         await gated({ value: state(null) }, { policy }).fire("PreToolUse", preToolUse("Edit")),
@@ -808,19 +829,21 @@ describe("plan before editing", () => {
   it("leaves a managers loadout's stricter denial in charge", async () => {
     const { fire } = gated(
       { value: state(null) },
-      { policy: { structure: "managers", planBeforeEditing: true } },
+      {
+        policy: { structure: "managers", planBeforeEditing: true, runtimeMode: "full-access" },
+      },
     );
     expect(await reasonFor(fire, "Edit")).toContain("delegate_task");
     expect(await reasonFor(fire, "Bash")).toContain("delegate_task");
   });
 
-  it("reads the thread policy once per gated call, and the ledger only for an edit", async () => {
+  it("reads the thread policy once per turn, and the ledger on every edit", async () => {
     const reads = { policy: 0, ledger: 0 };
     let structure: LoadoutStructure = "solo";
     const { fire } = make({
       readThreadPolicy: async () => {
         reads.policy++;
-        return { structure, planBeforeEditing: true };
+        return { structure, planBeforeEditing: true, runtimeMode: "full-access" };
       },
       readLedgerState: async () => {
         reads.ledger++;
@@ -832,12 +855,131 @@ describe("plan before editing", () => {
     expect(reads).toEqual({ policy: 0, ledger: 0 });
     await fire("PreToolUse", preToolUse("Bash"));
     expect(reads).toEqual({ policy: 1, ledger: 0 });
+    await fire("PreToolUse", preToolUse("Bash"));
+    await fire("PreToolUse", preToolUse("PowerShell"));
     await fire("PreToolUse", preToolUse("Edit"));
-    expect(reads).toEqual({ policy: 2, ledger: 1 });
-    // A managers denial needs no ledger.
+    // The ledger is read fresh, so an item the agent adds mid-turn lifts the gate at once.
+    await fire("PreToolUse", preToolUse("Edit"));
+    expect(reads).toEqual({ policy: 1, ledger: 2 });
+    // A new prompt starts a new turn, which re-reads the policy.
     structure = "managers";
-    await fire("PreToolUse", preToolUse("Edit"));
-    expect(reads).toEqual({ policy: 3, ledger: 1 });
+    expect(await fire("PreToolUse", preToolUse("Bash"))).toEqual({});
+    await fire("UserPromptSubmit", prompt());
+    expect(decisionOf(await fire("PreToolUse", preToolUse("Bash")))?.permissionDecision).toBe(
+      "deny",
+    );
+    expect(reads.policy).toBe(2);
+  });
+
+  it("re-reads the policy after the agent changes the thread's loadout mid-turn", async () => {
+    let structure: LoadoutStructure = "solo";
+    let reads = 0;
+    const { fire } = make({
+      readThreadPolicy: async () => {
+        reads++;
+        return { structure, planBeforeEditing: false, runtimeMode: "full-access" };
+      },
+      readLedgerState: async () => state(null),
+      ledgerTools: true,
+    });
+    expect(await fire("PreToolUse", preToolUse("Bash"))).toEqual({});
+    structure = "managers";
+    // Another tool is not a loadout change.
+    await fire("PostToolUse", toolUse("Read"));
+    expect(await fire("PreToolUse", preToolUse("Bash"))).toEqual({});
+    await fire("PostToolUse", toolUse("mcp__t3-code__t3_loadout_propose"));
+    expect(decisionOf(await fire("PreToolUse", preToolUse("Bash")))?.permissionDecision).toBe(
+      "deny",
+    );
+    expect(reads).toBe(2);
+  });
+
+  it("does not cache a failed policy read, so the next call asks again", async () => {
+    const results: Array<ProviderAdapterV2HarnessThreadPolicy | undefined> = [
+      undefined,
+      { structure: "managers", planBeforeEditing: false, runtimeMode: "full-access" },
+    ];
+    const { fire } = make({ readThreadPolicy: async () => results.shift() });
+    expect(await fire("PreToolUse", preToolUse("Bash"))).toEqual({});
+    expect(decisionOf(await fire("PreToolUse", preToolUse("Bash")))?.permissionDecision).toBe(
+      "deny",
+    );
+  });
+});
+
+describe("pre-tool hook fails open", () => {
+  // A read that outlives the deadline never settles on its own, as when the server stalls.
+  const stalled = (signal: AbortSignal) =>
+    new Promise<never>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  const expired = () => Promise.resolve();
+
+  it("waits longer than the old 5 s for a slow server, and gives up before the CLI does", () => {
+    const { hooks } = make({
+      readThreadPolicy: async () => undefined,
+    });
+    const matcher = hooks?.PreToolUse?.[0];
+    expect(matcher?.timeout).toBe(PRE_TOOL_HOOK_TIMEOUT_SECONDS);
+    expect(PRE_TOOL_HOOK_TIMEOUT_SECONDS).toBeGreaterThanOrEqual(30);
+    // Our deadline must fire first, or the CLI's timeout refuses the call instead.
+    expect(PRE_TOOL_READ_DEADLINE_MS).toBeLessThan(PRE_TOOL_HOOK_TIMEOUT_SECONDS * 1000);
+    expect(hooks?.Stop?.[0]?.timeout).not.toBe(PRE_TOOL_HOOK_TIMEOUT_SECONDS);
+  });
+
+  it("lets a shell or edit through when the policy read stalls past the deadline", async () => {
+    const { fire, errors } = make({
+      readThreadPolicy: stalled,
+      readLedgerState: async () => state(null),
+      ledgerTools: true,
+      preToolDeadline: expired,
+    });
+    for (const tool of ["Bash", "PowerShell", "Monitor", "Agent", "Edit", "Write"]) {
+      expect(await fire("PreToolUse", preToolUse(tool))).toEqual({});
+    }
+    expect(errors).toHaveLength(6);
+  });
+
+  it("lets an edit through when the ledger read stalls past the deadline", async () => {
+    const { fire } = make({
+      readThreadPolicy: async () => ({
+        structure: "solo",
+        planBeforeEditing: true,
+        runtimeMode: "full-access",
+      }),
+      readLedgerState: stalled,
+      ledgerTools: true,
+      preToolDeadline: expired,
+    });
+    expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+  });
+
+  it("aborts the stalled read so it does not outlive the call", async () => {
+    let aborted = false;
+    const { fire } = make({
+      readThreadPolicy: (signal) => {
+        signal.addEventListener("abort", () => (aborted = true), { once: true });
+        return stalled(signal);
+      },
+      preToolDeadline: expired,
+    });
+    expect(await fire("PreToolUse", preToolUse("Bash"))).toEqual({});
+    expect(aborted).toBe(true);
+  });
+
+  it("still denies when the read answers in time", async () => {
+    const { fire } = make({
+      readThreadPolicy: async () => ({
+        structure: "managers",
+        planBeforeEditing: false,
+        runtimeMode: "full-access",
+      }),
+      // Never expires, as a deadline that has not been reached.
+      preToolDeadline: () => new Promise<void>(() => {}),
+    });
+    expect(decisionOf(await fire("PreToolUse", preToolUse("Bash")))?.permissionDecision).toBe(
+      "deny",
+    );
   });
 });
 
