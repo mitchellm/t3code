@@ -389,7 +389,7 @@ describe("Stop hook", () => {
     expect(reasons.at(-1)).toContain("replan");
     for (const reason of reasons) {
       expect(reason).toContain(
-        "If you are waiting on background work, call t3_background_wait with its task id and end your turn.",
+        "If you are waiting on background work, call t3_background_wait with its taskId (or taskIds for several) and end your turn.",
       );
     }
   });

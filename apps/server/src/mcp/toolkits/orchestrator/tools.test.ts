@@ -3,7 +3,26 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
 
-import { OrchestratorToolkit } from "./tools.ts";
+import { backgroundWaitTaskIds, OrchestratorToolkit } from "./tools.ts";
+
+// Agents read "call t3_background_wait with its task id" and pass {taskId}; 20 calls failed on it.
+it("t3_background_wait takes a single taskId as well as taskIds, and one of them", () => {
+  const schema = OrchestratorToolkit.tools.t3_background_wait.parametersSchema;
+  const decode = Schema.decodeUnknownExit(schema);
+  const idsOf = (input: unknown) => {
+    const exit = decode(input);
+    return Exit.isSuccess(exit) ? backgroundWaitTaskIds(exit.value) : "rejected";
+  };
+  expect(idsOf({ taskId: "x" })).toEqual(["x"]);
+  expect(idsOf({ taskIds: ["x"] })).toEqual(["x"]);
+  expect(idsOf({ taskId: "x" })).toEqual(idsOf({ taskIds: ["x"] }));
+  // Both given: one list, without repeating an id.
+  expect(idsOf({ taskId: "b", taskIds: ["a", "b"] })).toEqual(["a", "b"]);
+  expect(idsOf({ taskId: "x", waiting: false })).toEqual(["x"]);
+  expect(idsOf({})).toBeUndefined();
+  expect(idsOf({ taskIds: [] })).toBe("rejected");
+  expect(idsOf({ taskId: "  " })).toBe("rejected");
+});
 
 // Oversized page sizes clamp on decode, so the schema has no `maximum`; Codex also drops
 // bounds from its TypeScript view. The description is the only place a model sees a limit.

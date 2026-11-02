@@ -1137,7 +1137,7 @@ it.effect("follows up past work nobody waits on, naming only the tasks a wait ca
     assert.notInclude(followUps[0]!.text, "toolu_build");
     assert.include(
       followUps[0]!.text,
-      "call t3_background_wait with its task id and end your turn",
+      "call t3_background_wait with its taskId (or taskIds for several) and end your turn",
     );
     assert.deepEqual(yield* stopNotices(threadId), []);
   }).pipe(Effect.provide(layerTest)),
