@@ -69,8 +69,11 @@ const isDelegatedChild = (thread: OrchestrationV2ThreadShell) =>
   thread.createdBy === "agent" &&
   thread.worktreePath !== null;
 
-const isFinishedAndIdle = (thread: OrchestrationV2ThreadShell, now: number) =>
-  FINISHED_STATUSES.has(thread.status) && storageCleanupThreadIdle(thread, now);
+const isFinishedAndIdle = (
+  thread: OrchestrationV2ThreadShell,
+  now: number,
+  settings: Parameters<typeof storageCleanupThreadIdle>[2],
+) => FINISHED_STATUSES.has(thread.status) && storageCleanupThreadIdle(thread, now, settings);
 
 const make = Effect.gen(function* () {
   const settingsService = yield* Settings.ServerSettingsService;
@@ -160,6 +163,7 @@ const make = Effect.gen(function* () {
     group: ReadonlyArray<OrchestrationV2ThreadShell>,
   ) {
     const now = yield* Clock.currentTimeMillis;
+    const settings = yield* settingsService.getSettings.pipe(Effect.orDie);
     const latestPaths = (yield* projections.getThreadWorktreePaths({
       includeArchived: true,
     })).filter((entry) => pathKey(entry.worktreePath) === pathKey(worktreePath));
@@ -173,7 +177,7 @@ const make = Effect.gen(function* () {
         return (
           before === undefined ||
           !isDelegatedChild(shell) ||
-          !isFinishedAndIdle(shell, now) ||
+          !isFinishedAndIdle(shell, now, settings) ||
           shell.branch !== before.branch ||
           pathKey(shell.worktreePath!) !== pathKey(worktreePath) ||
           storageCleanupActivityAt(shell) !== storageCleanupActivityAt(before) ||
@@ -227,7 +231,7 @@ const make = Effect.gen(function* () {
       yield* Effect.gen(function* () {
         if (delegated.length !== group.length)
           return keep("shared with a thread that was not delegated");
-        if (!group.every((member) => isFinishedAndIdle(member, now)))
+        if (!group.every((member) => isFinishedAndIdle(member, now, settings)))
           return keep("a child thread is still running or has pending work");
         const idleFor = now - Math.max(...group.map(storageCleanupActivityAt));
         if (idleFor < DELEGATED_WORKTREE_GRACE_MS)

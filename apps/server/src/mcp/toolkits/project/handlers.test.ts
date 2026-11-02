@@ -24,6 +24,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import * as DocumentText from "../../../provider/DocumentText.ts";
+import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
@@ -53,6 +54,8 @@ const clientLaunchHarness = (input: {
   /** Calls as this live T3 thread instead of as an outside client. */
   readonly callerThreadId?: ThreadId;
   readonly webOrigin?: string;
+  /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
+  readonly refusedByCeiling?: true;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -129,6 +132,23 @@ const clientLaunchHarness = (input: {
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
       launch: (launch) => {
         input.launched.push(launch);
+        if (input.refusedByCeiling) {
+          return Effect.fail(
+            new ThreadLaunch.ThreadLaunchError({
+              operation: "create-thread",
+              commandId: launch.commandId,
+              projectId: launch.projectId,
+              cause: new OrchestratorRuntimeModeAboveCeilingError({
+                commandId: launch.commandId,
+                threadId: launch.threadId ?? ThreadId.make("thread:refused"),
+                refused: "mode",
+                runtimeMode: launch.runtimeMode,
+                maxRuntimeMode: "approval-required",
+                organization: "Example Corp",
+              }),
+            }),
+          );
+        }
         return Effect.succeed({
           threadId: launch.threadId,
           projection: {
@@ -186,9 +206,10 @@ it.effect(
           readonly targeted?: false;
           readonly overrideModel?: ModelSelection;
           readonly webOrigin?: string;
+          readonly refusedByCeiling?: true;
         },
       ) {
-        const { targeted, overrideModel, webOrigin, ...input } = params;
+        const { targeted, overrideModel, webOrigin, refusedByCeiling, ...input } = params;
         const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
         const { projectId, modelSelection, dependencies } = clientLaunchHarness({
           runtimeModeCeiling,
@@ -196,6 +217,7 @@ it.effect(
           launched,
           ...(overrideModel === undefined ? {} : { overrideModel }),
           ...(webOrigin === undefined ? {} : { webOrigin }),
+          ...(refusedByCeiling === undefined ? {} : { refusedByCeiling }),
         });
         const toolkit = yield* ProjectToolkit.pipe(
           Effect.provide(
@@ -259,6 +281,16 @@ it.effect(
         overrideModel,
       });
       expect(fromSettings.launched[0]?.modelSelection).toEqual(overrideModel);
+
+      // An administrator's ceiling the orchestrator enforces is named, not reported as unavailable.
+      const managed = yield* launchWith("full-access", "full-access", {
+        title: "Fix",
+        refusedByCeiling: true,
+      });
+      expect(managed.result).toMatchObject({
+        code: "invalid_request",
+        message: "Example Corp limits threads to Supervised.",
+      });
     }),
 );
 
@@ -301,6 +333,62 @@ it.effect("a launch from outside a thread has no launcher", () =>
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(launched[0]).toBeDefined();
     expect(launched[0]?.launchedByThreadId).toBeUndefined();
+  }),
+);
+
+it.effect("a launch steps an inherited mode down to the provider's, and refuses one it lacks", () =>
+  Effect.gen(function* () {
+    // Pi offers no Auto; a mode a provider lacks would run as Supervised.
+    const pi = ProviderInstanceId.make("pi");
+    const launchPi = Effect.fn("test.launchPi")(function* (runtimeMode?: RuntimeMode) {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "auto",
+        launched,
+        providers: [
+          {
+            instanceId: pi,
+            driver: ProviderDriverKind.make("pi"),
+            enabled: true,
+            installed: true,
+            status: "ready",
+            version: null,
+            auth: { status: "authenticated" },
+            checkedAt: "2026-01-01T00:00:00Z",
+            models: [],
+            slashCommands: [],
+            skills: [],
+            supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
+          },
+        ],
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const result = yield* toolkit
+        .handle("t3_thread_launch", {
+          projectId,
+          title: "Fix",
+          modelSelection: { instanceId: pi, model: "pi-model" },
+          ...(runtimeMode === undefined ? {} : { runtimeMode }),
+        })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      return { result: result.at(-1)?.result, launched };
+    });
+
+    const inherited = yield* launchPi();
+    expect(inherited.launched[0]?.runtimeMode).toBe("auto-accept-edits");
+
+    const requested = yield* launchPi("auto");
+    expect(requested.result).toMatchObject({ code: "invalid_request" });
+    expect(requested.launched).toHaveLength(0);
+
+    const offered = yield* launchPi("approval-required");
+    expect(offered.launched[0]?.runtimeMode).toBe("approval-required");
   }),
 );
 

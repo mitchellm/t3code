@@ -15,6 +15,7 @@ import {
   type ResolvedProviderInstanceEnvironment,
   ProviderInstanceId,
   SecretProviderId,
+  SettingsSecretValue,
   type SecretReference,
 } from "@t3tools/contracts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
@@ -356,6 +357,24 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
       expect(instance!.enabled).toBe(false);
       const snapshot = yield* instance!.snapshot.getSnapshot;
       expect(snapshot.enabled).toBe(false);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.live("lists a blocked driver's instances as unavailable without running them", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex");
+      const reason = "Example Corp's policy does not allow the Codex provider.";
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [CodexDriver],
+        configMap: { [instanceId]: { driver: ProviderDriverKind.make("codex") } },
+        blockedReason: (driver) => (driver === "codex" ? reason : undefined),
+      });
+
+      expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+      const [unavailable] = yield* registry.listUnavailable;
+      expect(unavailable?.instanceId).toBe(instanceId);
+      expect(unavailable?.availability).toBe("unavailable");
+      expect(unavailable?.unavailableReason).toBe(reason);
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -802,11 +821,13 @@ describe("ProviderInstanceRegistry secret environment", () => {
   function setup(
     initial: Record<string, string>,
     configSchema: AnyProviderDriver["configSchema"] = Schema.Unknown,
+    config: unknown = {},
   ) {
     const vault = new Map(Object.entries(initial));
     const reads: Array<ReadonlyArray<string>> = [];
     const invalidated: Array<ReadonlyArray<string>> = [];
     const created: Array<ResolvedProviderInstanceEnvironment> = [];
+    const configs: Array<unknown> = [];
     const driver: AnyProviderDriver = {
       driverKind,
       metadata: { displayName: "Fake" },
@@ -815,6 +836,7 @@ describe("ProviderInstanceRegistry secret environment", () => {
       create: (input) =>
         Effect.sync(() => {
           created.push(input.environment);
+          configs.push(input.config);
           return { instanceId: input.instanceId, enabled: input.enabled } as ProviderInstance;
         }),
     };
@@ -837,7 +859,7 @@ describe("ProviderInstanceRegistry secret environment", () => {
     const configMap: ProviderInstanceConfigMap = {
       [instanceId]: {
         driver: driverKind,
-        config: {},
+        config,
         environment: [
           { name: "OPENAI_API_KEY", value: secret, sensitive: true },
           { name: "BASE_URL", value: "https://example.test", sensitive: false },
@@ -855,7 +877,7 @@ describe("ProviderInstanceRegistry secret environment", () => {
       yield* PubSub.take(changes);
       return built;
     });
-    return { vault, reads, invalidated, created, make, makeGated, gate };
+    return { vault, reads, invalidated, created, configs, make, makeGated, gate };
   }
 
   it.effect("starts an instance with the secret its environment points at", () => {
@@ -917,6 +939,26 @@ describe("ProviderInstanceRegistry secret environment", () => {
       expect(fixture.created.map((environment) => environment[0]?.value)).toEqual([
         "sk-live",
         "sk-rotated",
+      ]);
+    }).pipe(Effect.scoped);
+  });
+
+  it.effect("reads a config field typed SettingsSecretValue and rebuilds when it rotates", () => {
+    const apiKey: SecretReference = { ...secret, reference: "op://Private/Gateway/key" };
+    const fixture = setup(
+      { [secret.reference]: "sk-live", [apiKey.reference]: "gw-live" },
+      Schema.Struct({ apiKey: SettingsSecretValue, model: Schema.String }),
+      { apiKey, model: "m" },
+    );
+    return Effect.gen(function* () {
+      const { mutator } = yield* fixture.make;
+      expect(fixture.reads.at(-1)).toEqual([secret.reference, apiKey.reference]);
+
+      fixture.vault.set(apiKey.reference, "gw-rotated");
+      yield* mutator.reloadSecrets();
+      expect(fixture.configs).toEqual([
+        { apiKey: "gw-live", model: "m" },
+        { apiKey: "gw-rotated", model: "m" },
       ]);
     }).pipe(Effect.scoped);
   });
