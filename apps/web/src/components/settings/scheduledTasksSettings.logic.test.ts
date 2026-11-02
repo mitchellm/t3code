@@ -20,6 +20,7 @@ import {
   scheduledTaskDefaultModel,
   defaultScheduledTaskProjectId,
   matchesScheduledTaskScope,
+  precheckFromDraft,
   scheduleFromDraft,
   taskToDraft,
 } from "./scheduledTasksSettings.logic";
@@ -379,4 +380,23 @@ it("rejects dedupe templates without a request placeholder", () => {
   const draft = taskToDraft({ ...legacyTask, schedule: { type: "webhook", signature: null } });
   expect(scheduleFromDraft({ ...draft, replayKey: "literal" })).toBeNull();
   expect(scheduleFromDraft({ ...draft, coalesceKey: "{{body.bad" })).toBeNull();
+});
+
+describe("scheduled task precheck", () => {
+  it("clears an empty command, keeps the timeout in seconds, and rejects a bad timeout", () => {
+    expect(precheckFromDraft({ precheckCommand: "  ", precheckTimeoutSeconds: "30" })).toEqual({
+      precheck: null,
+    });
+    expect(precheckFromDraft({ precheckCommand: " ls ", precheckTimeoutSeconds: "" })).toEqual({
+      precheck: { command: "ls" },
+    });
+    expect(precheckFromDraft({ precheckCommand: "ls", precheckTimeoutSeconds: "30" })).toEqual({
+      precheck: { command: "ls", timeoutMs: 30_000 },
+    });
+    for (const bad of ["0", "601", "1.5", "abc"]) {
+      expect(
+        precheckFromDraft({ precheckCommand: "ls", precheckTimeoutSeconds: bad }),
+      ).toHaveProperty("error");
+    }
+  });
 });

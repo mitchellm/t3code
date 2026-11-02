@@ -175,7 +175,7 @@ export function precheckFromDraft(
   if (seconds === "") return { precheck: { command } };
   const timeoutMs = Number(seconds) * 1000;
   if (
-    !Number.isInteger(timeoutMs) ||
+    !Number.isInteger(Number(seconds)) ||
     timeoutMs < 1_000 ||
     timeoutMs > MAX_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS
   )
