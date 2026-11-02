@@ -2496,7 +2496,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 delegatedWorkActive: false,
                 pullRequestWatched: false,
               })),
-              readThreadPolicy: Effect.succeed({ structure: "solo", planBeforeEditing: true }),
+              readThreadPolicy: Effect.succeed({
+                structure: "solo",
+                planBeforeEditing: true,
+                runtimeMode: "full-access",
+              }),
               // This session has no T3 tools, so the loadout stays out of its context.
               readLoadout: Effect.succeed({
                 ...DEFAULT_LOADOUTS.find(({ id }) => id === "cross-check")!,

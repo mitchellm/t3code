@@ -37,6 +37,17 @@ export const HARNESS_STOP_BLOCK_CEILING = 20;
 export const HARNESS_REMINDER_EVERY = 15;
 
 const HOOK_TIMEOUT_SECONDS = 5;
+/**
+ * The CLI refuses a tool call whose PreToolUse hook times out ("The tool call was not executed"),
+ * and the server's event loop stalls for 11 to 32 s at times, so the 5 s above refused 250 calls in
+ * a week. A stall now delays a call instead of refusing it.
+ */
+export const PRE_TOOL_HOOK_TIMEOUT_SECONDS = 30;
+/**
+ * Where the hook stops waiting on its reads and lets the call through. It sits under the CLI's
+ * timeout above so ours fires first: a late answer is refused, no answer is allowed.
+ */
+export const PRE_TOOL_READ_DEADLINE_MS = 25_000;
 const LEDGER_BLOCK_MAX_CHARS = 3_000;
 const TITLE_MAX_CHARS = 80;
 const ACCEPTANCE_MAX_CHARS = 600;
@@ -44,6 +55,10 @@ const WIN_CONDITIONS_SHOWN = 6;
 const WIN_CONDITION_MAX_CHARS = 200;
 const OPEN_ITEMS_SHOWN = 20;
 const STOP_ITEMS_SHOWN = 5;
+
+// The agent changes its own thread's loadout only through this tool (t3_thread_configure sets the
+// model), matched by suffix since the MCP server prefix is the host's.
+const LOADOUT_CHANGE_TOOL = "t3_loadout_propose";
 
 // Plan before editing gates only these. A shell can write files too, but the gate is a nudge to
 // plan, not a sandbox: a shell edit cannot be told apart from a read, and gating shells would make
@@ -89,6 +104,13 @@ export interface HarnessHookPort {
    * managers rule and plan before editing bind only the top level.
    */
   readonly delegatedChild: boolean;
+  /**
+   * Resolves when a gated tool call should stop waiting on its reads and go through. Defaults to
+   * a timer of PRE_TOOL_READ_DEADLINE_MS; a test passes one that has already expired.
+   */
+  readonly preToolDeadline?: () => Promise<void>;
+  /** Epoch milliseconds, for how recently a ledger finished. */
+  readonly now?: () => number;
   /** The Stop hook's task list omits the CLI's ambient flag, which only its task frames carry. */
   readonly isAmbientTask?: (taskId: string) => boolean;
   /** Each stop's crons, so the between-turn follow-up waits on them too. */
@@ -325,11 +347,46 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
   const matcher = (
     run: (input: HookInput, signal: AbortSignal) => Promise<HookJSONOutput>,
     pattern?: string,
+    timeout = HOOK_TIMEOUT_SECONDS,
   ): HookCallbackMatcher => ({
     ...(pattern === undefined ? {} : { matcher: pattern }),
-    timeout: HOOK_TIMEOUT_SECONDS,
+    timeout,
     hooks: [guard(run)],
   });
+  // A gated tool call is worth less than the policy it checks: when the reads do not answer by the
+  // deadline the call goes through, since a refusal costs a turn and 38% of them were retried
+  // identically. The reads are aborted so a stalled one does not outlive the call.
+  const failOpen =
+    (run: (input: HookInput, signal: AbortSignal) => Promise<HookJSONOutput>) =>
+    async (input: HookInput, signal: AbortSignal): Promise<HookJSONOutput> => {
+      const reads = new AbortController();
+      const abortReads = () => reads.abort();
+      signal.addEventListener("abort", abortReads, { once: true });
+      // An unref'd platform timer, so nothing needs clearing when the reads answer first.
+      const deadline =
+        port.preToolDeadline?.() ??
+        new Promise<void>((resolve) => {
+          AbortSignal.timeout(PRE_TOOL_READ_DEADLINE_MS).addEventListener(
+            "abort",
+            () => resolve(),
+            {
+              once: true,
+            },
+          );
+        });
+      try {
+        const settled = await Promise.race([
+          run(input, reads.signal).then((output) => ({ output })),
+          deadline.then(() => undefined),
+        ]);
+        if (settled !== undefined) return settled.output;
+        reads.abort();
+        port.onHookError(new Error("A tool call's policy reads did not answer in time; allowed."));
+        return {};
+      } finally {
+        signal.removeEventListener("abort", abortReads);
+      }
+    };
   const hooks: ClaudeHooks = {};
 
   // Sticky on purpose: a later compaction may summarize the copy away, but the
@@ -507,8 +564,11 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     let toolCalls = 0;
     hooks.PostToolUse = [
       matcher(async (input, signal) => {
+        if (input.hook_event_name !== "PostToolUse") return {};
+        // The agent proposing a loadout changes the structure the cached policy holds.
+        if (input.tool_name.endsWith(LOADOUT_CHANGE_TOOL)) cachedPolicy = undefined;
         // A native subagent's calls are its own work, not the thread's drift.
-        if (input.hook_event_name !== "PostToolUse" || input.agent_id !== undefined) return {};
+        if (input.agent_id !== undefined) return {};
         toolCalls++;
         if (toolCalls % HARNESS_REMINDER_EVERY !== 0) return {};
         const ledger = activeLedger(await readLedgerState(signal));
@@ -530,13 +590,21 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     ];
   }
 
-  if (readLoadout !== undefined) {
+  const gatesToolCalls = readThreadPolicy !== undefined && !port.delegatedChild;
+  // The thread's structure and settings, read once per turn rather than before every shell call:
+  // a server stall then costs one read, not one per call. A prompt starts a turn, and the agent's
+  // own loadout change (see PostToolUse) ends the cache early. A failed read is not kept. A
+  // loadout or setting the user changes mid-turn applies from the next prompt.
+  let cachedPolicy: ProviderAdapterV2HarnessThreadPolicy | undefined;
+
+  if (readLoadout !== undefined || gatesToolCalls) {
     // Fires once per prompt before the model starts, and reads fresh, so a loadout the user or
     // the agent changed since the last prompt is the one shown. A delegated child reads its own
     // thread, which starts with no loadout, so it hears nothing unless one was set on it.
     hooks.UserPromptSubmit = [
       matcher(async (input, signal) => {
         if (input.hook_event_name !== "UserPromptSubmit") return {};
+        cachedPolicy = undefined;
         const context = await loadoutUpdate(signal, false);
         if (context === undefined) return {};
         return {
@@ -548,6 +616,13 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
 
   if (readThreadPolicy !== undefined && !port.delegatedChild) {
     const readPlanLedger = port.ledgerTools ? readLedgerState : undefined;
+    const policyFor = async (signal: AbortSignal) => {
+      if (cachedPolicy !== undefined) return cachedPolicy;
+      const policy = await readThreadPolicy(signal);
+      // An abort that lost the race to the deadline must not leave a stale answer behind.
+      if (!signal.aborted) cachedPolicy = policy;
+      return policy;
+    };
     const deny = (reason: string): HookJSONOutput => ({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -556,43 +631,47 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
       },
     });
     hooks.PreToolUse = [
-      matcher(async (input, signal) => {
-        if (input.hook_event_name !== "PreToolUse") return {};
-        const tool = input.tool_name;
-        // Plan mode writes its plan file before any plan exists; a ledger forced mid-plan would
-        // fight the Stop hook once the plan exits, and a managers thread must write it too.
-        const filePath = filePathOf(input.tool_input);
-        if (
-          input.permission_mode === "plan" &&
-          port.plansDirectory !== undefined &&
-          filePath !== undefined &&
-          FILE_EDIT_TOOLS.includes(tool) &&
-          isInsideDirectory(filePath, port.plansDirectory)
-        ) {
-          return {};
-        }
-        const managersTool = input.agent_id === undefined && MANAGER_DENIED_TOOLS.includes(tool);
-        // A native subagent's edit is gated too: it is the thread editing, and routing an edit
-        // through Agent is the obvious way around a denial.
-        const planTool = readPlanLedger !== undefined && FILE_EDIT_TOOLS.includes(tool);
-        if (!managersTool && !planTool) return {};
-        const policy = await readThreadPolicy(signal);
-        if (policy === undefined) return {};
-        if (managersTool && policy.structure === "managers") {
-          const worker = (MANAGER_DENIED_WORKER_TOOLS as ReadonlyArray<string>).includes(tool);
-          return deny(
-            worker
-              ? `This thread runs a managers loadout, so the native ${tool} tool is denied: work goes to the loadout's roles. Use delegate_task with role "worker", "subPlanner" or "explorer".`
-              : `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${tool} is denied (shells too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
-          );
-        }
-        if (!planTool || readPlanLedger === undefined || !policy.planBeforeEditing) return {};
-        // Read on every call, so a ledger or item the agent adds mid-turn lifts the gate on its
-        // next edit.
-        const state = await readPlanLedger(signal);
-        if (state === undefined || plansCurrentWork(state.ledger)) return {};
-        return deny(planFirstReason(tool, state.ledger, input.agent_id !== undefined));
-      }, MANAGER_DENIED_TOOLS.join("|")),
+      matcher(
+        failOpen(async (input, signal) => {
+          if (input.hook_event_name !== "PreToolUse") return {};
+          const tool = input.tool_name;
+          // Plan mode writes its plan file before any plan exists; a ledger forced mid-plan would
+          // fight the Stop hook once the plan exits, and a managers thread must write it too.
+          const filePath = filePathOf(input.tool_input);
+          if (
+            input.permission_mode === "plan" &&
+            port.plansDirectory !== undefined &&
+            filePath !== undefined &&
+            FILE_EDIT_TOOLS.includes(tool) &&
+            isInsideDirectory(filePath, port.plansDirectory)
+          ) {
+            return {};
+          }
+          const managersTool = input.agent_id === undefined && MANAGER_DENIED_TOOLS.includes(tool);
+          // A native subagent's edit is gated too: it is the thread editing, and routing an edit
+          // through Agent is the obvious way around a denial.
+          const planTool = readPlanLedger !== undefined && FILE_EDIT_TOOLS.includes(tool);
+          if (!managersTool && !planTool) return {};
+          const policy = await policyFor(signal);
+          if (policy === undefined) return {};
+          if (managersTool && policy.structure === "managers") {
+            const worker = (MANAGER_DENIED_WORKER_TOOLS as ReadonlyArray<string>).includes(tool);
+            return deny(
+              worker
+                ? `This thread runs a managers loadout, so the native ${tool} tool is denied: work goes to the loadout's roles. Use delegate_task with role "worker", "subPlanner" or "explorer".`
+                : `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${tool} is denied (shells too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
+            );
+          }
+          if (!planTool || readPlanLedger === undefined || !policy.planBeforeEditing) return {};
+          // Read on every call, so a ledger or item the agent adds mid-turn lifts the gate on its
+          // next edit.
+          const state = await readPlanLedger(signal);
+          if (state === undefined || plansCurrentWork(state.ledger)) return {};
+          return deny(planFirstReason(tool, state.ledger, input.agent_id !== undefined));
+        }),
+        MANAGER_DENIED_TOOLS.join("|"),
+        PRE_TOOL_HOOK_TIMEOUT_SECONDS,
+      ),
     ];
   }
 

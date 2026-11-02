@@ -498,6 +498,8 @@ export interface ProviderAdapterV2HarnessPort {
 export interface ProviderAdapterV2HarnessThreadPolicy {
   readonly structure: LoadoutStructure;
   readonly planBeforeEditing: boolean;
+  /** How much the thread may do without asking; read with the policy so one read answers a hook. */
+  readonly runtimeMode: RuntimeMode;
 }
 
 /** The thread's resolved loadout and who chose it. */

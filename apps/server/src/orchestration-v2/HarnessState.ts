@@ -7,6 +7,7 @@ import {
   type LoadoutSetBy,
   type OrchestrationV2Run,
   type ProjectId,
+  type RuntimeMode,
   type ServerSettings,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -36,6 +37,7 @@ export interface HarnessThreadReads {
       readonly projectId: ProjectId;
       readonly loadoutId: string | null;
       readonly setBy: LoadoutSetBy | null;
+      readonly runtimeMode: RuntimeMode;
     },
     ProjectionStore.ProjectionStoreV2Error
   >;
@@ -83,6 +85,7 @@ export function makeHarnessThreadReads(
           projectId: thread.projectId,
           loadoutId: thread.loadout?.id ?? null,
           setBy: thread.loadout?.setBy ?? null,
+          runtimeMode: thread.runtimeMode,
         })),
       ),
   };
@@ -105,11 +108,12 @@ export function makeHarnessPort<E>(
     readLedgerState: orUndefined(Effect.suspend(reads.readLedgerState), "ledger"),
     readThreadPolicy: orUndefined(
       Effect.gen(function* () {
-        const { projectId, loadoutId } = yield* reads.readThreadLoadout();
+        const { projectId, loadoutId, runtimeMode } = yield* reads.readThreadLoadout();
         const settings = yield* readProjectSettings(projectId);
         return {
           structure: loadoutStructure(resolveLoadout(settings.loadouts, loadoutId)),
           planBeforeEditing: settings.planBeforeEditing,
+          runtimeMode,
         };
       }),
       "loadout and plan before editing setting",

@@ -71,7 +71,12 @@ const counted = () => {
     readThreadLoadout: () =>
       Effect.sync(() => {
         reads.thread++;
-        return { projectId: ProjectId.make("project"), loadoutId: split.id, setBy: "user" };
+        return {
+          projectId: ProjectId.make("project"),
+          loadoutId: split.id,
+          setBy: "user",
+          runtimeMode: "full-access",
+        };
       }),
   };
   return { reads, threadReads };
@@ -89,6 +94,7 @@ it.effect("reads the structure and plan before editing from one thread and setti
     expect(yield* port.readThreadPolicy).toEqual({
       structure: "managers",
       planBeforeEditing: false,
+      runtimeMode: "full-access",
     });
     expect(reads).toEqual({ thread: 1, settings: 1 });
   }),
@@ -104,7 +110,12 @@ const loadoutPort = (loadoutId: string | null, setBy: LoadoutSetBy | null) => {
     {
       readLedgerState: () => Effect.die("not read here"),
       readThreadLoadout: () =>
-        Effect.succeed({ projectId: ProjectId.make("project"), loadoutId, setBy }),
+        Effect.succeed({
+          projectId: ProjectId.make("project"),
+          loadoutId,
+          setBy,
+          runtimeMode: "full-access" as const,
+        }),
     },
     () =>
       Effect.sync(() => {
