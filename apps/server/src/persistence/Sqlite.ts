@@ -1,8 +1,10 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
+import { RotatingFileSink } from "@t3tools/shared/logging";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "./Migrations.ts";
@@ -51,7 +53,44 @@ const layerSetup = Layer.effectDiscard(
   }).pipe(Effect.withSpan("Sqlite.setup")),
 );
 
-export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (dbPath: string) {
+const SLOW_STATEMENT_LOG_MAX_BYTES = 1024 * 1024;
+
+/** Appends one JSON line per slow statement; an unwritable log disables itself rather than failing queries. */
+const makeSlowStatementLog = (filePath: string): NodeSqliteClient.SlowStatementOptions => {
+  let sink: RotatingFileSink | undefined;
+  try {
+    sink = new RotatingFileSink({
+      filePath,
+      maxBytes: SLOW_STATEMENT_LOG_MAX_BYTES,
+      maxFiles: 2,
+      throwOnError: true,
+    });
+  } catch {
+    sink = undefined;
+  }
+  return {
+    thresholdMs: NodeSqliteClient.SLOW_STATEMENT_THRESHOLD_MS,
+    onSlow: (statement) => {
+      try {
+        sink?.write(
+          `${JSON.stringify({
+            time: DateTime.formatIso(DateTime.nowUnsafe()),
+            durationMs: Math.round(statement.durationMs),
+            connection: statement.connection,
+            sql: statement.sql,
+          })}\n`,
+        );
+      } catch {
+        sink = undefined;
+      }
+    },
+  };
+};
+
+export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (
+  dbPath: string,
+  slowStatementLogPath?: string,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
@@ -60,6 +99,9 @@ export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (d
     layerSetup,
     NodeSqliteClient.layer({
       filename: dbPath,
+      ...(slowStatementLogPath === undefined
+        ? {}
+        : { slowStatement: makeSlowStatementLog(slowStatementLogPath) }),
       readerWorker: true,
       // Run checkpoint fsyncs off the event loop so slow disk flushes cannot stall clients.
       checkpointWorker: true,
@@ -78,8 +120,9 @@ export const layerMemory = Layer.provideMerge(
 
 export const layerConfig = Layer.unwrap(
   Effect.gen(function* () {
-    const { dbPath } = yield* ServerConfig.ServerConfig;
+    const { dbPath, logsDir } = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
     yield* initializeV2Database(dbPath);
-    return layerFromPath(dbPath);
+    return layerFromPath(dbPath, path.join(logsDir, "sqlite-slow-statements.ndjson"));
   }),
 );

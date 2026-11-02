@@ -29,9 +29,46 @@ import * as Statement from "effect/sql/Statement";
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
 
+/** A statement this slow blocks the event loop long enough to show up as a stall; faster ones are noise. */
+export const SLOW_STATEMENT_THRESHOLD_MS = 250;
+const SLOW_STATEMENT_SQL_MAX_LENGTH = 1000;
+
+export interface SlowSqliteStatement {
+  readonly sql: string;
+  readonly durationMs: number;
+  readonly connection: "writer" | "reader";
+}
+
+export interface SlowStatementOptions {
+  readonly thresholdMs: number;
+  /** Runs on the calling thread right after the statement; keep it cheap and never throwing. */
+  readonly onSlow: (statement: SlowSqliteStatement) => void;
+}
+
+/** SQL text only: bound parameters can hold secrets and are never reported. */
+export function reportSlowStatement(
+  options: SlowStatementOptions | undefined,
+  statement: SlowSqliteStatement,
+): void {
+  if (options === undefined || statement.durationMs < options.thresholdMs) return;
+  try {
+    options.onSlow({
+      ...statement,
+      sql:
+        statement.sql.length > SLOW_STATEMENT_SQL_MAX_LENGTH
+          ? `${statement.sql.slice(0, SLOW_STATEMENT_SQL_MAX_LENGTH)}…`
+          : statement.sql,
+    });
+  } catch {
+    // Diagnostics must not fail the query.
+  }
+}
+
 export interface SqliteClientConfig {
   readonly filename: string;
   readonly readonly?: boolean | undefined;
+  /** Reports statements at or over the threshold, on the main connection and in reader workers. */
+  readonly slowStatement?: SlowStatementOptions | undefined;
   readonly spanAttributes?: Record<string, unknown> | undefined;
   /** Ignored for in-memory databases, which cannot share a second connection. */
   readonly readerWorker?: boolean | undefined;
@@ -228,6 +265,8 @@ const prepare = (sql, cached) => {
 };
 parentPort.on("message", ({ id, sql, params, cached, values, raw, safeIntegers }) => {
   let operation = "open";
+  // Timed here, not on the main thread, so queueing behind other messages does not count.
+  const startedAt = performance.now();
   try {
     if (db === undefined) throw new Error("database reader is unavailable");
     operation = "prepare";
@@ -236,14 +275,16 @@ parentPort.on("message", ({ id, sql, params, cached, values, raw, safeIntegers }
     statement.setReadBigInts(safeIntegers);
     if (statement.columns().length > 0) {
       statement.setReturnArrays(values);
-      parentPort.postMessage({ id, rows: statement.all(...params) });
+      const rows = statement.all(...params);
+      parentPort.postMessage({ id, rows, durationMs: performance.now() - startedAt });
     } else {
       const result = statement.run(...params);
-      parentPort.postMessage({ id, rows: raw ? result : [] });
+      parentPort.postMessage({ id, rows: raw ? result : [], durationMs: performance.now() - startedAt });
     }
   } catch (error) {
     parentPort.postMessage({
       id,
+      durationMs: performance.now() - startedAt,
       error: {
         operation,
         message: String(error && error.message ? error.message : error),
@@ -269,9 +310,10 @@ type ReaderStartup =
   | { readonly type: "unavailable"; readonly message: string };
 
 type ReaderReply =
-  | { readonly id: number; readonly rows: ReadonlyArray<any> }
+  | { readonly id: number; readonly rows: ReadonlyArray<any>; readonly durationMs?: number }
   | {
       readonly id: number;
+      readonly durationMs?: number;
       readonly error: {
         readonly operation: "open" | "prepare" | "execute";
         readonly message: string;
@@ -372,6 +414,13 @@ const makeReader = Effect.fnUntraced(function* (
           pending.set(id, {
             endsTransaction,
             resume: (reply) => {
+              if (reply.durationMs !== undefined) {
+                reportSlowStatement(options.slowStatement, {
+                  sql: input.sql,
+                  durationMs: reply.durationMs,
+                  connection: "reader",
+                });
+              }
               if ("rows" in reply) {
                 resume(Effect.succeed(reply.rows));
                 return;
@@ -998,6 +1047,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
         const execute = () => {
           let arrays = false;
           let result: Exit.Exit<ReadonlyArray<unknown>, SqlError>;
+          const startedAt = performance.now();
           try {
             const value = withClassification(classification, () => {
               statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
@@ -1020,6 +1070,11 @@ const make = Effect.fn("makeWithDatabase")(function* (
             // OR FAIL may have committed earlier rows even when execution throws.
             if (classification?.check) checkpoint?.check();
           }
+          reportSlowStatement(options.slowStatement, {
+            sql: statement.sourceSQL,
+            durationMs: performance.now() - startedAt,
+            connection: "writer",
+          });
           if (arrays) {
             try {
               statement.setReturnArrays(false);
