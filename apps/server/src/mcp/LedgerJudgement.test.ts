@@ -95,7 +95,7 @@ const harness = (
     taskRecords?: ReadonlyArray<JudgeTaskRecord>;
   } = {},
 ) => {
-  const delegated: Array<{ prompt: string; keySource: string }> = [];
+  const delegated: Array<{ prompt: string; keySource: string; stronger: boolean }> = [];
   const recorded: Array<{
     itemId: string;
     judgedEvidence: string | null;
@@ -489,6 +489,29 @@ it.effect(
       expect(yield* keyFor({ evidence: "other evidence" })).not.toBe(base);
       expect(yield* keyFor({}, { title: "Renamed ledger" })).not.toBe(base);
       expect(yield* keyFor({ judgements: 1 })).not.toBe(base);
+    });
+  },
+);
+
+it.effect(
+  "asks for the stronger judge only from the third verdict on an item, counting fails since the last pass",
+  () => {
+    const strongerFor = (edit: Partial<LedgerItem>) => {
+      const { ports, delegated } = harness();
+      return requestJudgement({ ledger: ledgerOf({}, [item(edit)]), itemId, ports }).pipe(
+        Effect.map(() => delegated[0]?.stronger),
+      );
+    };
+    return Effect.gen(function* () {
+      // Nothing recorded, then one fail: the first two verdicts use the standard judge. A re-close
+      // with new evidence clears the verdict, so the count must not read the latest outcome.
+      expect(yield* strongerFor({})).toBe(false);
+      expect(yield* strongerFor({ judgements: 1 })).toBe(false);
+      expect(yield* strongerFor({ judgements: 2 })).toBe(true);
+      expect(yield* strongerFor({ judgements: 5 })).toBe(true);
+      // A pass or a reopen moves the baseline; only fails after it count.
+      expect(yield* strongerFor({ judgements: 3, judgementsAtReopen: 2 })).toBe(false);
+      expect(yield* strongerFor({ judgements: 4, judgementsAtReopen: 2 })).toBe(true);
     });
   },
 );

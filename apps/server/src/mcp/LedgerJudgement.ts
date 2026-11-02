@@ -49,6 +49,8 @@ export interface JudgementPorts {
     readonly prompt: string;
     readonly title: string;
     readonly keySource: string;
+    /** The item already failed twice: judge on the stronger model (see `STRONGER_JUDGE_AFTER_FAILS`). */
+    readonly stronger: boolean;
   }) => Effect.Effect<JudgeRun, OrchestratorMcpFailure>;
   /** Text of every user message on the judge thread, oldest first. */
   readonly userMessages: (
@@ -289,8 +291,28 @@ function judgementPrompt(
   ].join("\n");
 }
 
+/**
+ * Fork: verdicts that failed before the next one is held to a stronger model. Two fails on the
+ * same item mean the cheap judge and the agent are going round in circles (retro 2026-11-01: 39
+ * items took 3+ verdicts, 10 stayed failed), so the third verdict on, the model changes.
+ */
+const STRONGER_JUDGE_AFTER_FAILS = 2;
+
+/**
+ * Failed verdicts since the item was last reopened or passed. The verdict itself is cleared once
+ * the agent re-closes with new evidence, so this counts verdicts, not the latest outcome; a pass
+ * moves the baseline, so every verdict after it is a fail.
+ */
+const failedVerdicts = (item: Pick<LedgerItem, "judgements" | "judgementsAtReopen">) =>
+  (item.judgements ?? 0) - (item.judgementsAtReopen ?? 0);
+
+/** Whether the next verdict on this item runs on the stronger judge. */
+export const strongerJudgeDue = (item: Pick<LedgerItem, "judgements" | "judgementsAtReopen">) =>
+  failedVerdicts(item) >= STRONGER_JUDGE_AFTER_FAILS;
+
 interface PreparedJudgement {
   readonly item: LedgerItem;
+  readonly stronger: boolean;
   readonly evidence: string;
   readonly prompt: string;
   readonly criteriaCount: number;
@@ -346,6 +368,7 @@ const prepareJudgement = Effect.fn("LedgerJudgement.prepare")(function* (
     item,
     evidence,
     prompt,
+    stronger: strongerJudgeDue(item),
     criteriaCount: criteria.length,
     title:
       item.setAside === undefined
@@ -425,6 +448,7 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
     prompt: prepared.prompt,
     title: prepared.title,
     keySource: prepared.keySource,
+    stronger: prepared.stronger,
   });
   if (run.status !== "completed") {
     const detail = run.waitTimedOut
@@ -557,6 +581,7 @@ export const startBackgroundJudgement = Effect.fn("LedgerJudgement.startBackgrou
         prompt: prepared.success.prompt,
         title: prepared.success.title,
         keySource: prepared.success.keySource,
+        stronger: prepared.success.stronger,
       }),
     );
     if (run._tag === "Failure") {

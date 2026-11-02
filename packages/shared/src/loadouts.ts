@@ -143,6 +143,32 @@ export function loadoutRoleCandidates(role: LoadoutRole): ReadonlyArray<{
 }
 
 /**
+ * The judge for an item already failed twice: the role's fallback when it can run (configured as
+ * the second opinion), else the planner's own model. A planner-model judge is accepted here
+ * because a different read of a stuck item outweighs independence from the planner.
+ */
+export function strongerJudgeTarget(
+  loadout: Loadout,
+  planner: {
+    readonly instanceId: LoadoutRole["instanceId"];
+    readonly model: string;
+    readonly options?: ReadonlyArray<ProviderOptionSelection> | undefined;
+  },
+  providers: ReadonlyArray<LoadoutProviderView>,
+): OrchestratorMcpTarget {
+  const fallback = loadout.roles.judge?.fallback;
+  return (
+    (fallback === undefined ? undefined : loadoutRoleTarget(fallback, providers)) ?? {
+      providerInstanceId: planner.instanceId,
+      model: planner.model,
+      ...(planner.options === undefined || planner.options.length === 0
+        ? {}
+        : { options: planner.options }),
+    }
+  );
+}
+
+/**
  * The candidate a recorded run matches. Judging compares against what actually started, not a
  * fresh resolution: a slow probe can make the primary resolvable after the judge began on the
  * fallback, and that judge is still the right one.

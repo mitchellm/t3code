@@ -76,6 +76,7 @@ import {
   loadoutDelegationTarget,
   matchRoleCandidate,
   resolveLoadout,
+  strongerJudgeTarget,
   withSolo,
 } from "@t3tools/shared/loadouts";
 import { isolationReport, resolveDelegationWorkspace } from "./WorkerIsolation.ts";
@@ -132,6 +133,7 @@ import {
   requestJudgement,
   settleBackgroundJudgement,
   startBackgroundJudgement,
+  strongerJudgeDue,
 } from "./LedgerJudgement.ts";
 import { workspaceCheckpoints } from "./LedgerJudgeCriteria.ts";
 import { linkDelegatedTask, resolveLedgerLink } from "./LedgerTaskLink.ts";
@@ -1237,6 +1239,27 @@ const make = Effect.gen(function* () {
     return { available, active, state };
   });
 
+  /**
+   * Fork: a project that disabled an instance must not resolve to it, so the machine-wide
+   * snapshot is narrowed by the project's own enable state (the ledger gate does the same).
+   */
+  const projectEnabledProviders = Effect.fn("OrchestratorMcpService.projectEnabledProviders")(
+    function* (
+      thread: Pick<OrchestrationV2ThreadProjection["thread"], "projectId">,
+      providers: ReadonlyArray<ServerProvider>,
+    ) {
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+      );
+      return providers.map((provider) => ({
+        ...provider,
+        enabled:
+          provider.enabled &&
+          resolveProjectProviderInstanceEnabled(settings, thread.projectId, provider.instanceId),
+      }));
+    },
+  );
+
   /** The thread's loadout target for a role name; undefined means inherit the thread's own. */
   const loadoutRoleTarget = Effect.fn("OrchestratorMcpService.loadoutRoleTarget")(function* (
     thread: Pick<OrchestrationV2ThreadProjection["thread"], "projectId" | "loadout">,
@@ -1245,20 +1268,10 @@ const make = Effect.gen(function* () {
   ) {
     if (role === undefined) return undefined;
     const { active } = yield* loadLoadouts(thread);
-    // Fork: a project that disabled an instance must not resolve to it, so the machine-wide
-    // snapshot is narrowed by the project's own enable state (the ledger gate does the same).
-    const settings = yield* serverSettings.getSettings.pipe(
-      Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
-    );
     const target = loadoutDelegationTarget(
       active,
       role,
-      providers.map((provider) => ({
-        ...provider,
-        enabled:
-          provider.enabled &&
-          resolveProjectProviderInstanceEnabled(settings, thread.projectId, provider.instanceId),
-      })),
+      yield* projectEnabledProviders(thread, providers),
     );
     // A judge that quietly ran on the thread's own model would be marking its own work.
     if (role === "judge" && target === undefined) {
@@ -2113,8 +2126,22 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError(threadManagementFailure));
     const dispatchFailureMessage = (error: unknown) =>
       failure("orchestration_error", `Unable to record the judgement: ${errorMessage(error)}`);
-    const expectedJudge = Effect.fn("OrchestratorMcpService.expectedJudge")(function* () {
-      const expected = yield* loadoutRoleTarget(parent.thread, "judge", yield* loadProviders);
+    const expectedJudge = Effect.fn("OrchestratorMcpService.expectedJudge")(function* (
+      stronger = false,
+    ) {
+      const providers = yield* loadProviders;
+      // The standard judge is resolved even when a stronger one is used, so a loadout whose judge
+      // cannot resolve still refuses rather than judging on an unconfigured model.
+      const standard = yield* loadoutRoleTarget(parent.thread, "judge", providers);
+      const { active } = yield* loadLoadouts(parent.thread);
+      const expected =
+        stronger && standard !== undefined
+          ? strongerJudgeTarget(
+              active,
+              parent.thread.modelSelection,
+              yield* projectEnabledProviders(parent.thread, providers),
+            )
+          : standard;
       if (expected?.providerInstanceId === undefined || expected.model === undefined) {
         return yield* failure("provider_unavailable", "The judge role cannot be resolved.");
       }
@@ -2149,6 +2176,7 @@ const make = Effect.gen(function* () {
         prompt,
         title,
         keySource,
+        stronger,
       }) {
         const digest = yield* crypto
           .digest("SHA-256", new TextEncoder().encode(keySource))
@@ -2158,7 +2186,7 @@ const make = Effect.gen(function* () {
         const clientRequestId = `judge-${Array.from(digest.slice(0, 16), (byte) =>
           byte.toString(16).padStart(2, "0"),
         ).join("")}`;
-        const expected = yield* expectedJudge();
+        const expected = yield* expectedJudge(stronger);
         const result = yield* service.delegateTask(
           scope,
           {
@@ -2186,10 +2214,20 @@ const make = Effect.gen(function* () {
           result.model === null ||
           result.providerInstanceId === null
             ? undefined
-            : matchRoleCandidate(active.roles.judge, {
+            : (matchRoleCandidate(active.roles.judge, {
                 instanceId: result.providerInstanceId,
                 model: result.model,
-              });
+              }) ??
+              // A third verdict on runs on the planner's model when the role has no fallback
+              // (strongerJudgeTarget). Accepted only for an item that has earned it, so an agent
+              // cannot pass off its own delegation on that model as the first verdict.
+              (result.providerInstanceId === parent.thread.modelSelection.instanceId &&
+              result.model === parent.thread.modelSelection.model &&
+              ledger?.items.some(
+                (item) => item.judgeTaskId === taskId && strongerJudgeDue(item),
+              ) === true
+                ? { providerInstanceId: result.providerInstanceId, model: result.model }
+                : undefined));
         return yield* judgeRun(result, ran ?? (yield* expectedJudge()));
       }),
       userMessages: (threadId) =>
