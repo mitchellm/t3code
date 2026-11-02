@@ -22,6 +22,7 @@ import {
   matchRoleCandidate,
   parseJudgeVerdict,
   resolveLoadout,
+  strongerJudgeTarget,
   withSolo,
 } from "./loadouts.ts";
 import { resolveProjectSettings } from "./projectSettings.ts";
@@ -291,6 +292,58 @@ describe("judgeCandidateTargets", () => {
     expect(matchRoleCandidate(role, { instanceId: claude, model: "claude-haiku-5-5" })).toBe(
       undefined,
     );
+  });
+});
+
+describe("strongerJudgeTarget", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const planner = { instanceId: claude, model: "claude-opus-5-5" };
+  const loadoutWith = (judge: LoadoutRole): Loadout => ({
+    id: "l",
+    name: "L",
+    description: "",
+    roles: { judge },
+  });
+  const withFallback: LoadoutRole = {
+    instanceId: codex,
+    model: "gpt-6.1-sol",
+    fallback: { instanceId: claude, model: "claude-sonnet-5-5", effort: "high" },
+  };
+
+  it("uses the judge's fallback when it has one and it can run", () => {
+    expect(
+      strongerJudgeTarget(loadoutWith(withFallback), planner, [
+        provider(claude, ["claude-sonnet-5-5", "claude-opus-5-5"]),
+      ]),
+    ).toEqual({
+      providerInstanceId: claude,
+      model: "claude-sonnet-5-5",
+      options: [{ id: "effort", value: "high" }],
+    });
+  });
+
+  it("uses the planner's model when there is no fallback, or the fallback cannot run", () => {
+    const expected = { providerInstanceId: claude, model: "claude-opus-5-5" };
+    expect(
+      strongerJudgeTarget(loadoutWith({ instanceId: codex, model: "gpt-6.1-sol" }), planner, [
+        provider(claude, ["claude-opus-5-5"]),
+      ]),
+    ).toEqual(expected);
+    expect(strongerJudgeTarget(loadoutWith(withFallback), planner, [])).toEqual(expected);
+  });
+
+  it("carries the planner's options along", () => {
+    expect(
+      strongerJudgeTarget(
+        loadoutWith({ instanceId: codex, model: "gpt-6.1-sol" }),
+        { ...planner, options: [{ id: "effort", value: "high" }] },
+        [],
+      ),
+    ).toEqual({
+      providerInstanceId: claude,
+      model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "high" }],
+    });
   });
 });
 
