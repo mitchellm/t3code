@@ -20,7 +20,9 @@ import {
   TrimmedNonEmptyString,
   TurnItemId,
 } from "./baseSchemas.ts";
+import { ModelSelection } from "./modelSelection.ts";
 import {
+  ScheduledTaskPrecheck,
   ScheduledTaskRunStatus,
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
@@ -726,6 +728,14 @@ export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
       description: "Default true: runs post in this thread. False: new thread per run.",
     }),
   ),
+  precheck: Schema.optional(Schema.NullOr(ScheduledTaskPrecheck)).annotate({
+    description:
+      "Shell command the server runs before each run; needs a full-access thread. Exit 0 with output: the run starts and the prompt gets the output. Exit 0 with no output: no run. Failure or timeout: the run starts with the error. null clears.",
+  }),
+  modelOverride: Schema.optional(Schema.NullOr(ModelSelection)).annotate({
+    description:
+      "Provider instance and model for the runs, from `orchestrator_capabilities`, such as a small model for quiet checks. null clears. Absent: keep stored.",
+  }),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpScheduleTaskInput = typeof OrchestratorMcpScheduleTaskInput.Type;
@@ -750,6 +760,12 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   schedule: ScheduledTaskSchedule,
   nextRunAt: Schema.NullOr(IsoDateTime),
   lastRunStatus: ScheduledTaskRunStatus,
+  precheck: Schema.optional(ScheduledTaskPrecheck),
+  modelOverride: Schema.optional(ModelSelection),
+  lastRunQuiet: Schema.optional(Schema.Boolean).annotate({
+    description: "The last run's precheck found nothing, so no run started.",
+  }),
+  quietRunCount: Schema.optional(Schema.Int),
   webhookUrl: Schema.optional(Schema.String).annotate({
     description:
       "Public URL for the sender. Absent: no T3 Connect tunnel. The user must enable T3 Connect remote access.",
@@ -789,6 +805,8 @@ export const OrchestratorMcpUpdateScheduledTaskInput = Schema.Struct({
   schedule: Schema.optional(OrchestratorMcpSchedule),
   enabled: Schema.optional(Schema.Boolean),
   bindToCurrentThread: Schema.optional(Schema.Boolean),
+  precheck: OrchestratorMcpScheduleTaskInput.fields.precheck,
+  modelOverride: OrchestratorMcpScheduleTaskInput.fields.modelOverride,
 });
 export type OrchestratorMcpUpdateScheduledTaskInput =
   typeof OrchestratorMcpUpdateScheduledTaskInput.Type;

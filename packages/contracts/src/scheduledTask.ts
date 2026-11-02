@@ -217,6 +217,28 @@ export type ScheduledTaskUpsertSchedule = typeof ScheduledTaskUpsertSchedule.Typ
 export const ScheduledTaskRunStatus = Schema.Literals(["never", "running", "succeeded", "failed"]);
 export type ScheduledTaskRunStatus = typeof ScheduledTaskRunStatus.Type;
 
+export const MAX_SCHEDULED_TASK_PRECHECK_COMMAND_CHARS = 4_000;
+export const DEFAULT_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS = 120_000;
+export const MAX_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS = 600_000;
+
+export const ScheduledTaskPrecheck = Schema.Struct({
+  command: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(MAX_SCHEDULED_TASK_PRECHECK_COMMAND_CHARS),
+  ).annotate({
+    description:
+      "Shell command run in the project folder before each run (sh, or PowerShell on Windows).",
+  }),
+  timeoutMs: Schema.optional(
+    Schema.Int.check(
+      Schema.isBetween({ minimum: 1_000, maximum: MAX_SCHEDULED_TASK_PRECHECK_TIMEOUT_MS }),
+    ),
+  ).annotate({ description: "Default 120000." }),
+}).annotate({
+  description:
+    "Exit 0 with output: news, the run starts and gets the output. Exit 0 with no output: quiet, no run starts. Failure or timeout: the run starts with the error.",
+});
+export type ScheduledTaskPrecheck = typeof ScheduledTaskPrecheck.Type;
+
 export const ScheduledTaskWebhookEndpoint = Schema.Struct({
   path: TrimmedNonEmptyString,
   url: Schema.NullOr(TrimmedNonEmptyString),
@@ -234,6 +256,10 @@ export const ScheduledTask = Schema.Struct({
   threadId: Schema.NullOr(ThreadId),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   modelSelection: ModelSelection,
+  /** Model for the turns this task starts. Absent: a fresh thread uses `modelSelection`, a bound thread keeps its own. */
+  modelOverride: Schema.optional(ModelSelection),
+  /** Run before each fire; the model wakes only when it prints something. */
+  precheck: Schema.optional(ScheduledTaskPrecheck),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   createdBy: OrchestrationV2Actor,
@@ -244,7 +270,11 @@ export const ScheduledTask = Schema.Struct({
   lastRunAt: Schema.NullOr(IsoDateTime),
   lastRunStatus: ScheduledTaskRunStatus,
   lastRunError: Schema.NullOr(Schema.String),
+  /** The last run's precheck found nothing, so no turn started. `lastRunStatus` stays `succeeded`. */
+  lastRunQuiet: Schema.optional(Schema.Boolean),
   runCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** Runs counted in `runCount` whose precheck found nothing. */
+  quietRunCount: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   webhook: Schema.optional(ScheduledTaskWebhookEndpoint),
   /** Why the task cannot run regardless of `enabled`, such as a managed policy refusing webhooks. */
   blockedByPolicy: Schema.optionalKey(Schema.String),
@@ -273,6 +303,12 @@ export const ScheduledTaskUpsertInput = Schema.Struct({
   threadId: Schema.optional(Schema.NullOr(ThreadId)),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   modelSelection: ModelSelection,
+  modelOverride: Schema.optional(Schema.NullOr(ModelSelection)).annotate({
+    description: "Omitted: keep stored. null clears.",
+  }),
+  precheck: Schema.optional(Schema.NullOr(ScheduledTaskPrecheck)).annotate({
+    description: "Omitted: keep stored. null clears.",
+  }),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   createdBy: Schema.optional(OrchestrationV2Actor),
