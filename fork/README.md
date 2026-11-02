@@ -114,6 +114,9 @@ For a restart at a chosen moment, use `restart`, not `install`:
 - `pwsh fork/fork.ps1 restart -WhenIdle` waits until no thread is mid-turn and no agent tool has
   run for 10 minutes (background jobs of idle threads count as work; MCP servers, npx and bare
   shells do not), shows a notification, looks once more a minute later, then does the same.
+  Ledger judge threads and scheduled-task threads (`thread:project:...` ids) never count as busy;
+  `idleIgnoreThreads` in `config.json` (regexes on thread titles) names tick-loop threads that
+  reuse an ordinary thread, because `t3 ls --json` exposes only id, title and state.
   `-Ignore <regex>` (or `idleIgnore` in `config.json`) names background processes that should
   not hold it up; `-GiveUpAt <time>` (default 12 hours; 30 minutes without `-WhenIdle`) ends the
   wait with a message to the thread. `-Thread <id>` reports to another thread. `-Probe` shows
@@ -122,7 +125,11 @@ For a restart at a chosen moment, use `restart`, not `install`:
 Every restart snapshots the database first and runs as the one-shot task "T3 Code fork restart"
 (through `wscript`, so no console window flashes), because anything started from a T3 terminal
 dies with T3. It replaces a waiting `install` task, so only one of them is ever armed. Log:
-`%LOCALAPPDATA%\t3code-fork\logs\restart-*.log`. Thread states and messages go through
+`%LOCALAPPDATA%\t3code-fork\logs\restart-*.log`. After the install it finds the exe from the
+installer's own shortcut and install folder (the name changed from Alpha to Beta once), starts
+T3 itself if the install left it closed, waits up to 30 minutes for T3's API (a cold start on a
+30 GB database has taken 16 minutes), and reports a failure to the thread only after T3 is up; if
+the report cannot be delivered it logs why and saves it in `last-restart-report.txt`. Thread states and messages go through
 agent-kit's `t3` CLI (`config.json` `t3Cli`, or `T3_CLI`, else
 `%USERPROFILE%\Workspaces\Centio\agent-kit\bin\t3.mjs`); `-WhenIdle` needs it.
 

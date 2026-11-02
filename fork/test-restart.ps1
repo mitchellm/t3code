@@ -245,6 +245,31 @@ try {
     Check "reads the real T3's build from its app.asar ($real)" ($real -match '^\d+\.\d+\.\d+(-fork\.\d{8}\.\d+)?$')
   }
 
+  # --- Finding the exe the installer wrote ------------------------------------------------------------
+  $renamedDir = Join-Path $testRoot 'renamed'
+  New-Item -ItemType Directory -Force $renamedDir | Out-Null
+  Copy-Item $stub (Join-Path $renamedDir 'T3 Code (Beta).exe')
+  Copy-Item $stub (Join-Path $renamedDir 'Uninstall T3 Code (Beta).exe')
+  $env:T3CODE_FORK_APP_DIR = $renamedDir
+  $found = Find-AppInstall
+  Check 'install: finds the renamed exe, not the uninstaller' ($found.Exe -eq (Join-Path $renamedDir 'T3 Code (Beta).exe')) "got $($found.Exe)"
+  [void](Update-AppInstall)
+  Check 'install: Update-AppInstall follows the rename' ($AppExeName -eq 'T3 Code (Beta).exe' -and $AppDir -eq $renamedDir) "got $AppExeName in $AppDir"
+  Remove-Item (Join-Path $renamedDir 'T3 Code (Beta).exe') -Force
+  Check 'install: reports no exe when the installer left none' (-not (Update-AppInstall) -and -not (Find-AppInstall).Exe)
+  $env:T3CODE_FORK_APP_DIR = $standinDir
+  [void](Update-AppInstall)
+
+  # --- Which running threads keep a restart waiting -------------------------------------------------------
+  $judge = [pscustomobject]@{ id = 'thread:delegated-task:command%3Amcp%3Aserver-ledger-judge%253Athread%253Ax%3Aledger-judge%3Ajudge-1'; title = 'Judge L6: Verify'; state = 'running' }
+  $scheduled = [pscustomobject]@{ id = 'thread:project:03fc6826-b73a-4556-ae6c-864d0755613f:3c612bc3-baf5-4dcc-b985-c1b2'; title = 'GameFab Mac daily port'; state = 'running' }
+  $worker = [pscustomobject]@{ id = 'thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3Adef'; title = 'Optimize G6 pages'; state = 'running' }
+  $top = [pscustomobject]@{ id = 'aa566e71-4105-4461-b7ce-cb7cfa185186'; title = 'Claude Account Pool Watch'; state = 'running' }
+  Check 'idle: judge threads do not count as busy' (Test-BackgroundThread $judge)
+  Check 'idle: scheduled-task threads do not count as busy' (Test-BackgroundThread $scheduled)
+  Check 'idle: a delegated worker and a chat still count' (-not (Test-BackgroundThread $worker) -and -not (Test-BackgroundThread $top))
+  Check 'idle: config titles name tick loops' (Test-BackgroundThread $top @('Pool Watch$'))
+
   # --- Quit, then reopen 2 seconds later (the 2026-09-30 race) -------------------------------------
   Reset-Case
   $first = Start-Standin

@@ -85,14 +85,48 @@ $KeepLocalBuilds = 3
 # Where T3 is installed. The NSIS installer records the folder under the app's GUID key (the GUID
 # comes from the appId, so it is the same on every machine) and keeps upgrading into that folder,
 # which is Programs\t3-code-desktop on installs that started before the package was renamed.
-$AppDir = $env:T3CODE_FORK_APP_DIR
-if (-not $AppDir) { $AppDir = (Get-ItemProperty 'HKCU:\Software\e9197887-efb3-55e0-985e-d6d3b5dd594a' -ErrorAction SilentlyContinue).InstallLocation }
-if (-not $AppDir) { $AppDir = Join-Path $env:LOCALAPPDATA 'Programs\t3code' }
-# Upstream renamed the app from "T3 Code (Alpha)" to "T3 Code (Beta)" in 0.1.x; take whichever is installed.
-$AppExe = @('T3 Code (Beta).exe', 'T3 Code (Alpha).exe') |
-  ForEach-Object { Join-Path $AppDir $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $AppExe) { $AppExe = Join-Path $AppDir 'T3 Code (Beta).exe' }
-$AppExeName = Split-Path $AppExe -Leaf
+function Find-AppInstall {
+  # Where T3 is installed and which exe starts it, read fresh from what the installer wrote. An
+  # install can rename the exe (Alpha to Beta, 2026-10-24) or the folder, so nothing is cached.
+  $dir = $env:T3CODE_FORK_APP_DIR
+  $reg = Get-ItemProperty 'HKCU:\Software\e9197887-efb3-55e0-985e-d6d3b5dd594a' -ErrorAction SilentlyContinue
+  if (-not $dir) { $dir = $reg.InstallLocation }
+  if (-not $dir) { $dir = Join-Path $env:LOCALAPPDATA 'Programs\t3code' }
+  $exe = $null
+  # 1. The shortcut the installer wrote (its name is in the registry key), when it points into the folder.
+  if (-not $env:T3CODE_FORK_APP_DIR -and $reg.ShortcutName) {
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($lnk in @((Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$($reg.ShortcutName).lnk"),
+        (Join-Path ([Environment]::GetFolderPath('Desktop')) "$($reg.ShortcutName).lnk"))) {
+      if (-not (Test-Path $lnk)) { continue }
+      $target = $shell.CreateShortcut($lnk).TargetPath
+      if ($target -and (Test-Path $target) -and $target.StartsWith("$dir\", 'OrdinalIgnoreCase')) { $exe = $target; break }
+    }
+  }
+  # 2. The names upstream has used.
+  if (-not $exe) {
+    $exe = @('T3 Code (Beta).exe', 'T3 Code (Alpha).exe') | ForEach-Object { Join-Path $dir $_ } |
+      Where-Object { Test-Path $_ } | Select-Object -First 1
+  }
+  # 3. Any T3 exe in the folder (not the uninstaller), whatever it is called now.
+  if (-not $exe) {
+    $exe = Get-ChildItem $dir -Filter '*.exe' -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -notmatch '^(Uninstall|unins)' -and $_.VersionInfo.ProductName -match '^T3 Code' } |
+      Select-Object -First 1 -ExpandProperty FullName
+  }
+  @{ Dir = $dir; Exe = $exe }
+}
+
+function Update-AppInstall {
+  # After an install: point $AppDir, $AppExe and $AppExeName at what the installer left.
+  $found = Find-AppInstall
+  $script:AppDir = $found.Dir
+  $script:AppExe = $found.Exe ?? (Join-Path $found.Dir 'T3 Code (Beta).exe')
+  $script:AppExeName = Split-Path $script:AppExe -Leaf
+  [bool]$found.Exe
+}
+
+[void](Update-AppInstall)
 # The V2 database T3 runs on. state.sqlite beside it is the V1 database that seeded it once.
 $LiveDb = $env:T3CODE_FORK_LIVE_DB ?? (Join-Path $env:USERPROFILE '.t3\userdata\statev2.sqlite')
 # T3's local HTTP API, for "is T3 back" when agent-kit's t3 CLI is not installed.
@@ -731,11 +765,11 @@ function Clear-ForInstall([datetime]$ClosedAt) {
   }
 }
 
-# Resolve the exe again: an install can rename it (Alpha to Beta) after this script resolved $AppExe.
 function Start-App {
-  $exe = @('T3 Code (Beta).exe', 'T3 Code (Alpha).exe') |
-    ForEach-Object { Join-Path $AppDir $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
-  Start-Process -FilePath ($exe ?? $AppExe)
+  # Resolve the exe again: an install can rename it (Alpha to Beta) after this script resolved it.
+  if (-not (Update-AppInstall)) { throw "No T3 exe found in $AppDir (looked at the installer's shortcut, the known names and every exe there)." }
+  Log "starting $AppExe"
+  Start-Process -FilePath $AppExe
 }
 
 function Complete-Install([string]$Exe, [string]$Ver, [datetime]$ClosedAt, [switch]$SkipIfCurrent, [switch]$Rollback) {
@@ -750,6 +784,7 @@ function Complete-Install([string]$Exe, [string]$Ver, [datetime]$ClosedAt, [swit
     Log "T3 is installing the update it downloaded ($(Split-Path $own.ExecutablePath -Leaf)); waiting for it"
     $p = Get-Process -Id $own.ProcessId -ErrorAction SilentlyContinue
     if ($p -and -not $p.WaitForExit(600000)) { throw "T3's own installer was still running after 10 minutes." }
+    [void](Update-AppInstall)
     $got = Get-InstalledBuild
     if (-not $Rollback -and (Compare-Build $got $Ver) -ge 0) {
       Log "T3 installed $got itself"
@@ -771,6 +806,8 @@ function Complete-Install([string]$Exe, [string]$Ver, [datetime]$ClosedAt, [swit
     Log "installing $Exe"
     $code = Invoke-Installer $Exe
     if ($code) { throw "The installer exited with $code." }
+    if (-not (Update-AppInstall)) { throw "The installer finished but left no T3 exe in $AppDir." }
+    Log "installed exe: $AppExe"
     # Opened while the installer ran, T3 may have loaded half-replaced files: restart it.
     if (Test-AppRunning) {
       Log 'T3 was opened during the install; restarting it on the new files'
@@ -870,12 +907,18 @@ function Get-T3Cli {
 
 function Invoke-T3([string[]]$T3Args) {
   # The CLI's output, or $null when it is missing or T3 does not answer.
+  $script:T3Error = $null
   $cli = Get-T3Cli
-  if (-not $cli) { return $null }
+  if (-not $cli) { $script:T3Error = 'the t3 CLI was not found (config.json t3Cli, or T3_CLI)'; return $null }
   $node = (Get-Command node -ErrorAction SilentlyContinue).Source ?? 'node'
-  $out = & $node $cli @T3Args 2>$null
-  if ($LASTEXITCODE) { return $null }
-  (@($out) | ForEach-Object { "$_" }) -join "`n"
+  $all = & $node $cli @T3Args 2>&1
+  if ($LASTEXITCODE) {
+    # Keep why: "could not report to thread" used to say nothing about the cause.
+    $script:T3Error = (@($all | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join ' ').Trim()
+    if (-not $script:T3Error) { $script:T3Error = "t3 exited with $LASTEXITCODE" }
+    return $null
+  }
+  (@($all | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] }) | ForEach-Object { "$_" }) -join "`n"
 }
 
 function Get-Threads {
@@ -916,11 +959,26 @@ function Get-AgentWork([string[]]$IgnorePatterns) {
   , $work.ToArray()
 }
 
+function Test-BackgroundThread($Thread, [string[]]$TitlePatterns = @()) {
+  # Threads that are running without anyone working in them: the ledger judge (T3 resumes it after a
+  # restart) and the runs a scheduled task starts. `t3 ls --json` exposes only id, title, state and
+  # project (agent-kit bin/t3.mjs record()), not kind, role, parent or scheduledTaskId, so the
+  # server's id shapes stand in: judge ids carry ":ledger-judge:" once decoded, and a scheduled
+  # task's own thread is "thread:project:<projectId>:<uuid>". Tick loops that reuse an ordinary
+  # thread can only be named by title: config.json "idleIgnoreThreads" (regexes).
+  $id = [uri]::UnescapeDataString("$($Thread.id)")
+  if ($id -match 'ledger-judge' -or "$($Thread.title)" -match '^Judge [A-Z]+\d+:') { return $true }
+  if ($id -like 'thread:project:*') { return $true }
+  foreach ($p in $TitlePatterns) { if ($p -and "$($Thread.title)" -match $p) { return $true } }
+  $false
+}
+
 function Get-BusyReason([string[]]$IgnorePatterns) {
   # '' when no thread is mid-turn and no agent tool runs; otherwise what is busy.
   $threads = Get-Threads
   if ($null -eq $threads) { return 'the T3 API does not answer' }
-  $running = @($threads | Where-Object state -eq 'running' | ForEach-Object title)
+  $titlePatterns = @((Read-Config).idleIgnoreThreads)
+  $running = @($threads | Where-Object { $_.state -eq 'running' -and -not (Test-BackgroundThread $_ $titlePatterns) } | ForEach-Object title)
   $work = Get-AgentWork $IgnorePatterns
   $work = @($work | Select-Object -Unique)
   if (-not ($running.Count + $work.Count)) { return '' }
@@ -979,6 +1037,7 @@ function Wait-AppBack([int]$Minutes = 15) {
   # T3 is back when its API answers, which is also when its window appears.
   $until = (Get-Date).AddMinutes($Minutes)
   $since = Get-Date
+  [void](Update-AppInstall)
   while ((Get-Date) -lt $until) {
     if ((Test-AppRunning) -and (Test-AppApi)) { return $true }
     if (-not (Test-AppRunning) -and ((Get-Date) - $since).TotalSeconds -gt 60) { Log 'T3 is not running; starting it'; Start-App; $since = Get-Date }
@@ -991,9 +1050,15 @@ function Send-Report([string]$ThreadId, [string]$Text) {
   if (-not $ThreadId) { return }
   for ($i = 0; $i -lt 20; $i++) {
     if ($null -ne (Invoke-T3 @('send', $ThreadId, $Text))) { Log "reported to thread $ThreadId"; return }
+    # A thread that is mid-turn or waiting on someone refuses the message until later; T3 not
+    # running at all will not recover by waiting, so the caller starts T3 before it reports.
+    if ($i -eq 0 -or $i -eq 19) { Log "report to $ThreadId not delivered ($($i + 1)/20): $script:T3Error" }
     Start-Sleep -Seconds 30
   }
-  Log "could not report to thread $ThreadId"
+  Log "could not report to thread ${ThreadId}: $script:T3Error"
+  $file = Join-Path $StateDir 'last-restart-report.txt'
+  Set-Content $file -Value "$(Get-Date -Format 'o') thread $ThreadId`n$Text" -Encoding UTF8
+  Log "the report is saved in $file"
 }
 
 function Get-RestartIgnore {
@@ -1067,7 +1132,7 @@ function Invoke-RestartRun {
     # T3 can answer during that pause, and the report should say how it is when it is read.
     $back = $back -or ((Test-AppRunning) -and (Test-AppApi))
     $problems = @(
-      if (-not $back) { "T3 is not back after $backMinutes minutes" }
+      if (-not $back) { "T3 is not back after $backMinutes minutes ($((Test-AppRunning) ? "$AppExeName runs but its API does not answer; a cold start on a large database can take over 15 minutes" : "$AppExeName is not running"))" }
       if (-not $ok) { "its installed build reads $installed, not $ver" }
     )
     $at = (Get-Date).ToString('HH:mm')
@@ -1075,9 +1140,16 @@ function Invoke-RestartRun {
       "T3 Code restarted at $at and runs $installed (was $from)$($compacted ? "; $compacted" : ''). Background jobs that threads had running ended with T3; re-arm any that are still needed. Log: $script:RunLog" :
       "T3 Code restart at $at did not finish: $($problems -join ' and '). Log: $script:RunLog")
   } catch {
-    Log "FAILED: $_"
-    Show-Toast 'T3 Code restart failed' "$_"
-    Send-Report $threadId "T3 Code restart failed: $_. Log: $script:RunLog"
+    $failure = "$_"
+    Log "FAILED: $failure"
+    Show-Toast 'T3 Code restart failed' $failure
+    # The report goes through T3's API, so T3 must be up first. On 2026-10-24 it was not (the start
+    # that failed was the cause), and 20 retries over 10 minutes had nobody to talk to.
+    $started = $true
+    if (-not (Test-AppRunning)) {
+      try { Log 'starting T3 Code so the failure can be reported'; Start-App; [void](Wait-AppBack 10) } catch { $started = $false; Log "could not start T3: $_" }
+    }
+    Send-Report $threadId "T3 Code restart failed: $failure.$($started ? '' : ' T3 is not running and could not be started by the script.') Log: $script:RunLog"
   } finally {
     # Whatever happened, never leave T3 closed.
     if (-not (Test-AppRunning)) { Log 'starting T3 Code'; Start-App }
