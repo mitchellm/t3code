@@ -11,6 +11,7 @@ import {
   RunAttemptId,
   RunId,
   RuntimeRequestId,
+  ScheduledTaskId,
   ThreadId,
   type OrchestrationV2Command,
   type OrchestrationV2ThreadProjection,
@@ -28,6 +29,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import { ScheduledTaskArming } from "./ScheduledTaskArming.ts";
 
 const threadId = ThreadId.make("thread:restart");
 const runId = RunId.make("run:restart");
@@ -1261,4 +1263,104 @@ it.effect.each(["completed", "failed", "interrupted"] as const)(
         [],
       );
     }),
+);
+
+const tickTaskId = ScheduledTaskId.make("scheduled-task:tick");
+
+// What the recovery pass hands the executor: the dispatches it posts and whether it settled the
+// delegated task afterwards.
+const recoveryOutcome = (projection: OrchestrationV2ThreadProjection, armed: boolean) =>
+  Effect.gen(function* () {
+    const dispatches: Array<Extract<OrchestrationV2Command, { type: "message.dispatch" }>> = [];
+    let recovered = 0;
+    yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () => Effect.succeed(projection),
+            recoverDelegatedTask: () =>
+              Effect.sync(() => {
+                recovered += 1;
+              }),
+            dispatch: (command) => {
+              if (command.type === "message.dispatch") dispatches.push(command);
+              return Effect.succeed({} as never);
+            },
+          }),
+          ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
+          Layer.succeed(ScheduledTaskArming, {
+            isArmed: (taskId) => Effect.succeed(armed && taskId === tickTaskId),
+          }),
+        ),
+      ),
+    );
+    return { dispatches, recovered };
+  });
+
+const tickMessage = {
+  id: MessageId.make("message:user"),
+  role: "user",
+  text: "Tick: check for new messages",
+  attachments: [],
+  scheduledTaskId: tickTaskId,
+};
+
+it.effect("posts nothing for a cut scheduled tick whose schedule is still armed", () =>
+  Effect.gen(function* () {
+    const tick = {
+      ...cutMidTurn(),
+      messages: [tickMessage],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const armed = yield* recoveryOutcome(tick, true);
+    assert.lengthOf(armed.dispatches, 0);
+    assert.equal(armed.recovered, 1);
+    // A task the scheduler will not fire again leaves the turn nothing else to resume it.
+    assert.lengthOf((yield* recoveryOutcome(tick, false)).dispatches, 1);
+    const manual = { ...cutMidTurn(), messages: [{ ...tickMessage, scheduledTaskId: undefined }] };
+    assert.lengthOf(
+      (yield* recoveryOutcome(manual as unknown as OrchestrationV2ThreadProjection, true))
+        .dispatches,
+      1,
+    );
+  }),
+);
+
+it.effect("still wakes a scheduled tick that was waiting on work the restart cancelled", () =>
+  Effect.gen(function* () {
+    const work = [{ kind: "monitor" as const, label: "Watch CI run 42", awaited: true as const }];
+    const cut = cutMidTurn({ restartCancelledBackgroundWork: work });
+    const tick = {
+      ...cut,
+      providerTurns: [{ ...cut.providerTurns[0]!, status: "completed" }],
+      messages: [tickMessage],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const { dispatches } = yield* recoveryOutcome(tick, true);
+    assert.lengthOf(dispatches, 1);
+    assert.include(dispatches[0]!.text, "- monitor: Watch CI run 42");
+  }),
+);
+
+it.effect.each([
+  ["judge", 0],
+  ["worker", 1],
+] as const)("a cut delegated %s thread gets %i continuation turns", ([role, expected]) =>
+  Effect.gen(function* () {
+    const taskId = NodeId.make("task:delegated");
+    const cut = cutMidTurn({ delegatedTaskId: taskId });
+    const child = {
+      ...cut,
+      thread: {
+        ...cut.thread,
+        lineage: {
+          parentThreadId: ThreadId.make("thread:parent"),
+          relationshipToParent: "subagent",
+        },
+      },
+      subagents: [{ id: taskId, role, result: null, status: "running", runId }],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const { dispatches, recovered } = yield* recoveryOutcome(child, false);
+    assert.lengthOf(dispatches, expected);
+    // Either way the parent still hears how the task ended.
+    assert.equal(recovered, 1);
+  }),
 );

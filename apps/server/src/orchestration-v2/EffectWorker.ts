@@ -30,6 +30,7 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import * as ScheduledTaskArming from "./ScheduledTaskArming.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -89,6 +90,7 @@ export const layerExecutor: Layer.Layer<
     const ledgerAutoContinue = yield* LedgerAutoContinue.LedgerAutoContinue;
     const ledgerJudge = yield* LedgerJudgeRunner.LedgerJudgeRunner;
     const resourceCleanup = yield* ResourceCleanupService.ResourceCleanupService;
+    const scheduledTaskArming = yield* ScheduledTaskArming.ScheduledTaskArming;
     const checkpointRollback = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const providerTurnControl = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
@@ -107,6 +109,7 @@ export const layerExecutor: Layer.Layer<
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
               Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
               Effect.provideService(ServerSettings.ServerSettingsService, settings),
+              Effect.provideService(ScheduledTaskArming.ScheduledTaskArming, scheduledTaskArming),
               Effect.tapError(() =>
                 willRetry
                   ? Effect.void
