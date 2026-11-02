@@ -2,10 +2,12 @@ import {
   isListedThreadLineage,
   type EnvironmentId,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
   type Project,
   type ThreadId,
+  type ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import {
   RelayApi,
@@ -103,7 +105,6 @@ function shouldPublishAgentAwarenessEvent(
     case "run.created":
     case "run.updated":
     case "runtime-request.updated":
-    case "subagent.updated":
     case "provider-thread.updated":
       return true;
     // Unsettling must not re-alert a dismissed result.
@@ -125,6 +126,10 @@ function shouldPublishAgentAwarenessEvent(
     case "run-attempt.created":
     case "run-attempt.updated":
     case "node.updated":
+    // No published field comes from a subagent record: the shell read never joins the subagents
+    // table. A child ending reaches the card through its turn item, the provider thread's task
+    // list, or settlement, each of which publishes on its own event.
+    case "subagent.updated":
     case "provider-session.attached":
     case "provider-session.updated":
     case "provider-session.detached":
@@ -201,6 +206,123 @@ function awarenessThreadInputs(
       .map((link) => `${link.host}/${link.repository}#${link.number}`)
       .toSorted(),
   ]);
+}
+
+/**
+ * The card's baseline: what the last confirmed publish read, one field per input an event family
+ * can move. An event whose payload proves its inputs still match skips the reads; anything a
+ * payload cannot prove reads, since a missed change leaves a stale card.
+ */
+interface PublishedAwarenessInputs {
+  readonly thread: string;
+  readonly watchedPullRequests: ReadonlySet<string>;
+  readonly activeProviderThreadId: string | null;
+  readonly latestRunId: string | null;
+  readonly status: string;
+  readonly pendingRequest: {
+    readonly id: string;
+    readonly kind: string;
+    readonly blocking: boolean;
+  } | null;
+}
+
+// Lowercased like the pending-work task id, so a link cannot dodge the lookup by letter case.
+function pullRequestKey(link: Pick<ThreadPullRequestLink, "host" | "repository" | "number">) {
+  return `${link.host}/${link.repository}#${link.number}`.toLowerCase();
+}
+
+function publishedAwarenessInputs(shell: OrchestrationV2ThreadShell): PublishedAwarenessInputs {
+  return {
+    thread: awarenessThreadInputs(shell),
+    watchedPullRequests: new Set(
+      (shell.pullRequests ?? []).filter(isWatchedPullRequest).map(pullRequestKey),
+    ),
+    activeProviderThreadId: shell.activeProviderThreadId,
+    latestRunId: shell.latestRunId ?? null,
+    status: shell.status,
+    pendingRequest:
+      shell.pendingRuntimeRequest == null
+        ? null
+        : {
+            id: shell.pendingRuntimeRequest.id,
+            kind: shell.pendingRuntimeRequest.kind,
+            blocking: shell.pendingRuntimeRequest.blocking !== false,
+          },
+  };
+}
+
+// The shell only carries the merged task list, so the provider thread's own list is compared with
+// the one its previous event carried. A task's identity and kind are all the card can depend on.
+function backgroundTasksSignature(
+  tasks: ReadonlyArray<{
+    readonly taskId: string;
+    readonly kind: string;
+    readonly awaited?: boolean | undefined;
+  }>,
+): string {
+  return JSON.stringify(
+    tasks
+      .filter((task) => task.taskId.length > 0)
+      .map((task) => `${task.taskId}|${task.kind}|${task.awaited === true}`)
+      .toSorted(),
+  );
+}
+
+/**
+ * True when the event's own payload proves every published input it can move still matches the
+ * baseline. The run rule compares the latest run's id and status, the only run fields the shell's
+ * status and activity read; any other run, or a held one, reads. A pending request is judged by
+ * whether it is the displayed one; a request that was never displayed cannot move the card.
+ */
+function payloadMatchesPublishedAwareness(
+  published: PublishedAwarenessInputs,
+  event: OrchestrationV2DomainEvent,
+): boolean {
+  switch (event.type) {
+    // These carry the whole thread record and fire often (PR syncs, branch and title churn).
+    case "thread.metadata-updated":
+    case "thread.pull-request-synced":
+    case "thread.settled":
+    case "thread.model-selection-updated":
+    case "thread.provider-switched":
+    case "thread.archived":
+    case "thread.unarchived":
+      return published.thread === awarenessThreadInputs(event.payload);
+    case "run.created":
+    case "run.updated":
+      return (
+        typeof event.payload.id === "string" &&
+        event.payload.id === published.latestRunId &&
+        event.payload.status === published.status &&
+        event.payload.queueHeld !== true
+      );
+    case "runtime-request.updated": {
+      const request = event.payload;
+      if (typeof request.id !== "string" || typeof request.status !== "string") return false;
+      const pending = published.pendingRequest;
+      if (request.status !== "pending") return pending === null || pending.id !== request.id;
+      return (
+        request.responseCapability !== undefined &&
+        pending !== null &&
+        pending.id === request.id &&
+        pending.kind === request.kind &&
+        pending.blocking === (request.responseCapability.type !== "message")
+      );
+    }
+    case "thread.pull-request-link-updated": {
+      const link = event.payload;
+      if (
+        typeof link.host !== "string" ||
+        typeof link.repository !== "string" ||
+        typeof link.number !== "number"
+      ) {
+        return false;
+      }
+      return published.watchedPullRequests.has(pullRequestKey(link)) === isWatchedPullRequest(link);
+    }
+    default:
+      return false;
+  }
 }
 
 function agentAwarenessPublishIdentity(state: RelayAgentActivityState | null): string {
@@ -420,9 +542,13 @@ export const make = Effect.gen(function* () {
   const startedAt = (yield* DateTime.now).epochMilliseconds;
   const catchUpRequests = yield* Queue.dropping<void>(1);
   const publishedStateByThreadRef = yield* Ref.make(new Map<ThreadId, string>());
-  // Thread-record inputs of the state last confirmed published, so a thread event that changes
-  // none of them skips the shell and project reads. Only a read of a listed thread seeds it.
-  const publishedThreadInputs = new Map<ThreadId, string>();
+  // Inputs of the state last confirmed published, so an event whose payload proves they still
+  // match skips the shell and project reads. Only a full read of a listed thread seeds it, and a
+  // read drops it first: an event arriving while a publish is in flight must not be judged against
+  // a baseline that publish is about to replace.
+  const publishedInputs = new Map<ThreadId, PublishedAwarenessInputs>();
+  // Per thread, each provider thread's pending-task signature as of its latest event.
+  const observedProviderTasks = new Map<ThreadId, Map<string, string>>();
   const unlistedThreads = new Set<ThreadId>();
   const rememberUnlistedThread = (threadId: ThreadId) => {
     // Bounded so a long-lived server cannot grow it without limit; a miss only costs one shell read.
@@ -518,7 +644,8 @@ export const make = Effect.gen(function* () {
     cachedRelayClient = undefined;
     publishConfirmDeadlines.clear();
     heldCompletions.clear();
-    publishedThreadInputs.clear();
+    publishedInputs.clear();
+    observedProviderTasks.clear();
     yield* Ref.set(publishedStateByThreadRef, new Map());
   });
 
@@ -606,6 +733,7 @@ export const make = Effect.gen(function* () {
     ) {
       return;
     }
+    publishedInputs.delete(threadId);
     // Read only this thread; full shell reads would make each activity event scale with all threads.
     const threadShell = yield* threads.getThreadShell(threadId);
     if (threadShell !== null && !isListedThreadLineage(threadShell.lineage)) {
@@ -636,9 +764,9 @@ export const make = Effect.gen(function* () {
     }
     const rememberPublishedInputs = () => {
       if (threadShell !== null && snapshot.reason === "snapshot") {
-        publishedThreadInputs.set(threadId, awarenessThreadInputs(threadShell));
+        publishedInputs.set(threadId, publishedAwarenessInputs(threadShell));
       } else {
-        publishedThreadInputs.delete(threadId);
+        observedProviderTasks.delete(threadId);
       }
     };
     if (publishedStateByThread.get(threadId) === publishIdentity) {
@@ -902,6 +1030,26 @@ export const make = Effect.gen(function* () {
       scope,
     ).pipe(Effect.asVoid);
 
+  // True when this provider thread's pending-task list matches the one its previous event carried.
+  // The first event for a provider thread has nothing to match, so it reads.
+  const observeProviderTasks = (
+    threadId: ThreadId,
+    providerThread: OrchestrationV2ProviderThread,
+  ): boolean => {
+    if (
+      typeof providerThread.id !== "string" ||
+      !Array.isArray(providerThread.pendingBackgroundTasks)
+    ) {
+      return false;
+    }
+    const signature = backgroundTasksSignature(providerThread.pendingBackgroundTasks);
+    const observed = observedProviderTasks.get(threadId) ?? new Map<string, string>();
+    const unchanged = observed.get(providerThread.id) === signature;
+    observed.set(providerThread.id, signature);
+    observedProviderTasks.set(threadId, observed);
+    return unchanged;
+  };
+
   const start: AgentAwarenessRelay["Service"]["start"] = Effect.fn("AgentAwarenessRelay.start")(
     function* () {
       const [relayConfig, publishEnabled] = yield* Effect.all([
@@ -939,19 +1087,24 @@ export const make = Effect.gen(function* () {
             rememberUnlistedThread(threadId);
           } else if (event.type === "thread.deleted") {
             unlistedThreads.delete(threadId);
-            publishedThreadInputs.delete(threadId);
+            publishedInputs.delete(threadId);
+            observedProviderTasks.delete(threadId);
           }
           if (!shouldPublishAgentAwarenessEvent(event)) {
             return Effect.void;
           }
-          // These carry the whole thread record and fire often (PR syncs, branch and title
-          // churn), so the payload can prove nothing published moved. Every other type, and any
-          // thread without a confirmed publish, still reads: only a read sees run, request and
-          // background-task state.
+          // A thread without a confirmed publish, and any event whose payload cannot prove the
+          // inputs it moves are unchanged, still reads.
+          const published = publishedInputs.get(threadId);
+          // Observed on every provider-thread event, so the comparison is always against the
+          // latest one whether or not this event is skipped.
+          const providerTasksUnchanged =
+            event.type === "provider-thread.updated" &&
+            observeProviderTasks(threadId, event.payload) &&
+            published?.activeProviderThreadId === event.payload.id;
           if (
-            (event.type === "thread.metadata-updated" ||
-              event.type === "thread.pull-request-synced") &&
-            publishedThreadInputs.get(threadId) === awarenessThreadInputs(event.payload)
+            published !== undefined &&
+            (providerTasksUnchanged || payloadMatchesPublishedAwareness(published, event))
           ) {
             return Effect.void;
           }
