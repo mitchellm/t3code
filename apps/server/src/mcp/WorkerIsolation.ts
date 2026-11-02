@@ -21,7 +21,7 @@ export type WorkerIsolationDecision = "explicit" | "default" | "shared";
  * "default" differs from "explicit" so a non-git project can fall back to the shared checkout
  * instead of failing a call that never asked for a worktree.
  */
-export function workerIsolation(input: {
+function workerIsolation(input: {
   readonly isolation: OrchestratorMcpDelegateTaskInput["isolation"];
   readonly role: OrchestratorMcpDelegateTaskInput["role"];
   readonly loadout: Pick<Loadout, "roles">;

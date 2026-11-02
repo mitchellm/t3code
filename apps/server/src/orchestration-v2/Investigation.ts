@@ -342,7 +342,7 @@ export function stampRefuterVerdict(
 }
 
 /** Server-only spend report: changes the record only when the figure or its certainty moved. */
-export function planInvestigationSpend(
+function planInvestigationSpend(
   ledger: Ledger | undefined,
   input: { readonly spentUsd: number; readonly costUnknown: boolean },
   now: DateTime.Utc,

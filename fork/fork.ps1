@@ -348,6 +348,7 @@ function Invoke-Sync {
     # CI=true: when an upstream bump changes the store layout, pnpm wants to purge node_modules and
     # asks first; with no terminal (the scheduled task) it aborts instead (seen 2026-10-03).
     Invoke-Step 'vp install' $BuildDir { $env:CI = 'true'; try { vp i } finally { Remove-Item Env:CI -ErrorAction SilentlyContinue } }
+    Remove-StaleBinShims $BuildDir
     # Upstream CI already typechecks upstream main; this gate is for fork patches to the app itself.
     $patched = (Invoke-Git $BuildDir diff --name-only $up $candidate).Out -split "`n" |
       Where-Object { $_ -and -not $_.StartsWith('fork/') }
@@ -466,6 +467,21 @@ function Show-Patches {
   $log
   ''
   (Invoke-Git $repo diff --stat "$up...refs/heads/$Branch").Out
+}
+
+function Remove-StaleBinShims([string]$Dir) {
+  # pnpm leaves a package's .bin shims behind when the dependency they point at is pruned (upstream
+  # moved typescript to @tsc-rs/typescript on 2026-10-29), and the stale tsc broke every typecheck.
+  Get-ChildItem $Dir -Directory -Filter .bin -Recurse -Depth 3 -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '\\\.pnpm\\' } |
+    ForEach-Object { Get-ChildItem $_.FullName -File | Where-Object { -not $_.Extension } } |
+    ForEach-Object {
+      $target = Select-String -Path $_.FullName -Pattern '^# cmd-shim-target=(.+)$' | Select-Object -First 1
+      if ($target -and -not (Test-Path $target.Matches[0].Groups[1].Value)) {
+        Log "removing stale shim $($_.FullName)"
+        Remove-Item "$($_.FullName)", "$($_.FullName).cmd", "$($_.FullName).ps1" -Force -ErrorAction SilentlyContinue
+      }
+    }
 }
 
 function Invoke-ManualMerge {
@@ -1000,17 +1016,25 @@ function Invoke-RestartRun {
       $closedAt = Get-Date
     }
     [void](Complete-Install $req.installer $ver $closedAt -SkipIfCurrent)
-    $back = Wait-AppBack 15
+    # On 2026-10-30 T3 took 16 minutes to answer: two relaunches, then a 6-minute cold start.
+    $backMinutes = 30
+    $back = Wait-AppBack $backMinutes
     $installed = Get-InstalledBuild
     $ok = (Compare-Build $installed $ver) -ge 0
-    Log "T3 is $($back ? 'back' : 'NOT back after 15 minutes') on $installed$($ok ? '' : ", not $ver")"
-    Show-Toast ($ok ? "T3 Code restarted on $installed" : 'T3 Code restart did not finish') ($ok ? "Was $from." : "Installed build reads $installed. Log: $script:RunLog")
+    Log "T3 is $($back ? 'back' : "NOT back after $backMinutes minutes") on $installed$($ok ? '' : ", not $ver")"
+    Show-Toast ($ok -and $back ? "T3 Code restarted on $installed" : 'T3 Code restart did not finish') ($ok -and $back ? "Was $from." : "Installed build reads $installed. Log: $script:RunLog")
     # Give the threads a moment to reconnect before one of them gets a message.
     if ($threadId) { Start-Sleep -Seconds 30 }
+    # T3 can answer during that pause, and the report should say how it is when it is read.
+    $back = $back -or ((Test-AppRunning) -and (Test-AppApi))
+    $problems = @(
+      if (-not $back) { "T3 is not back after $backMinutes minutes" }
+      if (-not $ok) { "its installed build reads $installed, not $ver" }
+    )
     $at = (Get-Date).ToString('HH:mm')
-    Send-Report $threadId ($ok -and $back ?
+    Send-Report $threadId ($problems.Count -eq 0 ?
       "T3 Code restarted at $at and runs $installed (was $from)$($compacted ? "; $compacted" : ''). Background jobs that threads had running ended with T3; re-arm any that are still needed. Log: $script:RunLog" :
-      "T3 Code restart at $at did not finish: T3 $($back ? 'is back' : 'did not come back') and its installed build reads $installed, not $ver. Log: $script:RunLog")
+      "T3 Code restart at $at did not finish: $($problems -join ' and '). Log: $script:RunLog")
   } catch {
     Log "FAILED: $_"
     Show-Toast 'T3 Code restart failed' "$_"

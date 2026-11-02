@@ -26,7 +26,7 @@ export function startMainAppLocationTracking(router: AnyRouter): () => void {
   const record = () => {
     const { pathname, href } = router.state.location;
     if (isAppModalPage(pathname) || SHELL_LESS_PATHS.has(pathname)) return;
-    // Fork: a `/views/<id>` deep link only picks a view, then leaves for the tracked href.
+    // Fork: a `/views/<id>` deep link only picks a view, then leaves for this href.
     if (pathname.startsWith("/views/")) return;
     appModalReturnHref = href;
     if (!isSidebarUtilityPage(pathname)) mainAppHref = href;

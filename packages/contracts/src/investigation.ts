@@ -22,7 +22,7 @@ export const INVESTIGATION_MAX_PARALLEL_APPROACHES = 8;
 export const INVESTIGATION_DEFAULT_PARALLEL_APPROACHES = 4;
 /** Criteria are pinned verbatim, so they must fit one pin with room for the label. */
 export const INVESTIGATION_SOLVED_WHEN_MAX_LENGTH = 4_000;
-export const INVESTIGATION_GOAL_MAX_LENGTH = 8_000;
+const INVESTIGATION_GOAL_MAX_LENGTH = 8_000;
 
 export const InvestigationStatus = Schema.Literals(["running", "solved", "exhausted", "stopped"]);
 export type InvestigationStatus = typeof InvestigationStatus.Type;

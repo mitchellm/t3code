@@ -66,7 +66,7 @@ const criteriaPinId = (ledgerId: string) => `investigation-criteria:${ledgerId}`
 export const criteriaPinText = (solvedWhen: string) =>
   `Investigation success criteria, set by the user (verbatim). The investigation is solved only when these hold:\n\n${solvedWhen}`;
 
-export function kickoffText(input: {
+function kickoffText(input: {
   readonly goal: string;
   readonly solvedWhen: string;
   readonly investigation: Pick<LedgerInvestigation, "budget" | "parallelApproaches">;
@@ -100,7 +100,7 @@ function reportText(investigation: LedgerInvestigation): string {
  * under it, at any depth, that started after it, priced by the run's model. `unpricedTurns` counts
  * turns with usage that no rate covered, so the spend is a floor rather than the whole cost.
  */
-export function investigationSpendUsd(input: {
+function investigationSpendUsd(input: {
   readonly investigation: LedgerInvestigation;
   readonly threads: ReadonlyArray<{
     readonly providerTurns: ReadonlyArray<OrchestrationV2ProviderTurn>;

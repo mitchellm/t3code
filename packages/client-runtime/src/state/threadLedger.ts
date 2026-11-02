@@ -19,7 +19,7 @@ export interface LedgerProgress {
   readonly active: boolean;
 }
 
-export const LEDGER_ITEM_STATUS_LABELS: Record<LedgerItemStatus, string> = {
+const LEDGER_ITEM_STATUS_LABELS: Record<LedgerItemStatus, string> = {
   open: "Open",
   in_progress: "In progress",
   closed: "Done",

@@ -112,7 +112,9 @@ type PendingBackgroundWorkRun = Pick<OrchestrationV2Run, "id" | "ordinal" | "sta
 type PendingBackgroundWorkPullRequest = Pick<
   ThreadPullRequestLink,
   "host" | "repository" | "number" | "url" | "source" | "watch"
->;
+> & {
+  readonly snapshot: Pick<NonNullable<ThreadPullRequestLink["snapshot"]>, "state"> | null;
+};
 
 type PendingBackgroundWorkProviderThread = Pick<
   OrchestrationV2ProviderThread,
@@ -287,10 +289,17 @@ export function derivePendingBackgroundWork(input: {
   return Array.from(byTaskId.values());
 }
 
-/** A watch the thread can see wakes it when checks or reviews land. */
+/**
+ * A watch the thread can see wakes it when checks or reviews land. The watch reactor ends a merged
+ * PR's watch without waking the agent, so a merged PR holds nothing.
+ */
 export const isWatchedPullRequest = (
-  link: Pick<PendingBackgroundWorkPullRequest, "source" | "watch">,
-): boolean => link.watch !== undefined && link.source !== "stack-dismissed";
+  link: Pick<PendingBackgroundWorkPullRequest, "source" | "watch"> &
+    Partial<Pick<PendingBackgroundWorkPullRequest, "snapshot">>,
+): boolean =>
+  link.watch !== undefined &&
+  link.source !== "stack-dismissed" &&
+  link.snapshot?.state !== "merged";
 
 function pullRequestWatchTasks(
   pullRequests: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined,

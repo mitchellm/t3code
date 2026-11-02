@@ -5,6 +5,7 @@
  * Nothing mounts while the Chat tab is shown.
  */
 import type { ScopedThreadRef } from "@t3tools/contracts";
+
 import { Spinner } from "~/components/ui/spinner";
 import { buildInspectorModel, type InspectorModel } from "~/components/views/inspectorModel";
 import { useMinuteClock, useViewRow } from "~/components/views/useViewRows";

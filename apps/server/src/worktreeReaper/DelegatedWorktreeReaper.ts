@@ -33,7 +33,7 @@ import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 
 /** A finished child may still be inspected or resumed shortly after it completes. */
-export const DELEGATED_WORKTREE_GRACE_MS = 24 * 60 * 60 * 1_000;
+const DELEGATED_WORKTREE_GRACE_MS = 24 * 60 * 60 * 1_000;
 const REAP_INTERVAL = "1 hour";
 // An interrupted child stopped for good unless someone resumes it, which the re-check catches.
 const FINISHED_STATUSES: ReadonlySet<string> = new Set([

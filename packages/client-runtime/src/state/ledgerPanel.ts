@@ -377,10 +377,8 @@ export const sameTime = (left: DateTime.Utc | null, right: DateTime.Utc | null) 
     right !== null &&
     DateTime.toEpochMillis(left) === DateTime.toEpochMillis(right));
 
-export const sameModelSelection = (
-  left: ModelSelection | undefined,
-  right: ModelSelection | undefined,
-) => left === right || JSON.stringify(left) === JSON.stringify(right);
+const sameModelSelection = (left: ModelSelection | undefined, right: ModelSelection | undefined) =>
+  left === right || JSON.stringify(left) === JSON.stringify(right);
 
 function sameRecord(left: LedgerTaskRecord, right: LedgerTaskRecord): boolean {
   return (

@@ -18,7 +18,7 @@ import {
   hydrateImagesFromPersisted,
   useComposerDraftStore,
 } from "../../composerDraftStore";
-import { type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
+import { type ComposerPromptEditorHandle } from "../ComposerPromptEditorTiptap";
 import {
   MAX_STASH_ENTRIES,
   type PromptStashEntry,
@@ -687,7 +687,6 @@ export function useComposerStash(input: {
   // Capture phase while the composer is mounted, so Mod+S never reaches the browser's save
   // dialog even when a focused widget (the model picker search) stops the key.
   const backgroundThread = use(BackgroundThreadContext);
-  // Fork: only the focused split pane's composer owns the stash shortcut.
   const { isFocusedPane } = useChatPane();
   const readShortcutContext = useStableCallback(() => ({
     terminalOpen: Boolean(
@@ -697,7 +696,9 @@ export function useComposerStash(input: {
       ).terminalOpen,
     ),
   }));
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the capture-phase stash shortcut with the command registry while the composer is mounted
   useEffect(() => {
+    // Fork: only the focused split pane's composer owns the stash shortcut.
     if (backgroundThread || !isFocusedPane) return;
     return registerCommands(
       { "composer.stash": handleStashShortcut },

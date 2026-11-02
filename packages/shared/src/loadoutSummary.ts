@@ -25,7 +25,7 @@ const GPT_FAMILY = /^gpt\b/iu;
  * "claude-opus-5-5" reads as "Opus" and "gpt-6.1-sol" as "GPT", so the line shows which vendor
  * judges; any other model shows its slug.
  */
-export function loadoutModelShortName(model: string): string {
+function loadoutModelShortName(model: string): string {
   const family = CLAUDE_FAMILY.exec(model)?.[1];
   if (family !== undefined) {
     return `${family.charAt(0).toUpperCase()}${family.slice(1).toLowerCase()}`;
