@@ -380,21 +380,27 @@ it.effect("maps orchestrator rejections to clear tool errors and applies valid t
       expect(closed.structuredContent).toMatchObject({
         ledger: { counts: { open: 1, closed: 1 }, unfinished: 1 },
       });
-      yield* call("ledger_update_item", {
-        itemId: "L2",
-        status: "dropped",
-        dropReason: "Out of scope",
-      });
       expect(
         failureOf(yield* call("ledger_set_checkpoint", { checkpointId: "C9", reached: true })),
       ).toMatchObject({
         message: "Unknown checkpoint C9.",
       });
-      expect((yield* call("ledger_close", {})).structuredContent).toMatchObject({
-        ledger: { closed: true, unfinished: 0 },
+      // The last item to finish closes the ledger in the same call.
+      const dropped = yield* call("ledger_update_item", {
+        itemId: "L2",
+        status: "dropped",
+        dropReason: "Out of scope",
+      });
+      expect(dropped.structuredContent).toMatchObject({ ledger: { closed: true, unfinished: 0 } });
+      expect(failureOf(yield* call("ledger_close", {}))).toMatchObject({
+        message: expect.stringContaining("already closed"),
       });
       expect((yield* call("ledger_reopen", {})).structuredContent).toMatchObject({
         ledger: { closed: false },
+      });
+      // Reopened with every item finished, it closes by hand as before.
+      expect((yield* call("ledger_close", {})).structuredContent).toMatchObject({
+        ledger: { closed: true, unfinished: 0 },
       });
     }),
   );
@@ -687,9 +693,13 @@ it.effect("recognises an identical retry without a key and replays it", () => {
       expect(created.structuredContent).toMatchObject({ ledger: { ledgerId } });
 
       yield* retried("ledger_update_item", { itemId: "L1", status: "closed", evidence: "ok" });
+      // The drop finishes the ledger, which closes itself, so close it by hand after a reopen.
       yield* retried("ledger_update_item", { itemId: "L2", status: "dropped", dropReason: "no" });
-      yield* retried("ledger_close", {});
+      expect(fake.ledgers.get(ownThread)?.closedAt).not.toBeNull();
       yield* retried("ledger_reopen", {});
+      yield* retried("ledger_close", {});
+      // The same reopen again would be the stale call; a request key tells it apart.
+      yield* retried("ledger_reopen", { clientRequestId: "reopen-2" });
       expect(fake.ledgers.get(ownThread)?.id).toBe(ledgerId);
 
       // Add and checkpoint calls hash on their arguments too.
@@ -709,25 +719,27 @@ it.effect("does not let an earlier identical call replay once its effect is stal
       expect(failureOf(yield* call("ledger_close", {}))).toMatchObject({
         message: expect.stringContaining("items still open or in progress: L1"),
       });
+      // The last item to close closes the ledger itself.
       yield* call("ledger_update_item", { itemId: "L1", status: "closed", evidence: "ok" });
+      expect(fake.ledgers.get(ownThread)?.closedAt).not.toBeNull();
+
+      // Reopen, close, reopen, close again with identical arguments each round.
+      yield* call("ledger_reopen", {});
+      expect(fake.ledgers.get(ownThread)?.closedAt).toBeNull();
       expect(failureOf(yield* call("ledger_close", {}))).toBeUndefined();
       expect(fake.ledgers.get(ownThread)?.closedAt).not.toBeNull();
-
-      // Close, reopen, close again with identical arguments each round.
-      yield* call("ledger_reopen", {});
-      expect(fake.ledgers.get(ownThread)?.closedAt).toBeNull();
-      yield* call("ledger_close", {});
-      expect(fake.ledgers.get(ownThread)?.closedAt).not.toBeNull();
       yield* call("ledger_reopen", {});
       expect(fake.ledgers.get(ownThread)?.closedAt).toBeNull();
 
-      // An item closed, reopened and closed again with the same evidence.
+      // An item closed, reopened and closed again with the same evidence, each time closing the
+      // ledger with it.
       yield* call("ledger_update_item", { itemId: "L1", status: "open" });
+      expect(fake.ledgers.get(ownThread)?.closedAt).toBeNull();
       yield* call("ledger_update_item", { itemId: "L1", status: "closed", evidence: "ok" });
       expect(fake.ledgers.get(ownThread)?.items[0]?.status).toBe("closed");
+      expect(fake.ledgers.get(ownThread)?.closedAt).not.toBeNull();
 
       // A replacement ledger with the same arguments is a new ledger, not the first one's receipt.
-      yield* call("ledger_close", {});
       const first = fake.ledgers.get(ownThread)?.id;
       yield* call("ledger_create", { title: "Ship", items: [twoItems[0]] });
       expect(fake.ledgers.get(ownThread)?.id).not.toBe(first);

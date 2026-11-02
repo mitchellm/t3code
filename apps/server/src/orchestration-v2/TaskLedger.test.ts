@@ -149,6 +149,7 @@ const updateItem = (
     readonly status?: LedgerItemStatus;
     readonly evidence?: string | null;
     readonly dropReason?: string | null;
+    readonly deferReason?: string | null;
     readonly createdBy?: "user" | "agent";
   },
 ) =>
@@ -318,8 +319,9 @@ it.effect("allows one open ledger per thread while it has unfinished items", () 
       createLedger(threadId, { id: LedgerId.make("ledger:second") }),
       "unfinished items",
     );
+    // Dropping the only item finishes the ledger, which closes itself.
     yield* updateItem(threadId, "a", { status: "dropped", dropReason: "not needed" });
-    yield* closeLedger(threadId);
+    assert.ok((yield* ledgerOf(threadId))?.closedAt);
     yield* assertRejected(threadId, createLedger(threadId), "already used");
     yield* createLedger(threadId, { id: LedgerId.make("ledger:second"), items: ["x"] });
     const replaced = yield* ledgerOf(threadId);
@@ -440,7 +442,8 @@ it.effect.each([
 ] as const)("rejects the illegal transition %s -> %s", ([from, to]) =>
   Effect.gen(function* () {
     const threadId = yield* createThread(`illegal-${from}-${to}`);
-    yield* createLedger(threadId, { items: ["a"] });
+    // A second open item keeps the ledger from closing itself, so the transition is what is refused.
+    yield* createLedger(threadId, { items: ["a", "b"] });
     yield* updateItem(threadId, "a", { status: "in_progress" });
     if (from === "closed") yield* updateItem(threadId, "a", { status: "closed", evidence: "done" });
     if (from === "dropped")
@@ -540,7 +543,9 @@ it.effect("closes only when every item is closed or dropped, then freezes the le
     yield* assertRejected(threadId, closeLedger(threadId), "still open");
     yield* updateItem(threadId, "b", { status: "in_progress" });
     yield* assertRejected(threadId, closeLedger(threadId), "still open");
+    // The last item finishing closes the ledger; a manual close takes over after a reopen.
     yield* updateItem(threadId, "b", { status: "dropped", dropReason: "not needed" });
+    yield* reopenLedger(threadId);
 
     yield* TestClock.adjust("3 seconds");
     const closedAt = yield* DateTime.now;
@@ -553,6 +558,96 @@ it.effect("closes only when every item is closed or dropped, then freezes the le
     yield* assertRejected(threadId, addItems(threadId, ["c"]), "closed");
     yield* assertRejected(threadId, updateItem(threadId, "a", { status: "open" }), "closed");
     yield* assertRejected(threadId, recordVerdict(threadId, "a", "pass"), "closed");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("closes the ledger itself when the last item is closed, dropped or deferred", () =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread("auto-close");
+    yield* createLedger(threadId, { items: ["a", "b", "c"] });
+    yield* updateItem(threadId, "a", { status: "closed", evidence: "done" });
+    assert.isNull((yield* ledgerOf(threadId))?.closedAt);
+    yield* updateItem(threadId, "b", { status: "dropped", dropReason: "not needed" });
+    assert.isNull((yield* ledgerOf(threadId))?.closedAt);
+
+    yield* TestClock.adjust("3 seconds");
+    const lastAt = yield* DateTime.now;
+    // Deferred is terminal too: the ledger keeps it on record and stops holding the task open.
+    yield* updateItem(threadId, "c", { status: "deferred", deferReason: "next task" });
+    const finished = yield* ledgerOf(threadId);
+    assert.deepEqual(finished?.closedAt, lastAt);
+    assert.deepEqual(finished?.updatedAt, lastAt);
+    assert.equal(itemOf(finished, "c")?.status, "deferred");
+
+    // Closed like a manual close: a further close is refused and edits wait for a reopen.
+    yield* assertRejected(threadId, closeLedger(threadId), "already closed");
+    yield* assertRejected(threadId, addItems(threadId, ["d"]), "Reopen");
+    yield* assertRejected(threadId, updateItem(threadId, "a", { status: "open" }), "Reopen");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("closes the ledger when the last item is closed by the agent or the user alike", () =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread("auto-close-one");
+    yield* createLedger(threadId, { items: ["a"] });
+    yield* updateItem(threadId, "a", { status: "closed", evidence: "done", createdBy: "agent" });
+    assert.ok((yield* ledgerOf(threadId))?.closedAt);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("does not close a ledger that has no items or whose item is still being judged", () =>
+  Effect.gen(function* () {
+    const empty = yield* createThread("auto-close-empty");
+    yield* createLedger(empty, { items: [] });
+    yield* addItems(empty, ["a"]);
+    assert.isNull((yield* ledgerOf(empty))?.closedAt);
+
+    const threadId = yield* createThread("auto-close-judged");
+    yield* setLoadout(threadId, judged);
+    yield* createLedger(threadId, { items: ["a", "b"] });
+    yield* updateItem(threadId, "b", { status: "in_progress" });
+    yield* updateItem(threadId, "a", { status: "dropped", dropReason: "duplicate" });
+    // The agent's close of started work is a request: b is judging, not finished.
+    yield* updateItem(threadId, "b", { status: "closed", evidence: "done", createdBy: "agent" });
+    assert.equal(itemOf(yield* ledgerOf(threadId), "b")?.judging, true);
+    assert.isNull((yield* ledgerOf(threadId))?.closedAt);
+
+    // A failing verdict hands the item back; the ledger stays open.
+    yield* recordVerdict(threadId, "b", "fail");
+    assert.equal(itemOf(yield* ledgerOf(threadId), "b")?.status, "in_progress");
+    assert.isNull((yield* ledgerOf(threadId))?.closedAt);
+
+    yield* updateItem(threadId, "b", { status: "closed", evidence: "fixed", createdBy: "agent" });
+    assert.isNull((yield* ledgerOf(threadId))?.closedAt);
+    yield* TestClock.adjust("2 seconds");
+    const passedAt = yield* DateTime.now;
+    yield* recordVerdict(threadId, "b", "pass");
+    const finished = yield* ledgerOf(threadId);
+    assert.equal(itemOf(finished, "b")?.status, "closed");
+    assert.deepEqual(finished?.closedAt, passedAt);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reopens an auto-closed ledger, and an item can be reopened after that", () =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread("auto-close-reopen");
+    yield* createLedger(threadId, { items: ["a"] });
+    yield* updateItem(threadId, "a", { status: "closed", evidence: "done" });
+    assert.ok((yield* ledgerOf(threadId))?.closedAt);
+
+    yield* reopenLedger(threadId);
+    assert.isNull((yield* ledgerOf(threadId))?.closedAt);
+    // The reopened ledger is open with every item finished, as a manual close then reopen leaves it.
+    yield* updateItem(threadId, "a", { status: "open" });
+    assert.equal(itemOf(yield* ledgerOf(threadId), "a")?.status, "open");
+    assert.isNull((yield* ledgerOf(threadId))?.closedAt);
+    yield* updateItem(threadId, "a", { status: "closed", evidence: "again" });
+    assert.ok((yield* ledgerOf(threadId))?.closedAt);
+
+    // Adding work to the reopened ledger does not close it either.
+    yield* reopenLedger(threadId);
+    yield* addItems(threadId, ["late"]);
+    assert.isNull((yield* ledgerOf(threadId))?.closedAt);
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -575,7 +670,8 @@ it.effect("reopens a closed ledger so it accepts changes again", () =>
 it.effect("records a verdict without closing the item, and clears it on reopen", () =>
   Effect.gen(function* () {
     const threadId = yield* createThread("verdict");
-    yield* createLedger(threadId, { items: ["a"] });
+    // The second item keeps the ledger open when "a" closes.
+    yield* createLedger(threadId, { items: ["a", "b"] });
     yield* updateItem(threadId, "a", { status: "in_progress" });
     yield* recordVerdict(threadId, "a", "pass");
     const judged = itemOf(yield* ledgerOf(threadId), "a");
@@ -632,8 +728,6 @@ it.effect("rebuilding the projection from events yields the same ledger", () =>
     yield* track(updateItem(threadId, "a", { status: "in_progress" }));
     yield* track(recordVerdict(threadId, "a", "pass"));
     yield* track(updateItem(threadId, "a", { status: "closed", evidence: "done" }));
-    yield* track(updateItem(threadId, "b", { status: "dropped", dropReason: "nope" }));
-    yield* track(updateItem(threadId, "c", { status: "dropped", dropReason: "nope" }));
     yield* track(
       orchestrator.dispatch({
         type: "ledger.checkpoint.set",
@@ -644,7 +738,9 @@ it.effect("rebuilding the projection from events yields the same ledger", () =>
         reached: true,
       }),
     );
-    yield* track(closeLedger(threadId));
+    yield* track(updateItem(threadId, "b", { status: "dropped", dropReason: "nope" }));
+    // The last item to finish closes the ledger in the same command.
+    yield* track(updateItem(threadId, "c", { status: "dropped", dropReason: "nope" }));
     yield* track(reopenLedger(threadId));
     yield* track(closeLedger(threadId));
     const before = yield* ledgerOf(threadId);
@@ -657,9 +753,9 @@ it.effect("rebuilding the projection from events yields the same ledger", () =>
         "ledger.item.updated",
         "ledger.item.updated",
         "ledger.item.updated",
-        "ledger.item.updated",
-        "ledger.item.updated",
         "ledger.checkpoint.updated",
+        "ledger.item.updated",
+        "ledger.item.updated",
         "ledger.closed",
         "ledger.reopened",
         "ledger.closed",
@@ -724,8 +820,9 @@ it.effect("leaves the thread's updatedAt alone for every ledger event", () =>
     yield* updateItem(threadId, "a", { status: "in_progress" });
     yield* recordVerdict(threadId, "a", "pass");
     yield* updateItem(threadId, "a", { status: "closed", evidence: "done" });
-    yield* closeLedger(threadId);
+    assert.ok((yield* ledgerOf(threadId))?.closedAt);
     yield* reopenLedger(threadId);
+    yield* closeLedger(threadId);
 
     assert.deepEqual(yield* threadUpdatedAt(), baseline);
     assert.deepEqual(yield* shellUpdatedAt(), baselineShell);
@@ -755,6 +852,8 @@ it.effect("keeps a cheap open item count in step with the ledger, through a rebu
     yield* updateItem(threadId, "b", { status: "dropped", dropReason: "no" });
     yield* updateItem(threadId, "c", { status: "closed", evidence: "done" });
     assert.equal(yield* count(), 0);
+    // That was the last item, so the ledger closed itself; it reopens before an item does.
+    yield* reopenLedger(threadId);
     yield* updateItem(threadId, "c", { status: "open" });
     assert.equal(yield* count(), 1);
 
@@ -764,7 +863,7 @@ it.effect("keeps a cheap open item count in step with the ledger, through a rebu
     // A ledger only closes with nothing unfinished, so closing reads 0 and reopening the ledger
     // keeps that; reopening an item then brings the count back.
     yield* updateItem(threadId, "c", { status: "closed", evidence: "done" });
-    yield* closeLedger(threadId);
+    assert.ok((yield* ledgerOf(threadId))?.closedAt);
     assert.equal(yield* count(), 0);
     yield* reopenLedger(threadId);
     assert.equal(yield* count(), 0);
@@ -773,7 +872,6 @@ it.effect("keeps a cheap open item count in step with the ledger, through a rebu
 
     // Replacing a closed ledger counts only the new ledger's items.
     yield* updateItem(threadId, "c", { status: "closed", evidence: "done" });
-    yield* closeLedger(threadId);
     yield* createLedger(threadId, { id: LedgerId.make("ledger:replacement"), items: ["x", "y"] });
     assert.equal(yield* count(), 2);
     assert.isTrue((yield* maintenance.rebuild).valid);
@@ -942,7 +1040,7 @@ it.effect("fixes requiresJudge when the ledger is created and gates closing on a
     // A loadout with a judge role: the ledger is born gated.
     const org = yield* createThread("judge-org");
     yield* setLoadout(org, judged);
-    yield* createLedger(org, { items: ["a"] });
+    yield* createLedger(org, { items: ["a", "b"] });
     assert.isTrue((yield* ledgerOf(org))?.requiresJudge);
     // The agent asking to close starts the server's judge instead of closing.
     yield* updateItem(org, "a", { status: "closed", evidence: "tests pass", createdBy: "agent" });
@@ -962,7 +1060,6 @@ it.effect("fixes requiresJudge when the ledger is created and gates closing on a
     assert.equal(itemOf(yield* ledgerOf(org), "a")?.status, "closed");
 
     // The user closing it is final: no judge.
-    yield* addItems(org, ["b"]);
     yield* updateItem(org, "b", { status: "closed", evidence: "I checked it" });
     const byUser = itemOf(yield* ledgerOf(org), "b");
     assert.equal(byUser?.status, "closed");

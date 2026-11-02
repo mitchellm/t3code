@@ -285,10 +285,48 @@ export function planLedgerCommand(input: {
   return Result.map(planCoreLedgerCommand({ ...input, command }), (planned) =>
     followInvestigation(
       input.ledger,
-      stampRefuterVerdict(command, input.ledger, planned),
+      closeWhenFinished(
+        input.ledger,
+        command,
+        stampRefuterVerdict(command, input.ledger, planned),
+        input.now,
+      ),
       input.now,
     ),
   );
+}
+
+/**
+ * A ledger closes itself with the item change that finishes its last item, planning the same
+ * `ledger.closed` a manual close does. A judged item stays in progress until its verdict lands,
+ * so only a pass closes the ledger. An investigation ends and closes its own ledger.
+ */
+function closeWhenFinished(
+  ledger: Ledger | undefined,
+  command: LedgerCommand,
+  planned: ReadonlyArray<PlannedLedgerEvent>,
+  now: DateTime.Utc,
+): ReadonlyArray<PlannedLedgerEvent> {
+  if (ledger === undefined || ledger.closedAt !== null || ledger.investigation !== undefined) {
+    return planned;
+  }
+  if (command.type !== "ledger.item.update" && command.type !== "ledger.item.verdict.record") {
+    return planned;
+  }
+  const changed = new Map<string, LedgerItem>();
+  for (const event of planned) {
+    if (event.type === "ledger.item.updated") {
+      changed.set(event.payload.item.id, event.payload.item);
+    }
+  }
+  if (changed.size === 0) return planned;
+  const finished = ledger.items.every((item) => !isUnfinished(changed.get(item.id) ?? item));
+  return finished
+    ? [
+        ...planned,
+        { type: "ledger.closed", payload: { ledgerId: ledger.id, closedAt: now, updatedAt: now } },
+      ]
+    : planned;
 }
 
 function planCoreLedgerCommand(input: {
