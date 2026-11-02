@@ -365,6 +365,7 @@ describe("AgentAwarenessRelay", () => {
         RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
         new TextEncoder().encode("credential-2"),
       );
+      yield* relay.requestCatchUp();
       yield* relay.publishThread(THREAD_ID);
       assert.equal(publications.length, 2);
       assert.equal(publications[0]?.authorization, "Bearer credential-1");
@@ -373,10 +374,139 @@ describe("AgentAwarenessRelay", () => {
         RELAY_URL_SECRET,
         new TextEncoder().encode("https://new-relay.example.test"),
       );
+      yield* relay.requestCatchUp();
       yield* relay.publishThread(THREAD_ID);
       assert.equal(publications.length, 3);
       assert.isTrue(publications[2]?.url.startsWith("https://new-relay.example.test/") ?? false);
     }),
+  );
+
+  it.effect("reads the relay secrets once, not on every publish", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, secretReads } = yield* makeTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      const readsAfterFirst = secretReads.length;
+      assert.isAbove(readsAfterFirst, 0);
+      for (const hour of [13, 14, 15]) {
+        yield* Ref.set(
+          currentShell,
+          shell({ updatedAt: DateTime.makeUnsafe(`2026-09-04T${hour}:00:00Z`) }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+      }
+      assert.equal(secretReads.length, readsAfterFirst);
+    }),
+  );
+
+  it.effect("picks up changed relay secrets after the cache window when nothing signals it", () =>
+    Effect.gen(function* () {
+      const { relay, secrets, publications } = yield* makeTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      yield* secrets.set(
+        RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
+        new TextEncoder().encode("credential-2"),
+      );
+      yield* TestClock.adjust("31 seconds");
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 2);
+      assert.equal(publications[1]?.authorization, "Bearer credential-2");
+    }),
+  );
+
+  it.effect(
+    "stops publishing as soon as publication is switched off and catch-up is requested",
+    () =>
+      Effect.gen(function* () {
+        const { relay, secrets, currentShell, publications } = yield* makeTestRelay();
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.length, 1);
+        yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, new TextEncoder().encode("false"));
+        yield* relay.requestCatchUp();
+        yield* Ref.set(currentShell, shell({ title: "Renamed while off" }));
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.length, 1);
+      }),
+  );
+
+  it.effect("reads a subagent thread's shell once, not on every event", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, shellReads, publications } = yield* makeTestRelay();
+      yield* Ref.set(
+        currentShell,
+        shell({
+          lineage: {
+            rootThreadId: SECOND_THREAD_ID,
+            parentThreadId: SECOND_THREAD_ID,
+            relationshipToParent: "subagent",
+          },
+        }),
+      );
+      for (let i = 0; i < 3; i++) {
+        yield* relay.publishThread(THREAD_ID);
+      }
+      assert.equal(shellReads.length, 1);
+      assert.equal(publications.length, 0);
+    }),
+  );
+
+  it.effect("never reads the shell for a subagent thread created after startup", () =>
+    Effect.gen(function* () {
+      const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+      const pulls = yield* Queue.unbounded<void>();
+      const { relay, shellReads, publications } = yield* makeTestRelay({
+        domainEvents: Stream.fromEffectRepeat(
+          Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
+        ),
+      });
+      yield* relay.start();
+      yield* Queue.take(pulls);
+      const now = yield* DateTime.now;
+      yield* Queue.offer(events, {
+        id: EventId.make("event:subagent:thread"),
+        type: "thread.created",
+        threadId: THREAD_ID,
+        occurredAt: now,
+        payload: {
+          createdBy: "agent",
+          creationSource: "mcp",
+          id: THREAD_ID,
+          projectId: PROJECT_ID,
+          title: "Subagent",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-model" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            rootThreadId: SECOND_THREAD_ID,
+            parentThreadId: SECOND_THREAD_ID,
+            relationshipToParent: "subagent",
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      yield* Queue.take(pulls);
+      yield* Queue.offer(events, {
+        id: EventId.make("event:subagent:subagent-updated"),
+        type: "subagent.updated",
+        threadId: THREAD_ID,
+        occurredAt: now,
+        payload: {},
+      } as unknown as OrchestrationV2DomainEvent);
+      yield* Queue.take(pulls);
+      yield* relay.drain;
+      assert.equal(shellReads.length, 0);
+      assert.equal(publications.length, 0);
+    }).pipe(Effect.scoped),
   );
 
   it.effect.each(["completed", "failed"] as const)(

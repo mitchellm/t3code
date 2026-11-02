@@ -185,6 +185,8 @@ function resolveAgentActivityPublishingStartupState(input: {
   return input.publishEnabled ? "enabled" : "disabled";
 }
 
+const PUBLISH_CONFIG_TTL_MS = 30_000;
+const UNLISTED_THREADS_MAX = 10_000;
 const RELAY_AGENT_ACTIVITY_DETAIL_MAX_LENGTH = 160;
 const REDACTED_RELAY_AGENT_FAILURE_DETAIL = "The agent run failed.";
 const RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
@@ -382,6 +384,12 @@ export const make = Effect.gen(function* () {
   const startedAt = (yield* DateTime.now).epochMilliseconds;
   const catchUpRequests = yield* Queue.dropping<void>(1);
   const publishedStateByThreadRef = yield* Ref.make(new Map<ThreadId, string>());
+  const unlistedThreads = new Set<ThreadId>();
+  const rememberUnlistedThread = (threadId: ThreadId) => {
+    // Bounded so a long-lived server cannot grow it without limit; a miss only costs one shell read.
+    if (unlistedThreads.size >= UNLISTED_THREADS_MAX) unlistedThreads.clear();
+    unlistedThreads.add(threadId);
+  };
 
   const readSecretString = (name: string) =>
     secrets
@@ -416,6 +424,35 @@ export const make = Effect.gen(function* () {
       transformClient: relayEnvironmentClient(relayConfig.environmentCredential),
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
+  // The per-event publish path used to read four secrets on every call, 98% of all secret reads.
+  // Link and publish-preference writes in this process call `requestCatchUp`, which drops the
+  // cache. `t3 connect` and unlink run elsewhere with no signal, so the TTL bounds how stale it gets.
+  let cachedPublishConfig:
+    | {
+        readonly enabled: boolean;
+        readonly relayConfig: Effect.Success<typeof readRelayConfig>;
+        readonly expiresAtMs: number;
+      }
+    | undefined;
+  let publishConfigGeneration = 0;
+  const invalidatePublishConfig = Effect.sync(() => {
+    publishConfigGeneration += 1;
+    cachedPublishConfig = undefined;
+  });
+  const readPublishConfig = Effect.gen(function* () {
+    const nowMs = (yield* DateTime.now).epochMilliseconds;
+    if (cachedPublishConfig !== undefined && nowMs < cachedPublishConfig.expiresAtMs) {
+      return cachedPublishConfig;
+    }
+    const generation = publishConfigGeneration;
+    const enabled = yield* readPublishAgentActivityEnabled;
+    const relayConfig = enabled ? yield* readRelayConfig : null;
+    const fresh = { enabled, relayConfig, expiresAtMs: nowMs + PUBLISH_CONFIG_TTL_MS };
+    // A signal that arrived while the secrets were being read must not be overwritten by them.
+    if (generation === publishConfigGeneration) cachedPublishConfig = fresh;
+    return fresh;
+  });
+
   let cachedRelayClient: Effect.Success<ReturnType<typeof makeRelayClient>> | undefined;
   let publishedRelayConfig: NonNullable<Effect.Success<typeof readRelayConfig>> | undefined;
 
@@ -446,7 +483,7 @@ export const make = Effect.gen(function* () {
   });
 
   const publishThreadUnsafe = Effect.fn("publishThreadUnsafe")(function* (threadId: ThreadId) {
-    const publishAgentActivity = yield* readPublishAgentActivityEnabled;
+    const { enabled: publishAgentActivity, relayConfig } = yield* readPublishConfig;
     if (!publishAgentActivity) {
       yield* cancelPublishRetries;
       yield* resetPublishedConnection;
@@ -455,7 +492,6 @@ export const make = Effect.gen(function* () {
       });
       return;
     }
-    const relayConfig = yield* readRelayConfig;
     if (!relayConfig) {
       yield* cancelPublishRetries;
       yield* resetPublishedConnection;
@@ -522,15 +558,21 @@ export const make = Effect.gen(function* () {
       });
     });
 
-    // Read only this thread; full shell reads would make each activity event scale with all threads.
-    const threadShell = yield* threads.getThreadShell(threadId);
+    // Subagents and side chats have no relay rows to clear; per-event tombstones would needlessly redeliver user aggregates.
+    // Lineage is fixed at creation, so a thread seen as unlisted once costs no shell read afterwards.
     if (
-      threadShell !== null &&
-      !isListedThreadLineage(threadShell.lineage) &&
+      unlistedThreads.has(threadId) &&
       !(yield* Ref.get(publishedStateByThreadRef)).has(threadId)
     ) {
-      // Subagents and side chats have no relay rows to clear; per-event tombstones would needlessly redeliver user aggregates.
       return;
+    }
+    // Read only this thread; full shell reads would make each activity event scale with all threads.
+    const threadShell = yield* threads.getThreadShell(threadId);
+    if (threadShell !== null && !isListedThreadLineage(threadShell.lineage)) {
+      rememberUnlistedThread(threadId);
+      if (!(yield* Ref.get(publishedStateByThreadRef)).has(threadId)) {
+        return;
+      }
     }
     const thread =
       threadShell === null || threadShell.archivedAt !== null
@@ -844,6 +886,11 @@ export const make = Effect.gen(function* () {
       yield* forkParked(
         Stream.runForEach(threads.streamDomainEvents, (event) => {
           const threadId = eventThreadId(event);
+          if (event.type === "thread.created" && !isListedThreadLineage(event.payload.lineage)) {
+            rememberUnlistedThread(threadId);
+          } else if (event.type === "thread.deleted") {
+            unlistedThreads.delete(threadId);
+          }
           if (!shouldPublishAgentAwarenessEvent(event)) {
             return Effect.void;
           }
@@ -860,7 +907,10 @@ export const make = Effect.gen(function* () {
     publishThread,
     drain: worker.drain,
     requestCatchUp: Effect.fn("AgentAwarenessRelay.requestCatchUp")(function () {
-      return Queue.offer(catchUpRequests, undefined).pipe(Effect.asVoid);
+      return invalidatePublishConfig.pipe(
+        Effect.andThen(Queue.offer(catchUpRequests, undefined)),
+        Effect.asVoid,
+      );
     }),
     start,
   });

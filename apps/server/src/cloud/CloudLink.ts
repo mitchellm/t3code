@@ -1336,6 +1336,7 @@ const make = Effect.gen(function* () {
             { concurrency: 10 },
           );
           yield* setCliDesiredCloudLink(false).pipe(withSecrets);
+          yield* awarenessRelay.requestCatchUp();
           return { ok: true, endpointRuntimeStatus } satisfies EnvironmentCloudRelayConfigResult;
         }),
       );
