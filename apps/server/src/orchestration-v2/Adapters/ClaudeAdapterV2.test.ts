@@ -6058,6 +6058,59 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       if (terminal.status !== "failed") return;
       assert.equal(terminal.failure.message, cliText);
       assert.equal(terminal.failure.code, "api_error_403");
+      assert.equal(terminal.failure.class, "provider_error");
+      assert.isUndefined(terminal.failure.resetAt);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("retries a Superbot relay 403 while it reloads its org policy", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-superbot-policy-reload"),
+          text: "Continue.",
+          attachments: [],
+        }),
+      );
+      // Frames captured from Claude CLI 2.1.316 against the Superbot relay's 403.
+      yield* Queue.offerAll(harness.sdkMessages, [
+        makeAssistantErrorFrame({
+          uuid: "00000000-0000-4000-8000-00000000060a",
+          error: "authentication_failed",
+        }),
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-00000000060b",
+          result:
+            "Failed to authenticate. API Error: 403 the org policy for org 'org_b5a7cf53a1eddfb1' is unavailable on this machine (no accepted org policy is cached on this machine); it is being re-pulled from Superbot, so retry shortly",
+          isError: true,
+          apiErrorStatus: 403,
+          terminalReason: "api_error",
+        }),
+      ]);
+
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.status, "failed");
+      if (terminal.status !== "failed") return;
+      assert.equal(terminal.failure.class, "usage_limit");
+      assert.equal(terminal.failure.code, "api_error_403");
+      assert.equal(terminal.failure.retryable, true);
+      assert.equal(
+        terminal.failure.resetAt,
+        DateTime.formatIso(DateTime.makeUnsafe(DateTime.toEpochMillis(now) + 60_000)),
+      );
+      assert.equal(
+        terminal.failure.message,
+        "Superbot is still loading its org policy after a restart. Retrying in a minute.",
+      );
     }).pipe(
       Effect.provide(
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

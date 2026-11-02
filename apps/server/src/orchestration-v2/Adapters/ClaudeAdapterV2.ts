@@ -3824,12 +3824,32 @@ function claudeUsageLimitResetAt(resetsAt: unknown): string | null {
     : null;
 }
 
+const SUPERBOT_POLICY_RELOAD_RETRY_MS = 60_000;
+
 function providerFailureFromResult(
   message: SDKResultMessage,
   completedAt: DateTime.Utc,
   failureHint?: string,
   usageLimited = false,
 ): OrchestrationV2ProviderFailure | null {
+  // Fork: the Superbot relay answers 403 for a minute or two after its helper restarts, until it
+  // has re-pulled the team's org policy. A short limit lets limit recovery resume the thread.
+  if (
+    message.subtype === "success" &&
+    message.is_error &&
+    message.api_error_status === 403 &&
+    message.result.includes("it is being re-pulled from Superbot, so retry shortly")
+  ) {
+    return makeProviderFailure({
+      class: "usage_limit",
+      message: "Superbot is still loading its org policy after a restart. Retrying in a minute.",
+      code: "api_error_403",
+      retryable: true,
+      resetAt: DateTime.formatIso(
+        DateTime.makeUnsafe(DateTime.toEpochMillis(completedAt) + SUPERBOT_POLICY_RELOAD_RETRY_MS),
+      ),
+    });
+  }
   const gatewayLimit =
     failureHint === undefined &&
     message.subtype === "success" &&
