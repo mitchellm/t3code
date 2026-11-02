@@ -5,6 +5,7 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
@@ -219,6 +220,35 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       const mixedIdentity = yield* resolver.resolve(mixedDir);
       expect(mixedIdentity?.locator.remoteName).toBe("mirror");
       expect(mixedIdentity?.canonicalKey).toBe("github.com/t3tools/t3code");
+    }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
+  );
+
+  it.effect("keeps a missing remote cached for ten minutes unless the caller refreshes", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-repository-identity-negative-test-",
+      });
+      yield* git(cwd, ["init"]);
+
+      const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+      expect(yield* resolver.resolve(cwd)).toBeNull();
+
+      yield* git(cwd, ["remote", "add", "origin", "git@github.com:T3Tools/t3code.git"]);
+      yield* TestClock.adjust("9 minutes");
+      expect(yield* resolver.resolve(cwd)).toBeNull();
+      expect((yield* resolver.resolve(cwd, { refresh: true }))?.canonicalKey).toBe(
+        "github.com/t3tools/t3code",
+      );
+
+      const lateCwd = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-repository-identity-negative-late-test-",
+      });
+      yield* git(lateCwd, ["init"]);
+      expect(yield* resolver.resolve(lateCwd)).toBeNull();
+      yield* git(lateCwd, ["remote", "add", "origin", "git@github.com:T3Tools/t3code.git"]);
+      yield* TestClock.adjust("11 minutes");
+      expect((yield* resolver.resolve(lateCwd))?.canonicalKey).toBe("github.com/t3tools/t3code");
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 

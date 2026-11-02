@@ -20,7 +20,10 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
 // Minute-by-minute sweeps need cached hits; clone, publish and PR discovery force refresh.
 const DEFAULT_POSITIVE_CACHE_TTL = Duration.minutes(15);
-const DEFAULT_NEGATIVE_CACHE_TTL = Duration.minutes(1);
+// A folder with no repository or no remote is asked again by every PR sweep, so a one-minute miss
+// cost about 1,000 git runs per 42 minutes. `git init` or `git remote add` outside T3 shows up
+// within this window, and the refresh callers (agent turn end, clone, publish) skip it entirely.
+const DEFAULT_NEGATIVE_CACHE_TTL = Duration.minutes(10);
 
 export interface RepositoryIdentityResolverOptions {
   readonly cacheCapacity?: number;
