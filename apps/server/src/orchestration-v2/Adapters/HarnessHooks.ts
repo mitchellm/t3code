@@ -229,7 +229,7 @@ export const loadoutContext = (block: string | undefined, shownBefore: boolean) 
 // A blocked agent may think it is waiting when the CLI sees nothing that will wake it. Marking the
 // wait is also what makes the between-turn follow-up stand aside once the stop is allowed.
 const STOP_WAIT_HINT =
-  "If you are waiting on background work, call t3_background_wait with its task id and end your turn.";
+  "If you are waiting on background work, call t3_background_wait with its taskId (or taskIds for several) and end your turn.";
 
 function stopReason(ledger: Ledger, open: ReadonlyArray<LedgerItem>): string {
   const named = open.slice(0, STOP_ITEMS_SHOWN).map(itemLabel).join(", ");

@@ -1,5 +1,5 @@
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
-import { OrchestratorToolkit } from "./tools.ts";
+import { backgroundWaitTaskIds, OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
 
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
@@ -79,10 +79,17 @@ const handlers = {
     Effect.gen(function* () {
       const { scope, threads } = yield* readCaller();
       const caller = yield* McpInvocationContext.requireThreadScope(scope, "t3_background_wait");
+      const taskIds = backgroundWaitTaskIds(input);
+      if (taskIds === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Pass `taskId` (one task) or `taskIds` (several) for t3_background_wait.",
+        });
+      }
       return yield* threads
         .awaitBackgroundTasks({
           threadId: caller.thread.threadId,
-          taskIds: input.taskIds,
+          taskIds,
           awaited: input.waiting ?? true,
         })
         .pipe(

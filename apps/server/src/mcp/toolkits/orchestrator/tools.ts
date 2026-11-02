@@ -166,13 +166,25 @@ const WorkflowStopTool = Tool.make("t3_workflow_stop", {
   .annotate(Tool.Title, "Stop a workflow")
   .annotate(Tool.Destructive, true);
 
+// Agents are told to wait "with its task id", so a single `taskId` is accepted beside the list;
+// 20 calls failed on it while only `taskIds` was.
+export const backgroundWaitTaskIds = (input: {
+  readonly taskId?: string | undefined;
+  readonly taskIds?: ReadonlyArray<string> | undefined;
+}): ReadonlyArray<string> | undefined => {
+  const ids = [
+    ...new Set([...(input.taskIds ?? []), ...(input.taskId === undefined ? [] : [input.taskId])]),
+  ];
+  return ids.length === 0 ? undefined : ids;
+};
+
 const BackgroundWaitTool = Tool.make("t3_background_wait", {
   description:
-    "Keep this thread in Working while background work runs. Pass its task ID after starting it. Not for work left running (dev server, watcher). `waiting=false` clears. Does not stop the task. Claude only.",
+    "Keep this thread in Working while background work runs. Pass `taskId` (one) or `taskIds` (several) after starting it. Not for work left running (dev server, watcher). `waiting=false` clears. Does not stop the task. Claude only.",
   parameters: Schema.Struct({
-    taskIds: Schema.Array(TrimmedNonEmptyString).check(
-      Schema.isMinLength(1),
-      Schema.isMaxLength(20),
+    taskId: Schema.optional(TrimmedNonEmptyString),
+    taskIds: Schema.optional(
+      Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1), Schema.isMaxLength(20)),
     ),
     waiting: Schema.optional(Schema.Boolean),
   }),

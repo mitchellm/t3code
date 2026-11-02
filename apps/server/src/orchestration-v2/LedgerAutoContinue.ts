@@ -94,7 +94,7 @@ function backgroundWaitHint(
   if (markable.length === 0) return undefined;
   const ids = markable.slice(0, WAIT_HINT_IDS_SHOWN).map(({ taskId }) => taskId);
   const hidden = markable.length - ids.length;
-  return `Still running in the background: ${ids.join(", ")}${hidden > 0 ? ` and ${hidden} more` : ""}. If you are waiting on any of it, call t3_background_wait with its task id and end your turn. Leave work you keep running on purpose, such as a dev server, unmarked.`;
+  return `Still running in the background: ${ids.join(", ")}${hidden > 0 ? ` and ${hidden} more` : ""}. If you are waiting on any of it, call t3_background_wait with its taskId (or taskIds for several) and end your turn. Leave work you keep running on purpose, such as a dev server, unmarked.`;
 }
 
 const NOTICE_TITLES_SHOWN = 3;
