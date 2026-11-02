@@ -190,6 +190,41 @@ function Use-BuildTools {
   $env:Path = "$vpBin;$(Join-Path $env:USERPROFILE '.cargo\bin');$env:Path"
   # The resource monitor follows upstream's latest stable Rust; keep it apart from the system toolchain.
   $env:RUSTUP_HOME = $RustupHome
+  Use-MsvcEnv
+
+  # Last, so node 26 stays first on PATH after vcvars prepends its folders. The build runs .ts files with plain node (build-desktop-artifact.ts), which needs Node 26. The
+  # scheduled task inherits the system Node 22.16 first on PATH, which fails with
+  # "Unknown file extension .ts" (4 of 38 syncs, 2026-10-24 to 2026-11-02).
+  $node26 = @(
+    (Join-Path $env:USERPROFILE 'scoop\apps\nodejs\current'),
+    (Join-Path $env:LOCALAPPDATA 'vite-plus\data\js_runtime\node\26.12.1')
+  ) | Where-Object { (Test-Path (Join-Path $_ 'node.exe')) -and ((& (Join-Path $_ 'node.exe') -v) -match '^v26\.') } |
+    Select-Object -First 1
+  if (-not $node26) { throw 'Node 26 is missing (checked scoop\apps\nodejs\current and the Vite+ runtime); the desktop build needs it.' }
+  $env:Path = "$node26;$env:Path"
+  Log "build node: $node26 ($(& node -v))"
+}
+
+function Use-MsvcEnv {
+  # ~/.cargo/config.toml points the msvc target at rustup's gcc-ld\lld-link.exe, which shells out to
+  # a bare "link" and fails with "rust-lld: could not open 'link'" when no Developer prompt put
+  # link.exe on PATH (5 of 38 syncs). The env var beats config.toml; the MSVC environment comes from
+  # vcvars64.bat, imported into this process only.
+  $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = 'link.exe'
+  if (Get-Command link.exe -ErrorAction SilentlyContinue) { return }
+  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+  $vcvars = if (Test-Path $vswhere) {
+    & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
+  }
+  if (-not $vcvars) { throw 'link.exe is not on PATH and no Visual Studio C++ toolchain was found (vswhere); install "Desktop development with C++".' }
+  # vcvars64.bat shells out to a bare vswhere.exe, so keep the Installer folder on PATH.
+  $env:Path = "$(Split-Path $vswhere);$env:Path"
+  $vars = & cmd.exe /d /c "call `"$vcvars`" >nul && set"
+  foreach ($line in $vars) {
+    if ($line -match '^([^=\s][^=]*)=(.*)$') { Set-Item -LiteralPath "env:$($Matches[1])" -Value $Matches[2] }
+  }
+  if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) { throw "vcvars64.bat ($vcvars) did not put link.exe on PATH." }
+  Log "msvc: link.exe from $((Get-Command link.exe).Source)"
 }
 
 function Invoke-Step([string]$Name, [string]$Dir, [scriptblock]$Block) {
@@ -242,10 +277,14 @@ function Move-LocalBranch([string]$Repo, [string]$Name, [string]$From, [string]$
     GitOut $Repo update-ref "refs/heads/$Name" $To $From | Out-Null
     return "moved $Name to $(Short $To)"
   }
-  # Fast-forward the checkout that has the branch out. Git refuses rather than touch local edits.
+  # Fast-forward the checkout that has the branch out. A checkout with local edits is someone's
+  # work in progress (usually another session), so leave it alone: this is not a sync failure.
+  if ((Invoke-Git $wt status --porcelain --untracked-files=no).Out) {
+    return "warning: left $Name in $wt at $(Short $From): the checkout has uncommitted changes. Run 'git merge --ff-only $ForkRemote/$Name' there once it is clean"
+  }
   $r = Invoke-Git $wt merge --ff-only $To
   if ($r.Code) {
-    return "could not fast-forward $Name in $wt ($($r.Out -split "`n" | Select-Object -Last 1)); run 'git merge --ff-only $ForkRemote/$Name' there"
+    return "warning: could not fast-forward $Name in $wt ($($r.Out -split "`n" | Select-Object -Last 1)); run 'git merge --ff-only $ForkRemote/$Name' there"
   }
   "fast-forwarded $Name in $wt to $(Short $To)"
 }

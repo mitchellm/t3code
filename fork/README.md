@@ -43,8 +43,8 @@ Put fork-only files under `fork/`. Upstream never touches that folder, so it nev
    monitor with its own Rust (`%LOCALAPPDATA%\t3code-fork\rustup`, latest stable, apart from the
    system Rust) and builds the NSIS installer.
 5. Pushes the result to `origin/main`, publishes release `v<version>` here (draft first, public
-   once every file is up) and fast-forwards `main` in the checkout. If the checkout has local
-   edits that the update would overwrite, git refuses and the status says so.
+   once every file is up) and fast-forwards `main` in the checkout. If the checkout has
+   uncommitted changes the sync leaves it alone and logs one `warning:` line.
 6. Keeps the last 5 releases and the last 3 local builds.
 
 Versions look like `0.0.43-fork.20260929.1`: the next patch after upstream's package version, the
@@ -200,7 +200,11 @@ first view edit writes its own list over them. Copy `savedViews` out of the serv
    repo `vp` runs Node 24 from `engines.node`.
 2. Rust via rustup (the sync installs its own stable into its state folder), Python 3, Visual
    Studio 2022 with C++ build tools. The Spectre libraries upstream lists are not needed: the sync
-   builds the resource monitor itself and passes `T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR=1`.
+   builds the resource monitor itself and passes `T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR=1`. The
+   sync puts Node 26 first on PATH for the build (scoop's `nodejs\current`, else the Vite+ runtime;
+   the system Node 22 cannot run the `.ts` build script) and imports the MSVC environment from
+   `vcvars64.bat` when `link.exe` is not on PATH, with `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=link.exe`
+   overriding the gcc-ld linker in `~/.cargo/config.toml`.
 3. `git remote add upstream git@github.com:pingdotgg/t3code.git`, `vp i`, then
    `pwsh fork/fork.ps1 task install`.
 
