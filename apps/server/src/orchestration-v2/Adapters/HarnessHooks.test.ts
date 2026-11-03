@@ -391,7 +391,7 @@ describe("Stop hook", () => {
     expect(reasons.at(-1)).toContain("replan");
     for (const reason of reasons) {
       expect(reason).toContain(
-        "If you are waiting on background work, call t3_background_wait with its taskId (or taskIds for several) and end your turn.",
+        "If you are waiting on background work, call mcp__t3-code__t3_background_wait with its taskId (or taskIds for several) and end your turn. It is a deferred tool: load it first with ToolSearch query select:mcp__t3-code__t3_background_wait.",
       );
     }
   });
@@ -687,7 +687,9 @@ describe("plan before editing", () => {
   it("lifts on the next edit once a ledger opens, and gates again after it closes", async () => {
     const current: Current = { value: state(null) };
     const { fire } = gated(current);
-    expect(await reasonFor(fire, "Edit")).toContain("ledger_create");
+    expect(await reasonFor(fire, "Edit")).toContain(
+      "mcp__t3-code__ledger_create (a deferred tool: load it first with ToolSearch query select:mcp__t3-code__ledger_create)",
+    );
 
     current.value = state(ledgerOf([item("L1", "open")]));
     expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
@@ -716,7 +718,7 @@ describe("plan before editing", () => {
     const { fire } = gated(current);
     const decision = decisionOf(await fire("PreToolUse", preToolUse("Edit")));
     expect(decision?.permissionDecision).toBe("deny");
-    expect(decision?.permissionDecisionReason).toContain("ledger_add_items");
+    expect(decision?.permissionDecisionReason).toContain("mcp__t3-code__ledger_add_items");
     expect(decision?.permissionDecisionReason).not.toContain("ledger_create");
 
     // Adding an item for the new work lifts the gate on the next edit.

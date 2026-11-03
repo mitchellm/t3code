@@ -1133,7 +1133,7 @@ it.effect("follows up past work nobody waits on, naming only the tasks a wait ca
     assert.notInclude(followUps[0]!.text, "toolu_build");
     assert.include(
       followUps[0]!.text,
-      "call t3_background_wait with its taskId (or taskIds for several) and end your turn",
+      "call the T3 tool t3_background_wait (Claude: mcp__t3-code__t3_background_wait, loaded first with ToolSearch query select:mcp__t3-code__t3_background_wait) with its taskId (or taskIds for several) and end your turn",
     );
     assert.deepEqual(yield* stopNotices(threadId), []);
   }).pipe(Effect.provide(layerTest)),
