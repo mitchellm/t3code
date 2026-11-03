@@ -31,8 +31,8 @@ import {
   HARNESS_STOP_BLOCK_CEILING,
   HARNESS_STOP_BLOCK_LIMIT,
   LOADOUT_WITHDRAWN,
-  PRE_TOOL_HOOK_TIMEOUT_SECONDS,
-  PRE_TOOL_READ_DEADLINE_MS,
+  HOOK_TIMEOUT_SECONDS,
+  HOOK_READ_DEADLINE_MS,
   RECENT_LEDGER_WINDOW_MS,
 } from "./HarnessHooks.ts";
 
@@ -1106,11 +1106,10 @@ describe("pre-tool hook fails open", () => {
       readThreadPolicy: async () => undefined,
     });
     const matcher = hooks?.PreToolUse?.[0];
-    expect(matcher?.timeout).toBe(PRE_TOOL_HOOK_TIMEOUT_SECONDS);
-    expect(PRE_TOOL_HOOK_TIMEOUT_SECONDS).toBeGreaterThanOrEqual(30);
+    expect(matcher?.timeout).toBe(HOOK_TIMEOUT_SECONDS);
+    expect(HOOK_TIMEOUT_SECONDS).toBeGreaterThanOrEqual(30);
     // Our deadline must fire first, or the CLI's timeout refuses the call instead.
-    expect(PRE_TOOL_READ_DEADLINE_MS).toBeLessThan(PRE_TOOL_HOOK_TIMEOUT_SECONDS * 1000);
-    expect(hooks?.Stop?.[0]?.timeout).not.toBe(PRE_TOOL_HOOK_TIMEOUT_SECONDS);
+    expect(HOOK_READ_DEADLINE_MS).toBeLessThan(HOOK_TIMEOUT_SECONDS * 1000);
   });
 
   it("lets a shell or edit through when the policy read stalls past the deadline", async () => {
@@ -1118,7 +1117,7 @@ describe("pre-tool hook fails open", () => {
       readThreadPolicy: stalled,
       readLedgerState: async () => state(null),
       ledgerTools: true,
-      preToolDeadline: expired,
+      hookDeadline: expired,
     });
     for (const tool of ["Bash", "PowerShell", "Monitor", "Agent", "Edit", "Write"]) {
       expect(await fire("PreToolUse", preToolUse(tool))).toEqual({});
@@ -1135,7 +1134,7 @@ describe("pre-tool hook fails open", () => {
       }),
       readLedgerState: stalled,
       ledgerTools: true,
-      preToolDeadline: expired,
+      hookDeadline: expired,
     });
     expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
   });
@@ -1147,7 +1146,7 @@ describe("pre-tool hook fails open", () => {
         signal.addEventListener("abort", () => (aborted = true), { once: true });
         return stalled(signal);
       },
-      preToolDeadline: expired,
+      hookDeadline: expired,
     });
     expect(await fire("PreToolUse", preToolUse("Bash"))).toEqual({});
     expect(aborted).toBe(true);
@@ -1161,11 +1160,135 @@ describe("pre-tool hook fails open", () => {
         runtimeMode: "full-access",
       }),
       // Never expires, as a deadline that has not been reached.
-      preToolDeadline: () => new Promise<void>(() => {}),
+      hookDeadline: () => new Promise<void>(() => {}),
     });
     expect(decisionOf(await fire("PreToolUse", preToolUse("Bash")))?.permissionDecision).toBe(
       "deny",
     );
+  });
+});
+
+describe("every other hook fails open too", () => {
+  const stalled = (signal: AbortSignal) =>
+    new Promise<never>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  const expired = () => Promise.resolve();
+  const oneOpen = () => state(ledgerOf([item("L1", "open")]));
+
+  it("gives every hook the long CLI timeout, since a timed-out prompt hook drops the prompt", () => {
+    const { hooks } = make({
+      readLedgerState: async () => undefined,
+      readLoadout: async () => null,
+      readThreadPolicy: async () => undefined,
+      onSessionCrons: () => {},
+    });
+    const events = Object.keys(hooks ?? {}) as Array<keyof NonNullable<typeof hooks>>;
+    expect(events.sort()).toEqual(
+      [
+        "PostToolUse",
+        "PreCompact",
+        "PreToolUse",
+        "SessionStart",
+        "Stop",
+        "StopFailure",
+        "UserPromptSubmit",
+      ].sort(),
+    );
+    for (const event of events) {
+      expect(hooks?.[event]?.[0]?.timeout, event).toBe(HOOK_TIMEOUT_SECONDS);
+    }
+  });
+
+  it("lets a prompt through when the loadout read stalls past the deadline", async () => {
+    const { fire, errors } = make({
+      readLoadout: stalled,
+      ledgerTools: true,
+      hookDeadline: expired,
+    });
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    expect(errors).toHaveLength(1);
+  });
+
+  it("allows the stop when the ledger read stalls past the deadline", async () => {
+    const { fire, errors } = make({ readLedgerState: stalled, hookDeadline: expired });
+    expect(await fire("Stop", stop(false))).toEqual({});
+    expect(errors).toHaveLength(1);
+  });
+
+  it("answers {} from PreCompact, PostToolUse and SessionStart reads that stall", async () => {
+    const { fire } = make({
+      readLedgerState: stalled,
+      readLoadout: stalled,
+      hookDeadline: expired,
+    });
+    expect(
+      await fire("PreCompact", { ...base, hook_event_name: "PreCompact" } as HookInput),
+    ).toEqual({});
+    expect(
+      await fire("SessionStart", {
+        ...base,
+        hook_event_name: "SessionStart",
+        source: "compact",
+      } as HookInput),
+    ).toEqual({});
+    for (let call = 0; call < HARNESS_REMINDER_EVERY; call++) {
+      expect(
+        await fire("PostToolUse", {
+          ...base,
+          hook_event_name: "PostToolUse",
+          tool_name: "Read",
+          tool_input: {},
+          tool_response: "",
+          tool_use_id: `u${call}`,
+        } as HookInput),
+      ).toEqual({});
+    }
+  });
+
+  it("a Stop read that answers after the deadline does not count as a block", async () => {
+    const late = Promise.withResolvers<ProviderAdapterV2HarnessLedgerState>();
+    let reads = 0;
+    let deadlines = 0;
+    const { fire } = make({
+      readLedgerState: () => {
+        reads++;
+        return reads === 1 ? late.promise : Promise.resolve(oneOpen());
+      },
+      // Only the first stop hits its deadline.
+      hookDeadline: () => (deadlines++ === 0 ? Promise.resolve() : new Promise<void>(() => {})),
+    });
+    expect(await fire("Stop", stop(false))).toEqual({});
+    late.resolve(oneOpen());
+    await late.promise;
+    const outputs: Array<Record<string, unknown>> = [];
+    outputs.push(await fire("Stop", stop(false)));
+    for (let index = 0; index <= HARNESS_STOP_BLOCK_LIMIT; index++) {
+      outputs.push(await fire("Stop", stop(true)));
+    }
+    expect(outputs.map((output) => output.decision)).toEqual([
+      ...Array.from({ length: HARNESS_STOP_BLOCK_LIMIT + 1 }, () => "block"),
+      undefined,
+    ]);
+  });
+
+  it("a loadout read that answers after the deadline is still sent on the next prompt", async () => {
+    const late = Promise.withResolvers<ProviderAdapterV2HarnessLoadout>();
+    let reads = 0;
+    let deadlines = 0;
+    const { fire } = make({
+      readLoadout: () => {
+        reads++;
+        return reads === 1 ? late.promise : Promise.resolve(oversightLoadout);
+      },
+      ledgerTools: true,
+      hookDeadline: () => (deadlines++ === 0 ? Promise.resolve() : new Promise<void>(() => {})),
+    });
+    expect(await fire("UserPromptSubmit", prompt())).toEqual({});
+    late.resolve(oversightLoadout);
+    await late.promise;
+    const second = await fire("UserPromptSubmit", prompt());
+    expect(JSON.stringify(second)).toContain("Oversight");
   });
 });
 
