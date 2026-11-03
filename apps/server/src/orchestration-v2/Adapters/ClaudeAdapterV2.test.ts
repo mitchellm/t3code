@@ -827,19 +827,23 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
     );
     assert.deepEqual(rejected, [failure]);
 
+    // The hooks hand reads a child signal, so a read past the deadline can be aborted on its own;
+    // aborting the hook while the read runs must still reach the reader.
     const controller = new AbortController();
-    let seen: AbortSignal | undefined;
+    const abortedDuringRead: Array<boolean> = [];
     await fireCompactHook(
       hookOptions({
         pinnedRules: "Rule A",
         read: async (signal) => {
-          seen = signal;
+          abortedDuringRead.push(signal.aborted);
+          controller.abort();
+          abortedDuringRead.push(signal.aborted);
           return "Rule A";
         },
       }),
       controller.signal,
     );
-    assert.strictEqual(seen, controller.signal);
+    assert.deepEqual(abortedDuringRead, [false, true]);
   });
 
   it("registers no pinned rules hook without a reader", () => {
