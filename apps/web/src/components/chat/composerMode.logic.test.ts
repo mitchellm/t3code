@@ -26,18 +26,22 @@ describe("composer mode", () => {
     expect(composerModeChange(build, "plan")).toEqual({
       toggleInteractionMode: true,
       investigating: false,
+      researching: false,
     });
     expect(composerModeChange(plan, "investigate")).toEqual({
       toggleInteractionMode: true,
       investigating: true,
+      researching: false,
     });
     expect(composerModeChange(investigate, "build")).toEqual({
       toggleInteractionMode: false,
       investigating: false,
+      researching: false,
     });
     expect(composerModeChange(investigate, "plan")).toEqual({
       toggleInteractionMode: true,
       investigating: false,
+      researching: false,
     });
   });
 
@@ -62,5 +66,32 @@ describe("composer mode", () => {
       ),
     ).toEqual(["build", "investigate"]);
     expect(composerModeOptions({ planAvailable: false, investigateAvailable: false })).toBeNull();
+  });
+
+  it("picks Research in the picker, hidden by Plan and back when Plan ends", () => {
+    const research = {
+      interactionMode: "default",
+      investigating: false,
+      researching: true,
+    } as const;
+    expect(resolveComposerMode(research)).toBe("research");
+    expect(composerModeChange(research, "investigate")).toEqual({
+      toggleInteractionMode: false,
+      investigating: true,
+      researching: false,
+    });
+    expect(
+      composerModeChange({ interactionMode: "plan", investigating: false }, "research"),
+    ).toEqual({ toggleInteractionMode: true, investigating: false, researching: true });
+    const inPlan = settleComposerMode({ ...research, interactionMode: "plan" });
+    expect(resolveComposerMode(inPlan)).toBe("plan");
+    expect(resolveComposerMode({ ...inPlan, interactionMode: "default" })).toBe("research");
+    expect(
+      composerModeOptions({
+        planAvailable: false,
+        investigateAvailable: false,
+        researchAvailable: true,
+      })?.map((option) => option.id),
+    ).toEqual(["build", "research"]);
   });
 });

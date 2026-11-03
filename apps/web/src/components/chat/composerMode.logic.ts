@@ -1,10 +1,11 @@
 /**
- * Fork: the composer's Mode. Build and Plan are upstream's interaction modes; Investigate is the
- * composer's Investigate fields being open. One picker chooses among them.
+ * Fork: the composer's Mode. Build and Plan are upstream's interaction modes; Investigate and
+ * Research are the composer's Investigate or Research fields being open. One picker chooses
+ * among them.
  */
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 
-export type ComposerMode = "build" | "plan" | "investigate";
+export type ComposerMode = "build" | "plan" | "investigate" | "research";
 
 export interface ComposerModeOption {
   readonly id: ComposerMode;
@@ -20,23 +21,30 @@ const OPTIONS: Record<ComposerMode, ComposerModeOption> = {
     label: "Investigate",
     description: "Tries several approaches and keeps the one that survives a refuter.",
   },
+  research: {
+    id: "research",
+    label: "Research",
+    description: "Answers a question from the sources you name, with checked citations.",
+  },
 };
 
 export interface ComposerModeState {
   readonly interactionMode: ProviderInteractionMode;
   readonly investigating: boolean;
+  readonly researching?: boolean;
 }
 
-/** Plan outranks open Investigate fields: a turn that may change nothing cannot investigate. */
+/** Plan outranks open fields: a turn that may change nothing cannot investigate or research. */
 export function resolveComposerMode(state: ComposerModeState): ComposerMode {
   if (state.interactionMode === "plan") return "plan";
-  return state.investigating ? "investigate" : "build";
+  if (state.investigating) return "investigate";
+  return state.researching === true ? "research" : "build";
 }
 
 /**
  * The state to keep once Plan is seen. Plan is entered from places that never pass through the
  * picker (the proposed-plan card, the server, Shift+Tab, /plan), so Investigate ends whenever Plan
- * is in force, and leaving Plan always lands in Build.
+ * is in force. Research only hides under Plan: its Sources field holds no work in flight.
  */
 export function settleComposerMode(state: ComposerModeState): ComposerModeState {
   return state.interactionMode === "plan" && state.investigating
@@ -48,12 +56,15 @@ export function settleComposerMode(state: ComposerModeState): ComposerModeState 
 export function composerModeOptions(input: {
   readonly planAvailable: boolean;
   readonly investigateAvailable: boolean;
+  readonly researchAvailable?: boolean;
 }): ReadonlyArray<ComposerModeOption> | null {
-  if (!input.planAvailable && !input.investigateAvailable) return null;
+  const researchAvailable = input.researchAvailable === true;
+  if (!input.planAvailable && !input.investigateAvailable && !researchAvailable) return null;
   return [
     OPTIONS.build,
     ...(input.planAvailable ? [OPTIONS.plan] : []),
     ...(input.investigateAvailable ? [OPTIONS.investigate] : []),
+    ...(researchAvailable ? [OPTIONS.research] : []),
   ];
 }
 
@@ -66,10 +77,15 @@ export const composerModeOption = (mode: ComposerMode): ComposerModeOption => OP
 export function composerModeChange(
   state: ComposerModeState,
   next: ComposerMode,
-): { readonly toggleInteractionMode: boolean; readonly investigating: boolean } | null {
+): {
+  readonly toggleInteractionMode: boolean;
+  readonly investigating: boolean;
+  readonly researching: boolean;
+} | null {
   if (resolveComposerMode(state) === next) return null;
   return {
     toggleInteractionMode: (state.interactionMode === "plan") !== (next === "plan"),
     investigating: next === "investigate",
+    researching: next === "research",
   };
 }

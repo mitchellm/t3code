@@ -101,6 +101,7 @@ import {
 } from "./composerSend.logic";
 import { usePlanFollowUpSend } from "./useProposedPlanSend";
 import { useComposerInvestigateSend } from "./ComposerInvestigate";
+import { takeResearchPrompt } from "./ComposerResearch";
 import { useDraftLaunchLoadout } from "./useComposerLoadout";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
@@ -608,7 +609,7 @@ export function useComposerSend(input: ComposerSendInput) {
       });
     // A direct "send annotation" writes the draft and sends in the same tick; the reference
     // must be in the text now, not after the next render.
-    const promptForSend = directAnnotation
+    let promptForSend = directAnnotation
       ? ensureInlineContextReferences(promptRef.current, [
           previewAnnotationContextReference(directAnnotation.annotation),
         ])
@@ -650,6 +651,15 @@ export function useComposerSend(input: ComposerSendInput) {
       }))
     ) {
       return;
+    }
+    // Fork: in Research mode the message runs the research workflow, and the mode ends with it.
+    if (!queuedRunEdit.isEditing) {
+      promptForSend = takeResearchPrompt(
+        environmentId,
+        activeThread.id,
+        promptForSend,
+        sendInteractionMode,
+      );
     }
     if (queuedRunEdit.isEditing) {
       // Edit mode repurposes the composer: sending saves the queued message

@@ -56,6 +56,8 @@ export function ComposerControlsBar(props: {
   onPromptEdit: (edit: (prompt: string) => string) => void;
   planModeEnabled: boolean;
   planModeUiEnabled: boolean;
+  /** Fork: the selected provider reports the research workflow. */
+  researchAvailable: boolean;
   effortDisplay: EffortDisplay;
   /** The strip under a new thread names the permissions, so the row does not repeat them. */
   permissionsShownInStrip: boolean;
@@ -107,6 +109,7 @@ export function ComposerControlsBar(props: {
     onPromptEdit,
     planModeEnabled,
     planModeUiEnabled,
+    researchAvailable,
     interactionMode,
     compatibleRuntimeMode,
     defaultRuntimeMode,
@@ -163,12 +166,13 @@ export function ComposerControlsBar(props: {
       },
     },
   );
-  // Fork: Build, Plan and Investigate in one picker, on drafts as on threads.
+  // Fork: Build, Plan, Investigate and Research in one picker, on drafts as on threads.
   const composerMode = useComposerMode({
     environmentId,
     threadId: routeThreadRef.threadId,
     interactionMode,
     planAvailable: planModeUiEnabled,
+    researchAvailable,
     toggleInteractionMode,
   });
   const accessMatchesDefault = compatibleRuntimeMode === defaultRuntimeMode;

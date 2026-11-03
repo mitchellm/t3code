@@ -1,15 +1,16 @@
 /**
- * Fork: one Mode picker for Build, Plan and Investigate. It wraps upstream's plan toggle, so the
+ * Fork: one Mode picker for Build, Plan, Investigate and Research. It wraps upstream's plan toggle, so the
  * Shift+Tab shortcut, the /plan command and the proposed-plan card act on the same state.
  */
 import type { EnvironmentId, ProviderInteractionMode, ThreadId } from "@t3tools/contracts";
-import { BotIcon, FlaskConicalIcon, PencilRulerIcon } from "lucide-react";
+import { BookOpenIcon, BotIcon, FlaskConicalIcon, PencilRulerIcon } from "lucide-react";
 
 import { MenuRadioGroup, MenuRadioItem, MenuSeparator } from "../ui/menu";
 import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
 import { setInvestigating, useCanInvestigate, useInvestigating } from "./ComposerInvestigate";
+import { setResearching, useResearching } from "./ComposerResearch";
 import {
   type ComposerMode,
   type ComposerModeOption,
@@ -25,6 +26,7 @@ const MODE_ICONS = {
   build: BotIcon,
   plan: PencilRulerIcon,
   investigate: FlaskConicalIcon,
+  research: BookOpenIcon,
 } satisfies Record<ComposerMode, unknown>;
 
 export interface ComposerModeControl {
@@ -39,18 +41,23 @@ export function useComposerMode(input: {
   readonly threadId: ThreadId;
   readonly interactionMode: ProviderInteractionMode;
   readonly planAvailable: boolean;
+  /** The selected provider can run the research workflow. */
+  readonly researchAvailable: boolean;
   readonly toggleInteractionMode: () => void;
 }): ComposerModeControl | null {
   const { environmentId, threadId, interactionMode, toggleInteractionMode } = input;
   const investigating = useInvestigating(environmentId, threadId);
   const investigateAvailable = useCanInvestigate(environmentId);
+  const researching = useResearching(environmentId, threadId);
   const options = composerModeOptions({
     // A thread already in Plan keeps the option that names its mode.
     planAvailable: input.planAvailable || interactionMode === "plan",
     investigateAvailable,
+    // A thread already in Research keeps the option that names its mode.
+    researchAvailable: input.researchAvailable || researching,
   });
   if (options === null) return null;
-  const state = { interactionMode, investigating };
+  const state = { interactionMode, investigating, researching };
   return {
     options,
     active: resolveComposerMode(state),
@@ -58,6 +65,7 @@ export function useComposerMode(input: {
       const change = composerModeChange(state, mode);
       if (change === null) return;
       setInvestigating(environmentId, threadId, change.investigating);
+      setResearching(environmentId, threadId, change.researching);
       if (change.toggleInteractionMode) toggleInteractionMode();
     },
   };

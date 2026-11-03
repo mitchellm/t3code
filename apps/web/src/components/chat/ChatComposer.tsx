@@ -283,6 +283,8 @@ import {
   ComposerInvestigateGoalLabel,
   useInvestigating,
 } from "./ComposerInvestigate";
+import { ComposerResearchFields, useResearching } from "./ComposerResearch";
+import { researchAvailable } from "./composerResearch.logic";
 import { resolveComposerMode } from "./composerMode.logic";
 import { composerCommandKeyHandler } from "./composerCommandKey";
 
@@ -977,7 +979,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   // Fork: in Investigate the message is the investigation's goal.
   const investigating = useInvestigating(environmentId, routeThreadRef.threadId);
-  const investigateMode = resolveComposerMode({ interactionMode, investigating }) === "investigate";
+  const researching = useResearching(environmentId, routeThreadRef.threadId);
+  const composerMode = resolveComposerMode({ interactionMode, investigating, researching });
+  const investigateMode = composerMode === "investigate";
+  const researchMode = composerMode === "research";
   const selectedModelSelection: ModelSelection = createModelSelection(
     selectedInstanceId,
     selectedModel,
@@ -2375,6 +2380,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       onPromptEdit={editPromptFromTraitsStable}
       planModeEnabled={settings.planModeEnabled}
       planModeUiEnabled={planModeUiEnabled}
+      researchAvailable={researchAvailable(selectedProviderSlashCommands)}
       interactionMode={interactionMode}
       compatibleRuntimeMode={compatibleRuntimeMode}
       defaultRuntimeMode={props.defaultRuntimeMode}
@@ -3489,7 +3495,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                 ? "Enable a provider in Settings to send a message"
                                 : investigateMode
                                   ? "What should the investigation find out or fix?"
-                                  : DEFAULT_COMPOSER_PLACEHOLDER
+                                  : researchMode
+                                    ? "What question should the research answer?"
+                                    : DEFAULT_COMPOSER_PLACEHOLDER
                     }
                     disabled={
                       projectSelectionRequired ||
@@ -3536,6 +3544,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 prompt={prompt}
                 draftId={routeKind === "draft" ? draftId : null}
                 providers={providerInstanceEntries}
+              />
+              <ComposerResearchFields
+                environmentId={environmentId}
+                threadId={routeThreadRef.threadId}
+                interactionMode={interactionMode}
+                investigating={investigating}
               />
             </div>
 

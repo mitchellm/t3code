@@ -96,11 +96,12 @@ tool, which refuses skills reserved for manual invocation.
 
 ## Research
 
-Claude threads can run `/t3:research`, a workflow that answers one question from
-sources you name. Write the question and where to look in the same message, for
-example `/t3:research what changed in the save format? use ~/exports/u80 and
-docs/saves.md`. Sources can be files, folders, URLs, threads (`thread:<id>`) or a
-plain description Claude can find. With no sources named, it searches the web.
+Claude threads can run a research workflow that answers one question from
+sources you name. Pick **Research** in the composer's Mode picker, write the
+question, and list the sources one per line in the **Sources** field. Sources can
+be files, folders, URLs, threads (`thread:<id>`) or a plain description Claude can
+find. With no sources named, it searches the web. You can also type
+`/t3:research` followed by the question and where to look.
 
 It splits the question into sub-questions, investigates each from the sources,
 checks every citation against the file or page it came from, and repeats while
