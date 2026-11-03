@@ -38,18 +38,18 @@ export const HARNESS_STOP_BLOCK_CEILING = 20;
 /** Tool calls between ledger reminders. */
 export const HARNESS_REMINDER_EVERY = 15;
 
-const HOOK_TIMEOUT_SECONDS = 5;
 /**
- * The CLI refuses a tool call whose PreToolUse hook times out ("The tool call was not executed"),
- * and the server's event loop stalls for 11 to 32 s at times, so the 5 s above refused 250 calls in
- * a week. A stall now delays a call instead of refusing it.
+ * The CLI treats a hook that times out as a refusal: a PreToolUse call "was not executed", a
+ * UserPromptSubmit prompt is dropped, and a Stop ends the turn as "the app driving this session
+ * didn't respond". The server's event loop stalls for 5 to 155 s at times, so the old 5 s refused 250
+ * tool calls and dropped 28 prompts in a week. A stall now delays the hook instead of refusing.
  */
-export const PRE_TOOL_HOOK_TIMEOUT_SECONDS = 30;
+export const HOOK_TIMEOUT_SECONDS = 30;
 /**
- * Where the hook stops waiting on its reads and lets the call through. It sits under the CLI's
- * timeout above so ours fires first: a late answer is refused, no answer is allowed.
+ * Where a hook stops waiting on its reads and answers {} (no block, no context). It sits under the
+ * CLI's timeout above so ours fires first: a late answer is refused, no answer is allowed.
  */
-export const PRE_TOOL_READ_DEADLINE_MS = 25_000;
+export const HOOK_READ_DEADLINE_MS = 25_000;
 const LEDGER_BLOCK_MAX_CHARS = 3_000;
 const TITLE_MAX_CHARS = 80;
 const ACCEPTANCE_MAX_CHARS = 600;
@@ -116,10 +116,10 @@ export interface HarnessHookPort {
    */
   readonly delegatedChild: boolean;
   /**
-   * Resolves when a gated tool call should stop waiting on its reads and go through. Defaults to
-   * a timer of PRE_TOOL_READ_DEADLINE_MS; a test passes one that has already expired.
+   * Resolves when a hook should stop waiting on its reads and answer {}. Defaults to a timer of
+   * HOOK_READ_DEADLINE_MS; a test passes one that has already expired.
    */
-  readonly preToolDeadline?: () => Promise<void>;
+  readonly hookDeadline?: () => Promise<void>;
   /** Epoch milliseconds, for how recently a ledger finished. */
   readonly now?: () => number;
   /** The Stop hook's task list omits the CLI's ambient flag, which only its task frames carry. */
@@ -423,18 +423,9 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         return {};
       }
     };
-  const matcher = (
-    run: (input: HookInput, signal: AbortSignal) => Promise<HookJSONOutput>,
-    pattern?: string,
-    timeout = HOOK_TIMEOUT_SECONDS,
-  ): HookCallbackMatcher => ({
-    ...(pattern === undefined ? {} : { matcher: pattern }),
-    timeout,
-    hooks: [guard(run)],
-  });
-  // A gated tool call is worth less than the policy it checks: when the reads do not answer by the
-  // deadline the call goes through, since a refusal costs a turn and 38% of them were retried
-  // identically. The reads are aborted so a stalled one does not outlive the call.
+  // A hook is worth less than the turn it guards: past the deadline the call, prompt or stop goes
+  // through, since a timed-out prompt hook drops the prompt. The reads are aborted, and a hook that
+  // mutates state must check the signal after each read so a late answer counts for nothing.
   const failOpen =
     (run: (input: HookInput, signal: AbortSignal) => Promise<HookJSONOutput>) =>
     async (input: HookInput, signal: AbortSignal): Promise<HookJSONOutput> => {
@@ -443,15 +434,11 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
       signal.addEventListener("abort", abortReads, { once: true });
       // An unref'd platform timer, so nothing needs clearing when the reads answer first.
       const deadline =
-        port.preToolDeadline?.() ??
+        port.hookDeadline?.() ??
         new Promise<void>((resolve) => {
-          AbortSignal.timeout(PRE_TOOL_READ_DEADLINE_MS).addEventListener(
-            "abort",
-            () => resolve(),
-            {
-              once: true,
-            },
-          );
+          AbortSignal.timeout(HOOK_READ_DEADLINE_MS).addEventListener("abort", () => resolve(), {
+            once: true,
+          });
         });
       try {
         const settled = await Promise.race([
@@ -460,12 +447,20 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         ]);
         if (settled !== undefined) return settled.output;
         reads.abort();
-        port.onHookError(new Error("A tool call's policy reads did not answer in time; allowed."));
+        port.onHookError(new Error("A hook's reads did not answer in time; answered {}."));
         return {};
       } finally {
         signal.removeEventListener("abort", abortReads);
       }
     };
+  const matcher = (
+    run: (input: HookInput, signal: AbortSignal) => Promise<HookJSONOutput>,
+    pattern?: string,
+  ): HookCallbackMatcher => ({
+    ...(pattern === undefined ? {} : { matcher: pattern }),
+    timeout: HOOK_TIMEOUT_SECONDS,
+    hooks: [guard(failOpen(run))],
+  });
   const hooks: ClaudeHooks = {};
 
   // Sticky on purpose: a later compaction may summarize the copy away, but the
@@ -490,7 +485,8 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
   const loadoutUpdate = async (signal: AbortSignal, resend: boolean) => {
     if (readLoadout === undefined) return undefined;
     const loadout = await readLoadout(signal);
-    if (loadout === undefined) return undefined;
+    // A read that lost the race to the deadline was never delivered, so it must not count as sent.
+    if (loadout === undefined || signal.aborted) return undefined;
     const context = loadoutContext(formatLoadoutBlock(loadout), loadoutSent !== undefined);
     if (context === undefined || (!resend && context === loadoutSent)) return undefined;
     loadoutSent = context;
@@ -556,6 +552,8 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         port.onSessionCrons?.(input.session_crons ?? []);
         if (waitsOnBackgroundWork(input, port.isAmbientTask)) return {};
         const state = await readLedgerState(signal);
+        // Past the deadline the stop was already allowed, so no block may be counted for it.
+        if (signal.aborted) return {};
         // A watched pull request wakes the thread when checks or reviews land.
         if (
           state === undefined ||
@@ -713,7 +711,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
     });
     hooks.PreToolUse = [
       matcher(
-        failOpen(async (input, signal) => {
+        async (input, signal) => {
           if (input.hook_event_name !== "PreToolUse") return {};
           const tool = input.tool_name;
           // Plan mode writes its plan file before any plan exists; a ledger forced mid-plan would
@@ -776,9 +774,8 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
               additionalContext: lateEditReminder(state.ledger, pass.reason),
             },
           };
-        }),
+        },
         [...MANAGER_DENIED_TOOLS, ASK_USER_TOOL].join("|"),
-        PRE_TOOL_HOOK_TIMEOUT_SECONDS,
       ),
     ];
   }
