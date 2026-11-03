@@ -425,12 +425,18 @@ export function SidebarProjectGroupHeader(props: {
   projectIcon?: ReactNode;
   onToggle: () => void;
   onNewThread?: (() => void) | undefined;
+  /** The group's key: a thread dropped on this header is unfiled within it. */
+  dropGroupKey?: string | undefined;
+  /** A dragged thread would be unfiled here if released now. */
+  dropActive?: boolean | undefined;
 }) {
   const Folder = props.collapsed ? FolderIcon : FolderOpenIcon;
   return (
     <li
+      data-project-drop-key={props.dropGroupKey}
       className={cn(
         "group/project-header mx-0.5 flex list-none items-center",
+        props.dropActive && "rounded-md bg-primary/15 ring-1 ring-primary/50",
         // Comfortable draws a divider above every project but the first. Drop
         // markers and pins share the list, so CSS first-child cannot tell.
         props.first

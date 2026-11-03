@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  buildFolderMenuItem,
   buildThreadActionMenuItems,
   folderMenuId,
   parseFolderMenuAction,
@@ -128,6 +129,20 @@ describe("buildThreadActionMenuItems", () => {
       const item = folderItem({ ...withFolders, canOperate: false });
       expect(item?.disabled).toBe(true);
       expect(item?.children?.every((child) => child.disabled)).toBe(true);
+    });
+
+    it("builds the bulk item: counted, nothing checked for a mixed selection, disabled without permission", () => {
+      const item = buildFolderMenuItem({
+        current: "Update 82",
+        existing: ["Update 82"],
+        mixed: true,
+        count: 3,
+        disabled: true,
+      });
+      expect(item.label).toBe("Move to folder (3)");
+      expect(item.disabled).toBe(true);
+      expect(item.children?.every((child) => child.disabled === true)).toBe(true);
+      expect(item.children?.some((child) => child.checked === true)).toBe(false);
     });
 
     it("round-trips a folder path through its menu id", () => {

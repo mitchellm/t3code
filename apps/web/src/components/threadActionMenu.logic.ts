@@ -132,6 +132,43 @@ export function parseFolderMenuAction(
     : null;
 }
 
+/**
+ * The "Move to folder" submenu, for one thread or a selection. With `mixed` the threads sit in
+ * different folders, so none is checked.
+ */
+export function buildFolderMenuItem(folder: {
+  readonly current: string | null;
+  readonly existing: ReadonlyArray<string>;
+  readonly mixed?: boolean;
+  /** The selection size, shown on a menu that moves several threads. */
+  readonly count?: number;
+  readonly disabled?: boolean;
+}): ContextMenuItem<ThreadActionMenuId> {
+  const checked = (isCurrent: boolean) => folder.mixed !== true && isCurrent;
+  const disabled = folder.disabled === true;
+  return {
+    id: "folder",
+    label: folder.count === undefined ? "Move to folder" : `Move to folder (${folder.count})`,
+    icon: "folder",
+    disabled,
+    children: [
+      {
+        id: "folder:none",
+        label: "No folder",
+        checked: checked(folder.current === null),
+        disabled,
+      },
+      ...folder.existing.map((path) => ({
+        id: folderMenuId(path),
+        label: path,
+        checked: checked(path === folder.current),
+        disabled,
+      })),
+      { id: "folder:new", label: "New folder…", separatorBefore: true, disabled },
+    ],
+  };
+}
+
 /** Local navigation, read markers, and copying remain available to read-only clients. */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
   return ![
@@ -208,28 +245,7 @@ export function buildThreadActionMenuItems(
               },
         ]
       : []),
-    ...(state.supports.folders
-      ? [
-          {
-            id: "folder" as const,
-            label: "Move to folder",
-            icon: "folder",
-            children: [
-              {
-                id: "folder:none" as const,
-                label: "No folder",
-                checked: state.folder.current === null,
-              },
-              ...state.folder.existing.map((path) => ({
-                id: folderMenuId(path),
-                label: path,
-                checked: path === state.folder.current,
-              })),
-              { id: "folder:new" as const, label: "New folder…", separatorBefore: true },
-            ],
-          },
-        ]
-      : []),
+    ...(state.supports.folders ? [buildFolderMenuItem(state.folder)] : []),
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
     ...(state.supports.titleRegeneration
       ? [

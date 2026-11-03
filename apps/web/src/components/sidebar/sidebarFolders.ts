@@ -3,6 +3,7 @@
  * the sidebar's sort order; folders follow A to Z, never by activity, so a folder holds its place.
  */
 import {
+  normalizeThreadFolder,
   THREAD_FOLDER_SEPARATOR,
   threadFolderSegments,
   type SidebarThreadIndent,
@@ -74,6 +75,34 @@ export function listFolderPaths(folders: Iterable<string | null | undefined>): r
 
 export function sidebarFolderKey(groupKey: string, path: string): string {
   return `${groupKey}\u001f${path}`;
+}
+
+/** The inverse of `sidebarFolderKey`, for reading a folder header's drop target off the DOM. */
+export function parseSidebarFolderKey(key: string): { groupKey: string; path: string } | null {
+  const at = key.indexOf("\u001f");
+  return at === -1 ? null : { groupKey: key.slice(0, at), path: key.slice(at + 1) };
+}
+
+/**
+ * Which dragged threads a drop changes. A folder belongs to its project group, so a thread only
+ * moves inside its own group; ones already in the target folder are left alone.
+ */
+export function planFolderMove(input: {
+  readonly draggedKeys: readonly string[];
+  readonly infoOf: (
+    key: string,
+  ) => { readonly groupKey: string; readonly folder: string | null | undefined } | undefined;
+  readonly target: { readonly groupKey: string; readonly folder: string | null };
+}): readonly string[] {
+  const targetFolder = normalizeThreadFolder(input.target.folder);
+  return input.draggedKeys.filter((key) => {
+    const info = input.infoOf(key);
+    return (
+      info !== undefined &&
+      info.groupKey === input.target.groupKey &&
+      normalizeThreadFolder(info.folder) !== targetFolder
+    );
+  });
 }
 
 function countThreads<T>(node: FolderNode<T>): number {

@@ -4,8 +4,47 @@ import {
   folderIndent,
   layoutSidebarGroupFolders,
   listFolderPaths,
+  parseSidebarFolderKey,
+  planFolderMove,
   sidebarFolderKey,
 } from "./sidebarFolders";
+
+describe("parseSidebarFolderKey", () => {
+  it("reads back the group and path of a folder key", () => {
+    expect(parseSidebarFolderKey(sidebarFolderKey("env:proj", "Update 82/Prototypes"))).toEqual({
+      groupKey: "env:proj",
+      path: "Update 82/Prototypes",
+    });
+    expect(parseSidebarFolderKey("no separator")).toBeNull();
+  });
+});
+
+describe("planFolderMove", () => {
+  const info: Record<string, { groupKey: string; folder: string | null }> = {
+    a: { groupKey: "p", folder: null },
+    b: { groupKey: "p", folder: "Update 82" },
+    c: { groupKey: "p", folder: "Update 82/" },
+    d: { groupKey: "other", folder: null },
+  };
+  const plan = (draggedKeys: string[], folder: string | null, groupKey = "p") =>
+    planFolderMove({ draggedKeys, infoOf: (key) => info[key], target: { groupKey, folder } });
+
+  it("moves every selected thread of the target's project", () => {
+    expect(plan(["a", "b"], "Update 83")).toEqual(["a", "b"]);
+  });
+
+  it("skips threads already in the target folder, whatever the path's spelling", () => {
+    expect(plan(["a", "b", "c"], "Update 82")).toEqual(["a"]);
+  });
+
+  it("unfiles with a null target and skips threads that are already unfiled", () => {
+    expect(plan(["a", "b"], null)).toEqual(["b"]);
+  });
+
+  it("leaves threads of another project and unknown keys alone", () => {
+    expect(plan(["a", "d", "gone"], "Update 82")).toEqual(["a"]);
+  });
+});
 
 describe("listFolderPaths", () => {
   it("lists each folder once with its parents, in reading order, skipping unfiled", () => {

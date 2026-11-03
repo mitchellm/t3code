@@ -28,6 +28,10 @@ export function SidebarFolderHeader(props: {
   count: number;
   collapsed: boolean;
   indent: SidebarThreadIndent;
+  /** The folder's `sidebarFolderKey`, which a thread dropped on this header reads back. */
+  dropKey: string;
+  /** A thread being dragged would be filed here if released now. */
+  dropActive: boolean;
   onToggle: () => void;
 }) {
   const Icon = props.collapsed ? FolderIcon : FolderOpenIcon;
@@ -62,8 +66,10 @@ export function SidebarFolderHeader(props: {
       className={cn(
         "group/folder-header mx-0.5 flex list-none",
         folderIndentClassName(props.indent),
+        props.dropActive && "rounded-md bg-primary/15 ring-1 ring-primary/50",
       )}
       data-testid="sidebar-folder-header"
+      data-folder-drop-key={props.dropKey}
     >
       {/* A nested folder shows only its last segment, so hovering it gives the whole path. */}
       {props.path === props.name ? (

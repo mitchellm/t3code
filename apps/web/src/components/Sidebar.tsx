@@ -56,6 +56,7 @@ import {
 } from "@t3tools/client-runtime/environment";
 import {
   AuthOrchestrationOperateScope,
+  normalizeThreadFolder,
   ProjectId,
   type ScopedThreadRef,
   type ThreadId,
@@ -177,8 +178,10 @@ import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
   buildDraftActionMenuItems,
+  buildFolderMenuItem,
   buildThreadActionMenuItems,
   threadActionRequiresOperate,
+  type ThreadActionMenuId,
 } from "./threadActionMenu.logic";
 import {
   applySidebarThreadDrop,
@@ -278,6 +281,7 @@ import {
 } from "./sidebar/SidebarViewControls";
 import { SidebarFolderHeader } from "./sidebar/SidebarFolderHeader";
 import { folderIndent, listFolderPaths } from "./sidebar/sidebarFolders";
+import { useSidebarFolderDrag } from "./sidebar/useSidebarFolderDrag";
 import { threadEmojiForTitle } from "./sidebar/threadEmoji";
 import { useSidebarViewStore } from "./sidebar/sidebarViewStore";
 import { useThreadsViewOptions } from "./explorer/useThreadsViewOptions"; // Fork
@@ -2071,6 +2075,69 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       });
     },
   );
+  // Fork: drag threads onto folders. Only the grouped-by-project active list has folders.
+  const folderDragInfo =
+    viewGroupOf === null && activeArrangement.groups !== null
+      ? new Map(
+          activeArrangement.groups.flatMap((group) =>
+            group.threads.map((thread) => [
+              scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+              { groupKey: group.key, folder: thread.folder ?? null, title: thread.title },
+            ]),
+          ),
+        )
+      : null;
+  const moveThreadsToFolder = useStableCallback(
+    (threads: ReadonlyArray<EnvironmentThreadShell>, folder: string | null) => {
+      if (threads.length === 0 || !checkThreadOperations(threads)) return;
+      void (async () => {
+        const results = await Promise.all(
+          threads.map((thread) =>
+            updateThreadMetadata({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id, folder },
+            }),
+          ),
+        );
+        const failed = results.find(
+          (result) => result._tag === "Failure" && !isAtomCommandInterrupted(result),
+        );
+        if (failed?._tag !== "Failure") return;
+        const error = squashAtomCommandFailure(failed);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: threads.length === 1 ? "Failed to move thread" : "Failed to move threads",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      })();
+    },
+  );
+  const folderDrag = useSidebarFolderDrag({
+    listRef: threadListRef,
+    infoOf: useStableCallback((threadKey: string) => folderDragInfo?.get(threadKey)),
+    selectedKeys: useStableCallback(() => useThreadSelectionStore.getState().selectedThreadKeys),
+    onDropToFolder: useStableCallback(
+      (keys: readonly string[], target: { groupKey: string; folder: string | null }) =>
+        moveThreadsToFolder(
+          keys.flatMap((key) => {
+            const thread = threadByKeyRef.current.get(key);
+            return thread ? [thread] : [];
+          }),
+          target.folder,
+        ),
+    ),
+    onDropOutside: useStableCallback((point: { x: number; y: number }, keys: readonly string[]) => {
+      dropThreadContext(
+        point,
+        keys.flatMap((key) => {
+          const ref = parseScopedThreadKey(key);
+          return ref ? [ref] : [];
+        }),
+      );
+    }),
+  });
   // Release during render when server state catches up so canonical order appears in the same frame.
   if (
     optimisticDrop !== null &&
@@ -2566,9 +2633,37 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         timestampFormat,
         selectedThreads[0]!.environmentId,
       );
+      // Folders belong to one project, so a selection across projects has none to offer.
+      const firstThread = selectedThreads[0]!;
+      const selectionInOneProject =
+        serverConfigs.has(firstThread.environmentId) &&
+        selectedThreads.every(
+          (thread) =>
+            thread.environmentId === firstThread.environmentId &&
+            thread.projectId === firstThread.projectId,
+        );
+      const selectedFolders = selectedThreads.map((thread) => normalizeThreadFolder(thread.folder));
+      const folderMenuItem = selectionInOneProject
+        ? buildFolderMenuItem({
+            current: selectedFolders[0] ?? null,
+            mixed: selectedFolders.some((folder) => folder !== selectedFolders[0]),
+            count,
+            disabled: !canOperateThreads(selectedThreads),
+            existing: listFolderPaths(
+              readThreadShells()
+                .filter(
+                  (candidate) =>
+                    candidate.environmentId === firstThread.environmentId &&
+                    candidate.projectId === firstThread.projectId,
+                )
+                .map((candidate) => candidate.folder),
+            ),
+          })
+        : null;
       const clicked = await settlePromise(() =>
         api.contextMenu.show(
           [
+            ...(folderMenuItem ? [folderMenuItem] : []),
             ...(unpinMenuItem
               ? [{ ...unpinMenuItem, disabled: !canOperateThreads(pinnedSelectedThreads) }]
               : []),
@@ -2636,6 +2731,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               : selectedThreads;
       if (clicked.value === "settle" && actionTargets.length === 0) return;
       if (clicked.value !== "mark-unread" && !checkThreadOperations(actionTargets)) return;
+      if (clicked.value.startsWith("folder:")) {
+        const choice = await resolveThreadFolderChoice(clicked.value as ThreadActionMenuId);
+        if (choice !== null) moveThreadsToFolder(selectedThreads, choice.folder);
+        return;
+      }
       if (clicked.value?.startsWith("snooze:")) {
         const preset =
           clicked.value === "snooze:custom"
@@ -3588,6 +3688,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   <ul
                     {...SIDEBAR_TREE_PROPS}
                     ref={attachTreeRef}
+                    onPointerDown={folderDragInfo === null ? undefined : folderDrag.onPointerDown}
                     className={cn(
                       "relative flex flex-col gap-px",
                       sidebarListItems.length > 0 && "flex-1",
@@ -3884,6 +3985,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                           );
                                         }
                                   }
+                                  dropGroupKey={folderDragInfo === null ? undefined : group.key}
+                                  dropActive={
+                                    folderDrag.target?.groupKey === group.key &&
+                                    folderDrag.target.folder === null
+                                  }
                                   onToggle={() => toggleProjectCollapsed(group.key)}
                                 />,
                               );
@@ -3912,6 +4018,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                       count={row.count}
                                       collapsed={row.collapsed}
                                       indent={folderIndent(threadIndent, row.depth)}
+                                      dropKey={row.key}
+                                      dropActive={
+                                        folderDrag.target?.groupKey === group.key &&
+                                        folderDrag.target.folder === row.path
+                                      }
                                       onToggle={() => toggleFolderCollapsed(row.key)}
                                     />,
                                   );
