@@ -239,7 +239,7 @@ export const loadoutContext = (block: string | undefined, shownBefore: boolean) 
 // A blocked agent may think it is waiting when the CLI sees nothing that will wake it. Marking the
 // wait is also what makes the between-turn follow-up stand aside once the stop is allowed.
 const STOP_WAIT_HINT =
-  "If you are waiting on background work, call t3_background_wait with its taskId (or taskIds for several) and end your turn.";
+  "If you are waiting on background work, call mcp__t3-code__t3_background_wait with its taskId (or taskIds for several) and end your turn. It is a deferred tool: load it first with ToolSearch query select:mcp__t3-code__t3_background_wait.";
 
 function stopReason(ledger: Ledger, open: ReadonlyArray<LedgerItem>): string {
   const named = open.slice(0, STOP_ITEMS_SHOWN).map(itemLabel).join(", ");
@@ -321,8 +321,8 @@ function lateEditReminder(ledger: Ledger, reason: FinishedLedgerPass["reason"]):
       : "it finished only minutes ago";
   const how =
     ledger.closedAt === null
-      ? "Add an item for it with ledger_add_items"
-      : "Write the plan with ledger_create";
+      ? "Add an item for it with mcp__t3-code__ledger_add_items"
+      : "Write the plan with mcp__t3-code__ledger_create";
   return `Plan before editing is on and the task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" ${state}, so no item covers this edit. It went through because ${why}. If this is new work, ${how}, with what done means, and close it with evidence. T3 MCP tools are deferred: load one with ToolSearch before you call it.`;
 }
 
@@ -338,13 +338,13 @@ function planFirstReason(tool: string, ledger: Ledger | null, subagent: boolean)
   }
   const denied = `Plan before editing is on and`;
   if (ledger !== null && ledger.closedAt === null) {
-    return `${denied} the task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" has no open or in-progress item, so ${tool} is denied: nothing in the plan covers this work. Add an item for it with ledger_add_items, with what done means, then work it and close it with evidence. Reading and searching stay allowed.`;
+    return `${denied} the task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" has no open or in-progress item, so ${tool} is denied: nothing in the plan covers this work. Add an item for it with mcp__t3-code__ledger_add_items (a deferred tool: load it first with ToolSearch query select:mcp__t3-code__ledger_add_items), with what done means, then work it and close it with evidence. Reading and searching stay allowed.`;
   }
   const why =
     ledger === null
       ? "this thread has no task ledger"
       : `its task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" is closed`;
-  return `${denied} ${why}, so ${tool} is denied. Write the plan first with ledger_create: each item with what done means (one item is fine for a small change). If the task earns more structure than solo, propose a loadout with t3_loadout_propose. Then work through the items, closing each with evidence. Reading and searching stay allowed.`;
+  return `${denied} ${why}, so ${tool} is denied. Write the plan first with mcp__t3-code__ledger_create (a deferred tool: load it first with ToolSearch query select:mcp__t3-code__ledger_create): each item with what done means (one item is fine for a small change). If the task earns more structure than solo, propose a loadout with mcp__t3-code__t3_loadout_propose. Then work through the items, closing each with evidence. Reading and searching stay allowed.`;
 }
 
 /**
@@ -752,7 +752,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
             return deny(
               worker
                 ? `This thread runs a managers loadout, so the native ${tool} tool is denied: work goes to the loadout's roles. Use delegate_task with role "worker", "subPlanner" or "explorer".`
-                : `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${tool} is denied (shells too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
+                : `This thread runs a managers loadout: the top-level thread does not edit files or run shell commands itself, so ${tool} is denied (shells too, even read-only, since a read-only command cannot be told apart reliably). Delegate the change with mcp__t3-code__delegate_task and role "worker" or "subPlanner", and read files with Read, Grep and Glob.`,
             );
           }
           if (!planTool || readPlanLedger === undefined || !policy.planBeforeEditing) return {};
