@@ -388,6 +388,41 @@ describe("DelegatedWorktreeReaper", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
+  it.effect("removes a worktree whose branch was renamed and pushed, keeps a detached one", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run, worktrees } = yield* fixture(["renamed", "renamedLocal", "detached"]);
+      const remote = yield* fs.makeTempDirectoryScoped({ prefix: "reaper-remote-" });
+      yield* run(remote, ["init", "--bare", "-b", "main"]);
+      yield* run(repo, ["remote", "add", "origin", remote]);
+      // The PR flow: commit on t3/<name>, rename to agent/<name>, push.
+      yield* fs.writeFileString(`${worktrees.renamed}/work.txt`, "work\n");
+      yield* run(worktrees.renamed!, ["add", "work.txt"]);
+      yield* run(worktrees.renamed!, ["commit", "-m", "pr work"]);
+      yield* run(worktrees.renamed!, ["branch", "-m", "agent/renamed"]);
+      yield* run(worktrees.renamed!, ["push", "origin", "agent/renamed"]);
+      // Renamed with an unpushed commit: losing it would lose work.
+      yield* fs.writeFileString(`${worktrees.renamedLocal}/work.txt`, "work\n");
+      yield* run(worktrees.renamedLocal!, ["add", "work.txt"]);
+      yield* run(worktrees.renamedLocal!, ["commit", "-m", "local work"]);
+      yield* run(worktrees.renamedLocal!, ["branch", "-m", "agent/renamed-local"]);
+      yield* run(worktrees.detached!, ["checkout", "--detach"]);
+      const reaper = yield* reaperFor(repo, [
+        parent,
+        child("renamed", worktrees),
+        child("renamedLocal", worktrees),
+        child("detached", worktrees),
+      ]);
+
+      const report = yield* reaper.reap();
+
+      expect(outcomeOf(report, worktrees.renamed!)?.outcome).toBe("removed");
+      expect(outcomeOf(report, worktrees.renamedLocal!)?.reason).toContain("not merged or pushed");
+      expect(outcomeOf(report, worktrees.detached!)?.reason).toContain("detached");
+      expect(yield* fs.exists(worktrees.renamed!)).toBe(false);
+      expect(yield* fs.exists(worktrees.renamedLocal!)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
   it.effect("keeps a worktree whose child is unfinished or finished inside the grace period", () =>
     Effect.gen(function* () {
       const { fs, repo, worktrees } = yield* fixture(["running", "young", "waiting"]);

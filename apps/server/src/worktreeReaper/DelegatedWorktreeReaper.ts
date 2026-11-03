@@ -121,13 +121,14 @@ const make = Effect.gen(function* () {
    */
   const lossReason = Effect.fn("DelegatedWorktreeReaper.lossReason")(function* (
     cwd: string,
-    branch: string,
     keepWhen: WorktreeKeepWhen,
   ) {
+    // Workers rename t3/<name> to agent/<name> to open a PR, so judge whatever branch is out now.
     const current = yield* gitLines(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).pipe(
       Effect.orElseSucceed(() => [] as string[]),
     );
-    if (current[0] !== branch) return "its branch changed since the thread started";
+    const branch = current[0];
+    if (branch === undefined) return "HEAD is detached";
     const changes = yield* gitLines(cwd, [
       "status",
       "--porcelain=v1",
@@ -260,9 +261,8 @@ const make = Effect.gen(function* () {
         )
           return keep("not created by T3 for a delegated task");
         if (thread.branch === null) return keep("its thread has no recorded branch");
-        const branch = thread.branch;
 
-        const loss = yield* lossReason(worktreePath, branch, keepWhen);
+        const loss = yield* lossReason(worktreePath, keepWhen);
         if (loss !== null) return keep(loss);
         if (dryRun) return entry("would_remove", "finished, clean, and merged or pushed");
 
@@ -272,7 +272,7 @@ const make = Effect.gen(function* () {
             const reason = yield* blockedSinceSnapshot(worktreePath, group);
             if (reason !== null) return reason;
             // The checks above ran before the lease, so run the git ones again under it.
-            const lateLoss = yield* lossReason(worktreePath, branch, keepWhen);
+            const lateLoss = yield* lossReason(worktreePath, keepWhen);
             if (lateLoss !== null) return lateLoss;
             // A setting changed since the check may have turned protection on, so honour it.
             const currentKeepWhen = resolveWorktreeCleanup(
