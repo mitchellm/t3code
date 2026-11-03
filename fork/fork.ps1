@@ -1095,7 +1095,11 @@ function Get-BusyReason([string[]]$IgnorePatterns) {
   if ($null -eq $threads) { return 'the T3 API does not answer' }
   $titlePatterns = @((Read-Config).idleIgnoreThreads)
   $running = @($threads | Where-Object { $_.state -eq 'running' -and -not (Test-BackgroundThread $_ $titlePatterns) } | ForEach-Object title)
-  $work = Get-AgentWork $IgnorePatterns
+  # WMI can cancel the process query on a loaded machine ("Call cancelled"), which on 2026-11-03
+  # failed two armed restarts outright. An unanswered scan proves nothing about idleness, so the
+  # poll counts as busy and the wait goes on.
+  try { $work = Get-AgentWork $IgnorePatterns }
+  catch { return "the process scan failed ($($_.Exception.Message.Trim()))" }
   $work = @($work | Select-Object -Unique)
   if (-not ($running.Count + $work.Count)) { return '' }
   (@($running | ForEach-Object { "running: $_" }) + @($work | Select-Object -First 4 | ForEach-Object { "work: $_" })) -join ' | '
