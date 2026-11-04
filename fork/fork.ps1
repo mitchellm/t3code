@@ -709,7 +709,7 @@ function Wait-AppInstallers([int]$Minutes = 20) {
   $deadline = (Get-Date).AddMinutes($Minutes)
   $quietSince = $null
   while ((Get-Date) -lt $deadline) {
-    if (Get-AppInstallers) { $quietSince = $null }
+    if (Get-AppInstallers) { $quietSince = $null; Clear-ForeignLockers }
     else {
       if (-not $quietSince) { $quietSince = Get-Date }
       if (((Get-Date) - $quietSince).TotalSeconds -ge $InstallerSettleSeconds) { return $true }
@@ -805,9 +805,76 @@ function Request-AppClose([Diagnostics.Process]$P) {
   $true
 }
 
+function Get-FileLockers([string[]]$Paths) {
+  # PIDs holding any of $Paths open, from Windows Restart Manager (the API installers use).
+  if (-not ('ForkRm' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class ForkRm {
+  [StructLayout(LayoutKind.Sequential)] struct UniqueProcess { public int Pid; public System.Runtime.InteropServices.ComTypes.FILETIME Start; }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct ProcessInfo {
+    public UniqueProcess Process;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string App;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string Service;
+    public int Type; public int Status; public int Session; [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+  }
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)] static extern int RmStartSession(out uint h, int flags, string key);
+  [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint h);
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)] static extern int RmRegisterResources(uint h, uint nFiles, string[] files, uint nApps, IntPtr apps, uint nServices, string[] services);
+  [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint h, out uint needed, ref uint count, [In, Out] ProcessInfo[] list, ref uint reasons);
+  public static int[] Lockers(string[] files) {
+    var pids = new List<int>();
+    uint h;
+    if (RmStartSession(out h, 0, Guid.NewGuid().ToString()) != 0) return pids.ToArray();
+    try {
+      if (RmRegisterResources(h, (uint)files.Length, files, 0, IntPtr.Zero, 0, null) != 0) return pids.ToArray();
+      uint needed = 0, count = 0, reasons = 0;
+      if (RmGetList(h, out needed, ref count, null, ref reasons) == 234 && needed > 0) {
+        var list = new ProcessInfo[needed]; count = needed;
+        if (RmGetList(h, out needed, ref count, list, ref reasons) == 0)
+          for (int i = 0; i < count; i++) pids.Add(list[i].Process.Pid);
+      }
+    } finally { RmEndSession(h); }
+    return pids.ToArray();
+  }
+}
+'@
+  }
+  $existing = @($Paths | Where-Object { Test-Path -LiteralPath $_ })
+  if (-not $existing) { return @() }
+  @([ForkRm]::Lockers($existing))
+}
+
+function Clear-ForeignLockers {
+  # Another app holding T3's files makes NSIS exit 2 ("Failed to uninstall old application
+  # files"). superbot's helper keeps server.asar open (Electron caches every .asar it touches) and
+  # respawns within seconds, so this runs on every poll while an installer works: 2026-11-02 and
+  # 2026-11-04 both failed that way. Only processes outside T3's folder and installers are ended.
+  $files = @('resources\server.asar', 'resources\app.asar') | ForEach-Object { Join-Path $AppDir $_ }
+  $installers = @(Get-AppInstallers | ForEach-Object { $_.ProcessId })
+  foreach ($id in (Get-FileLockers $files)) {
+    if ($id -eq $PID -or $installers -contains $id) { continue }
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+    if (-not $proc) { continue }
+    if ($proc.ExecutablePath -and $proc.ExecutablePath.StartsWith("$AppDir\", 'OrdinalIgnoreCase')) { continue }
+    if ($proc.ExecutablePath -match '\\~?ns[a-z0-9]*\.tmp\\') { continue }
+    $key = "$id/$($proc.Name)"
+    if (-not $script:EndedLockers) { $script:EndedLockers = @{} }
+    if (-not $script:EndedLockers[$key]) { Log "ending $($proc.Name) ($id): it holds T3's files open, which makes the installer fail"; $script:EndedLockers[$key] = $true }
+    try { Stop-Process -Id $id -Force -ErrorAction Stop } catch { Log "could not end $($proc.Name) ($id): $($_.Exception.Message)" }
+  }
+}
+
 function Invoke-Installer([string]$Exe) {
-  # NSIS /S: silent, no window. Returns its exit code.
-  (Start-Process -FilePath $Exe -ArgumentList '/S' -PassThru -Wait).ExitCode
+  # NSIS /S: silent, no window. Returns its exit code. Keeps other apps off T3's files while it runs.
+  Clear-ForeignLockers
+  $p = Start-Process -FilePath $Exe -ArgumentList '/S' -PassThru
+  $null = $p.Handle # without an early handle, ExitCode reads empty once the process is gone
+  while (-not $p.HasExited) { Clear-ForeignLockers; Start-Sleep -Milliseconds 500 }
+  $p.WaitForExit()
+  $p.ExitCode
 }
 
 function Close-App([int]$Seconds = 90) {
