@@ -70,7 +70,7 @@ over 200,000 tokens. Each Claude provider's settings can override it:
   The compaction appears in the thread as a `/compact` turn sent by T3 Code.
   If the window is missed, such as when you enable this mode after the cache has
   expired or the server restarts before compaction runs, it falls back to
-  **When you return**. Switch the chip to **Keep** to keep the full history for that message.
+  **When you return**.
 - **Never** skips idle compaction and Claude's resume prompt. **Auto-compact after**
   still applies, and you can still compact by hand.
 

@@ -450,11 +450,20 @@ function fileLinkSourcesKey(
     .map(normalizeMarkdownLinkHrefKey)
     .filter((href) => resolveMarkdownFileLinkMeta(href, cwd, imageBaseDir ?? cwd));
   const spans = extractInlineCodeSpans(text).filter(
-    (span) =>
-      resolveInlineCodeFolderLinkMeta(span, cwd) ??
-      resolveInlineCodeFileLinkMeta(span, cwd, imageBaseDir ?? cwd),
+    (span) => resolveInlineCodeLinkMeta(span, cwd, imageBaseDir) !== null,
   );
   return JSON.stringify([[...new Set(hrefs)], [...new Set(spans)]]);
+}
+
+function resolveInlineCodeLinkMeta(
+  span: string,
+  cwd: string | undefined,
+  imageBaseDir: string | undefined,
+) {
+  return (
+    resolveInlineCodeFolderLinkMeta(span, cwd) ??
+    resolveInlineCodeFileLinkMeta(span, cwd, imageBaseDir ?? cwd)
+  );
 }
 
 function resolveFileLinkSources(
@@ -470,9 +479,7 @@ function resolveFileLinkSources(
   }
   const inlineCodeFileLinkMetaByText = new Map<string, MarkdownFileLinkMeta>();
   for (const span of spans) {
-    const meta =
-      resolveInlineCodeFolderLinkMeta(span, cwd) ??
-      resolveInlineCodeFileLinkMeta(span, cwd, imageBaseDir ?? cwd);
+    const meta = resolveInlineCodeLinkMeta(span, cwd, imageBaseDir);
     if (meta) inlineCodeFileLinkMetaByText.set(span, meta);
   }
   const fileLinkParentSuffixByPath = buildFileLinkParentSuffixByPath([

@@ -170,7 +170,6 @@ const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.
   function* (cwd: string) {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-
     // `git -C` cannot enter a missing folder or a file, so every probe below would fail.
     const isFolder = yield* fileSystem.stat(cwd).pipe(
       Effect.map((info) => info.type === "Directory"),
