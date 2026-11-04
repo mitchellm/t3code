@@ -28,6 +28,7 @@ import * as Equal from "effect/Equal";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import { ChildProcessSpawner } from "effect/process";
 import * as Ref from "effect/Ref";
 import type { PlatformError } from "effect/PlatformError";
 import * as Schedule from "effect/Schedule";
@@ -296,6 +297,7 @@ const make = Effect.gen(function* () {
   const terminals = yield* TerminalManager.TerminalManager;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
   const orphanSizes = new Map<string, number | null>();
   const noteTerminal = (terminal: TerminalSummary) => {
@@ -1170,7 +1172,7 @@ const make = Effect.gen(function* () {
           force: submodules.force,
           execute: git.execute,
           run: (args) => cleanupGit(project.workspaceRoot, [...args], "git worktree remove"),
-        });
+        }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
         entries.push({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
         yield* gitManager.invalidateStatus(project.workspaceRoot);
         // Preserve branch/path so ProviderTurnStartService can recreate the checkout on resume.

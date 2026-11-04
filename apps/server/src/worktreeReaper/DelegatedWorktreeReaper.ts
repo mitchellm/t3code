@@ -16,6 +16,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import { ChildProcessSpawner } from "effect/process";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -87,6 +88,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const isWindows = yield* HostProcess.isWindows;
   const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
   const pathKey = (target: string) => {
     const resolved = path.resolve(target);
@@ -326,6 +328,7 @@ const make = Effect.gen(function* () {
       return yield* reap(options).pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.catchCause((cause) =>
           Effect.logWarning("delegated worktree reap failed", { cause }).pipe(
             Effect.as([] as ReapReport),

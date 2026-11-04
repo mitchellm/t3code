@@ -4,15 +4,49 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import type * as GitVcsDriver from "./GitVcsDriver.ts";
 
 const INDEX_LIST_MAX_BYTES = 64 * 1024 * 1024;
+const REMOVE_TIMEOUT = "30 minutes";
+
+/**
+ * Fork: recursive `rm` in a child process, so a big node_modules cannot fill libuv's
+ * thread pool and stall every file read in the server. Async `rm` only: on Windows,
+ * Node 24's `rmSync` follows junctions and deletes their targets.
+ */
+const removeTreeInChildProcess = Effect.fn("WorktreeRemoval.removeTreeInChildProcess")(function* (
+  target: string,
+) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  return yield* spawner
+    .exitCode(
+      ChildProcess.make(
+        process.execPath,
+        [
+          "-e",
+          "require('node:fs').promises.rm(process.argv[1], { recursive: true, maxRetries: 3 })" +
+            ".catch(() => process.exit(1))",
+          target,
+        ],
+        // The packaged server runs on Electron's binary, which acts as Node with this set.
+        {
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+          extendEnv: true,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        },
+      ),
+    )
+    .pipe(Effect.timeout(REMOVE_TIMEOUT));
+});
 
 /**
  * Git for Windows before 2.54 follows NTFS junctions; newer Git leaves them behind.
- * On Windows, mirror Git's removal checks, then delete with Node's `rm`, which
- * unlinks junctions without following them. Git then removes the worktree metadata.
+ * On Windows, mirror Git's removal checks, then delete with Node's `rm` in a child
+ * process; it unlinks junctions without following them. Git then removes the metadata.
  */
 export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorktree")(function* <
   A,
@@ -147,7 +181,12 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
   const gitFileContents = yield* fileSystem
     .readFileString(gitFile)
     .pipe(Effect.mapError(() => notAWorktree));
-  yield* fileSystem.remove(worktreePath, { recursive: true }).pipe(
+  yield* removeTreeInChildProcess(worktreePath).pipe(
+    Effect.flatMap((code) =>
+      code === 0
+        ? Effect.void
+        : Effect.fail(refuse(`deleting '${worktreePath}' exited with ${code}`)),
+    ),
     Effect.tapError(() => fileSystem.writeFileString(gitFile, gitFileContents).pipe(Effect.ignore)),
     Effect.mapError((cause) => refuse(`failed to delete '${worktreePath}'`, cause)),
   );

@@ -4991,6 +4991,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, commandSpawner),
     );
     if (result.exitCode === 0) {
       // Git for Windows reports success without removing NTFS junctions or their parent directories.

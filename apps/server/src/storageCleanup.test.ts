@@ -1,5 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ChildProcessSpawner } from "effect/process";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -592,6 +593,7 @@ const runCleanupTest = <A, E>(
     | GitVcsDriver.GitVcsDriver
     | Path.Path
     | Scope.Scope
+    | ChildProcessSpawner.ChildProcessSpawner
   >,
 ) => effect.pipe(Effect.provide(cleanupTestLayer), Effect.scoped);
 
