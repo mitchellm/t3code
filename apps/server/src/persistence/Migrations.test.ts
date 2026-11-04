@@ -79,6 +79,44 @@ describe("runMigrations", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
+  it.effect("drops the unused correlation index and keeps correlation values", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 54 });
+      yield* sql`
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+        )
+        VALUES (
+          'event-1', 'thread', 'thread-1', 0, 'thread.created', '2026-01-01T00:00:00.000Z',
+          'command-1', NULL, 'correlation-1', 'client', '{}', '{}'
+        )
+      `;
+
+      yield* runMigrations();
+
+      const indexes = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'index' AND tbl_name = 'orchestration_events' AND sql IS NOT NULL
+      `;
+      const indexNames = indexes.map((row) => row.name);
+      assert.notInclude(indexNames, "idx_orch_events_correlation_id");
+      for (const kept of [
+        "idx_orch_events_stream_version",
+        "idx_orch_events_stream_sequence",
+        "idx_orch_events_command_id",
+        "idx_orchestration_events_agent_stream_sequence",
+      ]) {
+        assert.include(indexNames, kept);
+      }
+      const events = yield* sql<{ readonly correlation_id: string | null }>`
+        SELECT correlation_id FROM orchestration_events WHERE event_id = 'event-1'
+      `;
+      assert.deepStrictEqual(events, [{ correlation_id: "correlation-1" }]);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect.each([30, 54])("still starts with a site-local migration at id %s", (id) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -144,6 +182,63 @@ describe("runMigrations", () => {
       yield* runMigrations();
       assert.strictEqual((yield* forkTables).length, 3);
       assert.deepStrictEqual(yield* history, migrationManifest);
+      const precheckColumns = yield* sql<{ readonly name: string }>`
+        SELECT name FROM pragma_table_info('scheduled_tasks')
+        WHERE name IN ('precheck_json', 'model_override_json', 'last_run_quiet', 'quiet_run_count')
+      `;
+      assert.strictEqual(precheckColumns.length, 4);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("upgrades a database that recorded the fork's old migration 78", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 77 });
+      // What the fork build's numbered 078_ScheduledTaskPrecheck left behind.
+      yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN precheck_json TEXT`;
+      yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN model_override_json TEXT`;
+      yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN last_run_quiet INTEGER NOT NULL DEFAULT 0`;
+      yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN quiet_run_count INTEGER NOT NULL DEFAULT 0`;
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name) VALUES (78, 'ScheduledTaskPrecheck')
+      `;
+      yield* sql`INSERT INTO scheduled_tasks ${sql.insert({
+        task_id: "existing",
+        title: "task",
+        prompt: "Run",
+        enabled: 1,
+        schedule_json: '{"type":"interval","everyMs":60000}',
+        project_id: "project",
+        thread_id: null,
+        workspace_strategy_json: '{"type":"root"}',
+        model_selection_json: '{"instanceId":"codex","model":"gpt-5"}',
+        runtime_mode: "full-access",
+        interaction_mode: "default",
+        created_by: "user",
+        creation_source: "web",
+        created_at: "2026-10-01T00:00:00.000Z",
+        updated_at: "2026-10-01T00:00:00.000Z",
+        next_run_at: null,
+        last_run_at: null,
+        last_run_status: "never",
+        last_run_error: null,
+        run_count: 3,
+        precheck_json: '{"command":"git fetch --dry-run"}',
+      })}`;
+
+      const executed = yield* runMigrations();
+
+      assert.deepStrictEqual(
+        executed.map(([id]) => id),
+        [78, 79],
+      );
+      assert.deepStrictEqual(yield* history, migrationManifest);
+      assert.deepStrictEqual(
+        yield* sql<{ readonly precheck_json: string | null }>`
+          SELECT precheck_json FROM scheduled_tasks
+        `,
+        [{ precheck_json: '{"command":"git fetch --dry-run"}' }],
+      );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });

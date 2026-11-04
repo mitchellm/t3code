@@ -1,11 +1,13 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import * as Crypto from "effect/Crypto";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -96,18 +98,18 @@ describe("worktreeFingerprint", () => {
   const withWorktree = <A, E>(
     body: (input: {
       readonly root: string;
-      readonly crypto: Crypto.Crypto;
+      readonly crypto: Digest.Digest["Service"];
       readonly fileSystem: FileSystem.FileSystem;
       readonly path: Path.Path;
     }) => Effect.Effect<A, E, never>,
   ) =>
     Effect.gen(function* () {
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* Digest.Digest;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-branch-totals-" });
       return yield* body({ root, crypto, fileSystem, path });
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)), Effect.scoped);
 
   it.effect("moves when an untracked file inside a collapsed directory is edited in place", () =>
     withWorktree(({ root, crypto, fileSystem, path }) =>

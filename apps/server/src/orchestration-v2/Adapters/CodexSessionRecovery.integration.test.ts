@@ -1,8 +1,9 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { CodexSettings, CommandId, MessageId, ProjectId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -22,6 +23,7 @@ import * as Orchestrator from "../Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "../ProviderSessionManager.ts";
 import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
+import * as PortScanner from "../../preview/PortScanner.ts";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 
 const modelSelection = { instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID, model: "gpt-5.4" };
@@ -55,6 +57,7 @@ describe("Codex shared session recovery", () => {
         );
         const layerFactory = CodexAdapterV2.layerAppServerClientFactory.pipe(
           Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, testSpawner)),
+          Layer.provide(Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => {} })),
           Layer.provide(
             Layer.succeed(
               ProviderEventLoggers.ProviderEventLoggers,
@@ -69,7 +72,7 @@ describe("Codex shared session recovery", () => {
               settings,
               environment: {},
               clientFactory: yield* CodexAdapterV2.CodexAppServerClientFactory,
-              crypto: yield* Crypto.Crypto,
+              digest: yield* Digest.Digest,
               fileSystem: yield* FileSystem.FileSystem,
               idAllocator: yield* IdAllocator.IdAllocatorV2,
               serverConfig: yield* ServerConfig.ServerConfig,
@@ -82,7 +85,7 @@ describe("Codex shared session recovery", () => {
               layerFactory,
               IdAllocator.layer,
               ServerConfig.layerTest(cwd, { prefix: "t3-codex-session-recovery-config-" }),
-            ).pipe(Layer.provideMerge(NodeServices.layer)),
+            ).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
           ),
         );
 

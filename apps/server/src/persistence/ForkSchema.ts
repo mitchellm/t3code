@@ -2,11 +2,8 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 /**
- * Fork: tables that only this fork has. They live outside the numbered migration list because the
- * migrator keys by number and upstream will eventually take the same number for a different
- * migration, which fails startup with BadState. Everything here is idempotent and runs right after
- * upstream's migrations. A table that is upstreamed gets a real migration number at that point.
- * Append new fork tables to this function.
+ * Fork-only schema, outside the numbered list: upstream reuses fork migration numbers, which fails
+ * startup with BadState. Everything here is idempotent and runs right after upstream's migrations.
  */
 export const ensureForkSchema = Effect.fn("ensureForkSchema")(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -38,4 +35,43 @@ export const ensureForkSchema = Effect.fn("ensureForkSchema")(function* () {
     CREATE INDEX IF NOT EXISTS idx_thread_task_retros_project
     ON thread_task_retros(project_id, created_at)
   `;
+
+  // Scheduled-task prechecks and model overrides. SQLite has no ADD COLUMN IF NOT EXISTS.
+  const scheduledTaskColumns = new Set(
+    (yield* sql<{ readonly name: string }>`PRAGMA table_info(scheduled_tasks)`).map(
+      (column) => column.name,
+    ),
+  );
+  if (!scheduledTaskColumns.has("precheck_json")) {
+    yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN precheck_json TEXT`;
+  }
+  if (!scheduledTaskColumns.has("model_override_json")) {
+    yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN model_override_json TEXT`;
+  }
+  if (!scheduledTaskColumns.has("last_run_quiet")) {
+    yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN last_run_quiet INTEGER NOT NULL DEFAULT 0`;
+  }
+  if (!scheduledTaskColumns.has("quiet_run_count")) {
+    yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN quiet_run_count INTEGER NOT NULL DEFAULT 0`;
+  }
+});
+
+/**
+ * Migration ids the fork once held in the numbered list before upstream took the number. Each
+ * one's schema now comes from ensureForkSchema, so its history row is released before migrating:
+ * left in place, upstream's migration under that id would be skipped, and startup refuses that.
+ */
+const RETIRED_FORK_MIGRATIONS: ReadonlyArray<readonly [number, string]> = [
+  [78, "ScheduledTaskPrecheck"],
+];
+
+export const releaseRetiredForkMigrations = Effect.fn("releaseRetiredForkMigrations")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (tables.length === 0) return;
+  for (const [id, name] of RETIRED_FORK_MIGRATIONS) {
+    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = ${id} AND name = ${name}`;
+  }
 });

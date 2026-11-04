@@ -32,7 +32,7 @@ import * as EffectWorker from "./EffectWorker.ts";
 import * as EventStore from "./EventStore.ts";
 import * as LedgerJudgeRunner from "./LedgerJudgeRunner.ts";
 import * as Orchestrator from "./Orchestrator.ts";
-import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
+import * as ProjectionReplay from "./testkit/ProjectionReplay.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import { planLedgerCommand } from "./TaskLedger.ts";
@@ -60,7 +60,7 @@ const layerWith = (adapters: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Se
     layerDatabase,
     ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
     EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
-    ProjectionMaintenance.layer.pipe(
+    ProjectionReplay.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
           layerDatabase,
@@ -710,7 +710,7 @@ it.effect("records a verdict without closing the item, and clears it on reopen",
 it.effect("rebuilding the projection from events yields the same ledger", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const maintenance = yield* ProjectionReplay.ProjectionReplay;
     const threadId = yield* createThread("replay");
     const otherThreadId = yield* createThread("replay-other");
     const withoutLedger = yield* projections.getThreadProjection(threadId);
@@ -832,7 +832,7 @@ it.effect("leaves the thread's updatedAt alone for every ledger event", () =>
 it.effect("keeps a cheap open item count in step with the ledger, through a rebuild", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const maintenance = yield* ProjectionReplay.ProjectionReplay;
     const threadId = yield* createThread("open-count");
     const count = () => projections.getOpenLedgerItemCount(threadId);
     assert.equal(yield* count(), 0);
@@ -882,7 +882,7 @@ it.effect("keeps a cheap open item count in step with the ledger, through a rebu
 it.effect("keeps the shell's ledger progress current, leaving dropped items out of the total", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const maintenance = yield* ProjectionReplay.ProjectionReplay;
     const threadId = yield* createThread("shell-progress");
     // The single-thread read and the full snapshot build shells on separate paths.
     const progressViews = () =>

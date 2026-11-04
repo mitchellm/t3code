@@ -1,4 +1,4 @@
-import type * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -97,7 +97,7 @@ export function make<T>(options: {
  */
 export const worktreeFingerprint = Effect.fn("BranchChangeTotals.worktreeFingerprint")(
   function* (input: {
-    readonly crypto: Crypto.Crypto;
+    readonly crypto: Digest.Digest["Service"];
     readonly fileSystem: FileSystem.FileSystem;
     readonly path: Path.Path;
     readonly root: string;
@@ -181,9 +181,11 @@ export const worktreeFingerprint = Effect.fn("BranchChangeTotals.worktreeFingerp
       if (files === null || files.length > budget) return undefined;
       for (const file of files) yield* sign(file);
     }
-    return yield* input.crypto.digest("SHA-256", new TextEncoder().encode(parts.join("\0"))).pipe(
-      Effect.map(Hex.encode),
-      Effect.orElseSucceed(() => undefined),
-    );
+    return yield* input.crypto
+      .digest(Digest.sha256, new TextEncoder().encode(parts.join("\0")))
+      .pipe(
+        Effect.map(Hex.encode),
+        Effect.orElseSucceed(() => undefined),
+      );
   },
 );

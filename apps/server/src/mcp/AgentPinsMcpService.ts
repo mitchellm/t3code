@@ -8,7 +8,8 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -40,7 +41,8 @@ const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 const make = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
+  const digests = yield* Digest.Digest;
   const threads = yield* ThreadManagementService.ThreadManagementService;
 
   const loadOwnPins = Effect.fn("AgentPinsMcpService.loadOwnPins")(function* (
@@ -78,7 +80,7 @@ const make = Effect.gen(function* () {
     // Random, so removing a pin and adding the same note again is a new command, not a replayed
     // receipt. A lost reply is made safe by the content-derived pin id instead.
     const commandId = CommandId.make(
-      `command:mcp:pin-${operation}:${encodeURIComponent(threadId)}:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
+      `command:mcp:pin-${operation}:${encodeURIComponent(threadId)}:${yield* random.uuidV4().pipe(Effect.orDie)}`,
     );
     const { sequence } = yield* threads
       .dispatch(build({ commandId, threadId }))
@@ -98,8 +100,8 @@ const make = Effect.gen(function* () {
   ) {
     // Derived from the text the planner will store, so a retry after a lost reply names the same
     // pin and is a no-op even when the retry differs only in CR versus LF.
-    const digest = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(normalizeCarriageReturns(input.text).trim()))
+    const digest = yield* digests
+      .digest(Digest.sha256, new TextEncoder().encode(normalizeCarriageReturns(input.text).trim()))
       .pipe(Effect.orDie);
     const pinId = `agent-pin-${hex(digest.slice(0, 12))}`;
     return yield* send(scope, "add", ({ commandId, threadId }) => ({
@@ -131,5 +133,5 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   AgentPinsMcpService,
   never,
-  Crypto.Crypto | ThreadManagementService.ThreadManagementService
+  SecureRandom.SecureRandom | Digest.Digest | ThreadManagementService.ThreadManagementService
 > = Layer.effect(AgentPinsMcpService, make);

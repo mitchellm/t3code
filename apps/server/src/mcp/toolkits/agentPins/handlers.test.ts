@@ -100,7 +100,7 @@ const withServer = <A, E>(
   }).pipe(
     Effect.provide(
       McpHttpServer.layerAgentPinsToolkit.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(fake.layer),
       ),

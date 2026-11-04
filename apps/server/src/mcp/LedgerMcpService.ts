@@ -16,7 +16,8 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -114,9 +115,10 @@ const ledgerIdFor = (threadId: ThreadId, requestKey: string) =>
   LedgerId.make(`ledger:${stablePart(threadId)}:${stablePart(requestKey)}`);
 
 const make = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
+  const digests = yield* Digest.Digest;
   const hashKey = (parts: unknown) =>
-    crypto.digest("SHA-256", new TextEncoder().encode(stableJson(parts))).pipe(
+    digests.digest(Digest.sha256, new TextEncoder().encode(stableJson(parts))).pipe(
       Effect.map(
         (digest) =>
           `auto-${Array.from(digest.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
@@ -225,7 +227,7 @@ const make = Effect.gen(function* () {
     // The default key hashes the arguments, so a retried lost response replays its receipt. The
     // hash also matches a stale earlier call (close, reopen, close), so a rejected receipt, or one
     // replayed without the change showing, is sent again once under a fresh key.
-    const fresh = Effect.map(crypto.randomUUIDv4(), (id) => `fresh-${id}`).pipe(Effect.orDie);
+    const fresh = Effect.map(random.uuidV4(), (id) => `fresh-${id}`).pipe(Effect.orDie);
     const hashed = hashKey([operation, fingerprint(ledger)]).pipe(
       Effect.flatMap(send),
       Effect.catchTags({
@@ -465,5 +467,5 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   LedgerMcpService,
   never,
-  Crypto.Crypto | ThreadManagementService.ThreadManagementService
+  SecureRandom.SecureRandom | Digest.Digest | ThreadManagementService.ThreadManagementService
 > = Layer.effect(LedgerMcpService, make);

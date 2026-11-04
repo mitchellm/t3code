@@ -18,7 +18,7 @@ import { loadoutDelegationTarget, resolveLoadout, withSolo } from "@t3tools/shar
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FiberSet from "effect/FiberSet";
@@ -94,9 +94,9 @@ export const make = Effect.gen(function* () {
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
 
-  const newId = crypto.randomUUIDv4().pipe(Effect.orDie);
+  const newId = random.uuidV4().pipe(Effect.orDie);
 
   const readSubject = Effect.fn("BuildModeService.readSubject")(function* (
     threadId: ThreadId,

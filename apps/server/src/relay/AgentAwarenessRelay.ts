@@ -1,3 +1,4 @@
+import type { AgentAwarenessThread } from "../orchestration-v2/ProjectionStore.ts";
 import {
   isListedThreadLineage,
   type EnvironmentId,
@@ -28,7 +29,7 @@ import {
 } from "@t3tools/shared/relayJwt";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -333,6 +334,17 @@ function agentAwarenessPublishIdentity(state: RelayAgentActivityState | null): s
   return JSON.stringify(meaningfulState);
 }
 
+const CLEARED_PUBLISH_IDENTITY = agentAwarenessPublishIdentity(null);
+
+// A published tombstone stays recorded so repeats are skipped, but it is not live state.
+function hasLivePublishedState(
+  publishedStateByThread: ReadonlyMap<ThreadId, string>,
+  threadId: ThreadId,
+): boolean {
+  const identity = publishedStateByThread.get(threadId);
+  return identity !== undefined && identity !== CLEARED_PUBLISH_IDENTITY;
+}
+
 function resolveAgentActivityPublishingStartupState(input: {
   readonly relayConfigured: boolean;
   readonly publishEnabled: boolean;
@@ -442,7 +454,7 @@ const makePublishProof = Effect.fn("makePublishProof")(function* (input: {
 });
 
 function describeThreadShellForAwareness(
-  thread: Option.Option<OrchestrationV2ThreadShell>,
+  thread: Option.Option<AgentAwarenessThread>,
 ): Record<string, unknown> {
   if (Option.isNone(thread)) {
     return { found: false };
@@ -461,7 +473,7 @@ function describeThreadShellForAwareness(
 
 function resolveAgentAwarenessRelayPublishSnapshot(input: {
   readonly environmentId: EnvironmentId;
-  readonly thread: Option.Option<OrchestrationV2ThreadShell>;
+  readonly thread: Option.Option<AgentAwarenessThread>;
   readonly project: Option.Option<Project>;
 }): {
   readonly projectId: string | null;
@@ -495,7 +507,7 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
   };
 }
 
-function terminalWorkSinceStart(thread: OrchestrationV2ThreadShell, startedAt: number): boolean {
+function terminalWorkSinceStart(thread: AgentAwarenessThread, startedAt: number): boolean {
   return (
     thread.latestRunCompletedAt != null &&
     DateTime.toEpochMillis(thread.latestRunCompletedAt) > startedAt
@@ -506,7 +518,7 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
   readonly environmentId: EnvironmentId;
   readonly startedAt: number;
   readonly projects: ReadonlyArray<Pick<Project, "id" | "title">>;
-  readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
+  readonly threads: ReadonlyArray<AgentAwarenessThread>;
 }): ReadonlyArray<ThreadId> {
   const projectById = new Map(input.projects.map((project) => [project.id, project]));
   return input.threads
@@ -536,7 +548,7 @@ export const make = Effect.gen(function* () {
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const projects = yield* ProjectService.ProjectService;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const scope = yield* Effect.scope;
   const cloudLinkKeyPair = yield* getOrCreateEnvironmentKeyPairFromSecretStore(secrets);
   const startedAt = (yield* DateTime.now).epochMilliseconds;
@@ -692,7 +704,7 @@ export const make = Effect.gen(function* () {
         environmentId,
         threadId,
         state: input.state,
-        jti: yield* crypto.randomUUIDv4(),
+        jti: yield* random.uuidV4(),
       });
 
       yield* Effect.logInfo("publishing agent activity for thread", {
@@ -729,7 +741,7 @@ export const make = Effect.gen(function* () {
     // Lineage is fixed at creation, so a thread seen as unlisted once costs no shell read afterwards.
     if (
       unlistedThreads.has(threadId) &&
-      !(yield* Ref.get(publishedStateByThreadRef)).has(threadId)
+      !hasLivePublishedState(yield* Ref.get(publishedStateByThreadRef), threadId)
     ) {
       return;
     }
@@ -738,13 +750,13 @@ export const make = Effect.gen(function* () {
     const threadShell = yield* threads.getThreadShell(threadId);
     if (threadShell !== null && !isListedThreadLineage(threadShell.lineage)) {
       rememberUnlistedThread(threadId);
-      if (!(yield* Ref.get(publishedStateByThreadRef)).has(threadId)) {
+      if (!hasLivePublishedState(yield* Ref.get(publishedStateByThreadRef), threadId)) {
         return;
       }
     }
     const thread =
       threadShell === null || threadShell.archivedAt !== null
-        ? Option.none<OrchestrationV2ThreadShell>()
+        ? Option.none<AgentAwarenessThread>()
         : Option.some(threadShell);
     const project = Option.isSome(thread)
       ? yield* projects.getById(thread.value.projectId)
@@ -758,7 +770,7 @@ export const make = Effect.gen(function* () {
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
     if (
       (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
-      !publishedStateByThread.has(threadId)
+      !hasLivePublishedState(publishedStateByThread, threadId)
     ) {
       if (Option.isNone(thread) || !terminalWorkSinceStart(thread.value, startedAt)) return;
     }
@@ -769,7 +781,11 @@ export const make = Effect.gen(function* () {
         observedProviderTasks.delete(threadId);
       }
     };
-    if (publishedStateByThread.get(threadId) === publishIdentity) {
+    if (
+      publishedStateByThread.get(threadId) === publishIdentity &&
+      // A held completion settled after an earlier clear still has to alert.
+      !(snapshot.state === null && heldCompletions.has(threadId))
+    ) {
       rememberPublishedInputs();
       // Clear moot deadlines so later transient nulls cannot skip their deferral window.
       publishConfirmDeadlines.delete(threadId);
@@ -785,10 +801,7 @@ export const make = Effect.gen(function* () {
     // Confirm tombstones over live state to avoid removing active cards.
     // Confirm completion: a run can end moments before its continuation starts, and the relay
     // alerts on every move into completed.
-    const requiresConfirmation =
-      (snapshot.state === null &&
-        publishedStateByThread.get(threadId) !== agentAwarenessPublishIdentity(null)) ||
-      snapshot.state?.phase === "completed";
+    const requiresConfirmation = snapshot.state === null || snapshot.state?.phase === "completed";
     if (requiresConfirmation) {
       if (snapshot.state?.phase === "completed") heldCompletions.add(threadId);
       const nowMs = (yield* DateTime.now).epochMilliseconds;
@@ -869,15 +882,9 @@ export const make = Effect.gen(function* () {
     rememberPublishedInputs();
     publishConfirmDeadlines.delete(threadId);
     heldCompletions.delete(threadId);
-    yield* Ref.update(publishedStateByThreadRef, (publishedStates) => {
-      const nextPublishedStates = new Map(publishedStates);
-      if (snapshot.state === null) {
-        nextPublishedStates.delete(threadId);
-      } else {
-        nextPublishedStates.set(threadId, publishIdentity);
-      }
-      return nextPublishedStates;
-    });
+    yield* Ref.update(publishedStateByThreadRef, (publishedStates) =>
+      new Map(publishedStates).set(threadId, publishIdentity),
+    );
   });
 
   const processThreadPublish = Effect.fnUntraced(function* (threadId: ThreadId) {
@@ -958,19 +965,12 @@ export const make = Effect.gen(function* () {
     }
     const environmentId = yield* serverEnvironment.getEnvironmentId;
     const projectSnapshot = yield* projects.snapshot;
-    // Subagents and side chats never publish awareness, and subagents are most threads.
-    const topLevelThreadIds = (yield* threads.listActiveShellIndex()).flatMap((thread) =>
-      isListedThreadLineage(thread.lineage) ? [thread.id] : [],
-    );
-    const shellSnapshot = yield* threads.getShellSnapshot({
-      location: "active",
-      threadIds: topLevelThreadIds,
-    });
+    const activitySnapshot = yield* threads.getAgentAwarenessSnapshot();
     const activeThreadIds = resolveAgentAwarenessRelayActiveThreadIds({
       environmentId,
       startedAt,
       projects: projectSnapshot.projects,
-      threads: shellSnapshot.threads,
+      threads: activitySnapshot.threads,
     });
     if (activeThreadIds.length === 0) {
       yield* Effect.logDebug("agent activity snapshot has no publishable threads");

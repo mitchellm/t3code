@@ -295,7 +295,7 @@ it.effect("schedule_task updating a task is refused after the end, before the se
     Effect.map((result) => expect(toolRefusal(result)).toContain("has ended (solved")),
     Effect.provide(
       McpHttpServer.toolkitRegistration(OrchestratorToolkit, OrchestratorHandlers.layer).pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(
           Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
             updateScheduledTask: () => Effect.die("an ended investigation must not reschedule"),
@@ -316,7 +316,7 @@ it.effect("t3_worktree_handoff is refused after the end, before the service runs
     Effect.map((result) => expect(toolRefusal(result)).toContain("has ended (solved")),
     Effect.provide(
       McpHttpServer.toolkitRegistration(WorktreeToolkit, WorktreeHandlers.layer).pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(
           Layer.mock(WorktreeMcpService.WorktreeMcpService)({
             handoff: () => Effect.die("an ended investigation must not hand off"),

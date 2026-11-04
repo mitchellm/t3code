@@ -15,7 +15,8 @@ import {
 import { loadoutDelegationTarget, resolveLoadout, withSolo } from "@t3tools/shared/loadouts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -95,7 +96,8 @@ export const make = Effect.gen(function* () {
   const store = yield* TaskRetros.TaskRetroRepository;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
+  const digests = yield* Digest.Digest;
 
   const storeFailed = (cause: unknown) => new TaskRetroError({ reason: "store_failed", cause });
   const readFailed = (cause: unknown) => new TaskRetroError({ reason: "read_failed", cause });
@@ -123,8 +125,8 @@ export const make = Effect.gen(function* () {
     readonly title: string;
     readonly keySource: string;
   }) {
-    const digest = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(input.keySource))
+    const digest = yield* digests
+      .digest(Digest.sha256, new TextEncoder().encode(input.keySource))
       .pipe(Effect.orDie);
     const digestHex = hex(digest);
     const failed = (cause: unknown) => new TaskRetroError({ reason: "run_failed", cause });
@@ -388,9 +390,7 @@ export const make = Effect.gen(function* () {
         loadoutId: string,
         reason: string,
       ) {
-        const commandId = CommandId.make(
-          `retro:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
-        );
+        const commandId = CommandId.make(`retro:${yield* random.uuidV4().pipe(Effect.orDie)}`);
         yield* threads
           .dispatch({
             type: "thread.metadata.update",
