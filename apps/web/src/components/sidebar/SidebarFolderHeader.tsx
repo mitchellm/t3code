@@ -1,5 +1,5 @@
 import type { SidebarThreadIndent } from "@t3tools/contracts";
-import { ChevronDownIcon, FolderIcon, FolderOpenIcon } from "lucide-react";
+import { ChevronDownIcon, FolderIcon, FolderOpenIcon, SquarePenIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
@@ -33,6 +33,8 @@ export function SidebarFolderHeader(props: {
   /** A thread being dragged would be filed here if released now. */
   dropActive: boolean;
   onToggle: () => void;
+  /** Starts a thread filed in this folder; absent when the group has no project to start it in. */
+  onNewThread?: (() => void) | undefined;
 }) {
   const Icon = props.collapsed ? FolderIcon : FolderOpenIcon;
   const buttonProps = {
@@ -80,6 +82,23 @@ export function SidebarFolderHeader(props: {
           <TooltipPopup side="top">{props.path}</TooltipPopup>
         </Tooltip>
       )}
+      {props.onNewThread ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                aria-label={`New thread in ${props.path}`}
+                onClick={props.onNewThread}
+                className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+              />
+            }
+          >
+            <SquarePenIcon className="size-3.5" />
+          </TooltipTrigger>
+          <TooltipPopup side="top">New thread in {props.path}</TooltipPopup>
+        </Tooltip>
+      ) : null}
     </li>
   );
 }

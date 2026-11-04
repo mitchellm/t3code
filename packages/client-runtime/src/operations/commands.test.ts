@@ -261,6 +261,77 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
+  it.effect("files a draft's thread in its folder before the first message launches", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const commands: OrchestrationV2Command[] = [];
+      const launches: OrchestrationV2ThreadLaunchInput[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], launches, calls });
+      const loadout = { id: "blitz", reason: null, setBy: "user" } as const;
+      const launch = (
+        commandId: string,
+        extra: { readonly loadout?: typeof loadout; readonly folder?: string },
+      ) =>
+        startThreadTurn({
+          commandId: CommandId.make(commandId),
+          threadId: v2ThreadId,
+          message: {
+            messageId: MessageId.make(`message-${commandId}`),
+            role: "user",
+            text: "Prototype it",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          titleSeed: "Prototype it",
+          bootstrap: {
+            createThread: {
+              projectId: ProjectId.make("project-1"),
+              title: "Thread",
+              modelSelection: v2Projection.thread.modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: "main",
+              worktreePath: null,
+              createdAt: "2026-06-20T00:00:00.000Z",
+              ...extra,
+            },
+          },
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      yield* launch("folder-only", { folder: "Update 82/Prototypes" });
+      yield* launch("folder-and-loadout", { folder: "Update 82", loadout });
+      yield* launch("neither", {});
+
+      expect(calls).toEqual([
+        "thread.create",
+        "thread.metadata.update",
+        "launchThread",
+        "thread.create",
+        "thread.metadata.update",
+        "launchThread",
+        // No folder or loadout: the launch creates the thread itself.
+        "launchThread",
+      ]);
+      expect(commands.filter((command) => command.type === "thread.metadata.update")).toEqual([
+        {
+          type: "thread.metadata.update",
+          commandId: "folder-only:draft-folder",
+          threadId: v2ThreadId,
+          folder: "Update 82/Prototypes",
+        },
+        {
+          type: "thread.metadata.update",
+          commandId: "folder-and-loadout:draft-loadout",
+          threadId: v2ThreadId,
+          loadout,
+          folder: "Update 82",
+        },
+      ]);
+      expect(launches.map((entry) => entry.reuseExistingThread)).toEqual([true, true, undefined]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
   it.effect("puts a draft's loadout on its new thread before the first message launches", () =>
     Effect.gen(function* () {
       const calls: string[] = [];

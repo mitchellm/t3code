@@ -13,6 +13,7 @@ import {
   type DraftThreadState,
   useComposerDraftStore,
 } from "../composerDraftStore";
+import { setDraftFolder } from "../draftFolderStore";
 import { newDraftId, newThreadId } from "../lib/utils";
 import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import {
@@ -75,18 +76,23 @@ export function createNewThreadHandler(router: AnyRouter) {
     return resolveThreadRouteTarget(currentRouteParams);
   };
 
-  return (
+  type NewThreadOptions = {
+    branch?: string | null;
+    worktreePath?: string | null;
+    envMode?: DraftThreadEnvMode;
+    startFromOrigin?: boolean;
+    replace?: boolean;
+    /** Composer text for the draft, set before it shows. A draft with user text keeps it. */
+    prompt?: string;
+    /** Fork: the folder the thread is filed under when its first send creates it. */
+    folder?: string;
+  };
+  type NewThreadResult = { draftId: DraftId; threadId: ThreadId } | null;
+
+  const openDraft = (
     projectRef: ScopedProjectRef,
-    options?: {
-      branch?: string | null;
-      worktreePath?: string | null;
-      envMode?: DraftThreadEnvMode;
-      startFromOrigin?: boolean;
-      replace?: boolean;
-      /** Composer text for the draft, set before it shows. A draft with user text keeps it. */
-      prompt?: string;
-    },
-  ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
+    options?: NewThreadOptions,
+  ): Promise<NewThreadResult> => {
     const projects = readProjects();
     const projectGroupingSettings = selectProjectGroupingSettings(getClientSettings());
     // Read at call time; status pushes replace the config map and would recreate every sidebar handler.
@@ -420,6 +426,13 @@ export function createNewThreadHandler(router: AnyRouter) {
       });
       return { draftId, threadId };
     })();
+  };
+
+  return async (projectRef: ScopedProjectRef, options?: NewThreadOptions) => {
+    const opened = await openDraft(projectRef, options);
+    // Any other way of starting a thread is unfiled, even when it reuses a folder's empty draft.
+    if (opened !== null) setDraftFolder(opened.draftId, options?.folder ?? null);
+    return opened;
   };
 }
 

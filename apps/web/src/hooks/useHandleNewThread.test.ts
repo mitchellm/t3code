@@ -195,6 +195,8 @@ vi.mock("../composerDraftStore", () => {
     useComposerDraftStore,
   };
 });
+const setDraftFolder = vi.hoisted(() => vi.fn());
+vi.mock("../draftFolderStore", () => ({ setDraftFolder }));
 vi.mock("../lib/chatThreadActions", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/chatThreadActions")>()),
   hasExplicitComposerModelSelection: () => false,
@@ -297,6 +299,22 @@ describe.each([
     );
   });
 
+  it("files the draft under the folder it was opened for, and a plain open leaves it unfiled", async () => {
+    testState.reset(draft);
+    setDraftFolder.mockClear();
+    const project = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
+
+    const filed = useNewThreadHandler()(project, { folder: "Update 82/Prototypes" });
+    testState.completeProjectFileRead(null);
+    const opened = await filed;
+    expect(setDraftFolder).toHaveBeenLastCalledWith(opened?.draftId, "Update 82/Prototypes");
+
+    const unfiled = useNewThreadHandler()(project);
+    testState.completeProjectFileRead(null);
+    const reopened = await unfiled;
+    expect(setDraftFolder).toHaveBeenLastCalledWith(reopened?.draftId, null);
+  });
+
   it("abandons a delayed draft open when the project is removed meanwhile", async () => {
     testState.reset(draft);
     const pendingOpen = useNewThreadHandler()(
@@ -334,6 +352,32 @@ describe("useNewThreadHandler", () => {
 
     expect(opened?.draftId).toBe("draft-raced");
     expect(testState.draftStore.setPrompt).not.toHaveBeenCalled();
+  });
+
+  it("files the empty draft that is already open under the folder", async () => {
+    testState.reset(null);
+    testState.openEmptyDraft("draft-open");
+    setDraftFolder.mockClear();
+
+    const opened = await useNewThreadHandler()(
+      { environmentId: "environment-ssh", projectId: "project-remote" } as never,
+      { folder: "Update 82" },
+    );
+
+    expect(setDraftFolder).toHaveBeenCalledExactlyOnceWith(opened?.draftId, "Update 82");
+  });
+
+  it("does not file a draft the open was abandoned for", async () => {
+    testState.reset(null);
+    setDraftFolder.mockClear();
+    const pendingOpen = useNewThreadHandler()(
+      { environmentId: "environment-ssh", projectId: "project-remote" } as never,
+      { folder: "Update 82" },
+    );
+    testState.removeProject();
+    testState.completeProjectFileRead(null);
+    await expect(pendingOpen).resolves.toBeNull();
+    expect(setDraftFolder).not.toHaveBeenCalled();
   });
 
   it("seeds the prompt into the empty draft that is already open", async () => {
