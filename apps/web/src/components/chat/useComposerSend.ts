@@ -136,6 +136,7 @@ import type {
 import type { UnifiedSettings } from "@t3tools/contracts";
 import type { Dispatch } from "react";
 import type { ComposerThreadTarget } from "../../composerDraftStore";
+import { draftFolderBootstrap } from "../../draftFolderStore";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { SessionPhase } from "../../types";
 import type { DraftSessionState } from "../../composerDraftStore";
@@ -1376,6 +1377,8 @@ export function useComposerSend(input: ComposerSendInput) {
                       ...(draftLoadout.threadLoadout === null
                         ? {}
                         : { loadout: draftLoadout.threadLoadout }),
+                      // Fork: the folder the draft was opened for from a folder's button.
+                      ...draftFolderBootstrap(draftId),
                     },
                   }
                 : {}),

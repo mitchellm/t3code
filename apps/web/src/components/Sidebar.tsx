@@ -4028,6 +4028,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                         folderDrag.target.folder === row.path
                                       }
                                       onToggle={() => toggleFolderCollapsed(row.key)}
+                                      onNewThread={
+                                        project === undefined
+                                          ? undefined
+                                          : () => {
+                                              if (isMobile) setOpenMobile(false);
+                                              void newThreadContext.handleNewThread(
+                                                scopeProjectRef(project.environmentId, project.id),
+                                                { folder: row.path },
+                                              );
+                                            }
+                                      }
                                     />,
                                   );
                                   continue;

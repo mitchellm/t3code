@@ -40,6 +40,7 @@ import {
   startFanoutThread,
 } from "./chatViewSend";
 import type { useLocalDispatchState } from "./useLocalDispatchState";
+import { draftFolderBootstrap } from "../../draftFolderStore";
 import { useDraftLaunchLoadout } from "./useComposerLoadout";
 
 interface MultipleModelSendInput {
@@ -191,6 +192,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                       ...(draftLoadout.threadLoadout === null
                         ? {}
                         : { loadout: draftLoadout.threadLoadout }),
+                      ...draftFolderBootstrap(draftId),
                     },
                     prepareWorktree: {
                       projectCwd: project.workspaceRoot,

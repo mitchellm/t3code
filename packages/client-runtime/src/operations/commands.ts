@@ -176,6 +176,8 @@ interface StartThreadBootstrap {
     readonly createdAt: string;
     /** Fork: on the thread before its first message, so the first turn already runs under it. */
     readonly loadout?: import("@t3tools/contracts").ThreadLoadout;
+    /** Fork: the folder the thread is filed under, set with the loadout before the first turn. */
+    readonly folder?: string;
   };
   readonly prepareWorktree?: {
     readonly requireWorktree?: boolean;
@@ -770,22 +772,15 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
                 ? {}
                 : { branch: bootstrap.branch }),
             };
-    if (bootstrap?.loadout !== undefined) {
-      yield* createThreadUnderLoadout(
-        commandId,
-        input,
-        bootstrap,
-        bootstrap.loadout,
-        workspaceStrategy,
-      );
+    const createdFirst = bootstrap?.loadout !== undefined || bootstrap?.folder !== undefined;
+    if (bootstrap !== undefined && createdFirst) {
+      yield* createThreadWithMetadata(commandId, input, bootstrap, workspaceStrategy);
     }
     return yield* request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
       commandId,
       creationSource: input.creationSource ?? "web",
       threadId: input.threadId,
-      ...(bootstrap === undefined || bootstrap.loadout !== undefined
-        ? { reuseExistingThread: true }
-        : {}),
+      ...(bootstrap === undefined || createdFirst ? { reuseExistingThread: true } : {}),
       projectId: thread.projectId,
       title: input.titleSeed ?? thread.title,
       generateTitle: input.titleSeed !== undefined,
@@ -855,16 +850,15 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
 
 /**
  * Fork: launch creates a thread and queues its first message in one request, leaving no point to
- * set a loadout in between. So a draft with a loadout creates its thread here first, and the launch
- * then claims it as an empty existing thread. Branch and path are what the launch would create it
- * with; a new worktree records its own once it exists.
+ * set a loadout or folder in between. So a draft with either creates its thread here first, and the
+ * launch then claims it as an empty existing thread. Branch and path are what the launch would
+ * create it with; a new worktree records its own once it exists.
  */
-const createThreadUnderLoadout = Effect.fn("EnvironmentCommands.createThreadUnderLoadout")(
+const createThreadWithMetadata = Effect.fn("EnvironmentCommands.createThreadWithMetadata")(
   function* (
     commandId: CommandId,
     input: StartThreadTurnInput,
     thread: NonNullable<StartThreadBootstrap["createThread"]>,
-    loadout: import("@t3tools/contracts").ThreadLoadout,
     workspaceStrategy: { readonly branch?: string; readonly worktreePath?: string },
   ) {
     yield* createThread({
@@ -880,9 +874,12 @@ const createThreadUnderLoadout = Effect.fn("EnvironmentCommands.createThreadUnde
       worktreePath: workspaceStrategy.worktreePath ?? null,
     });
     yield* updateThreadMetadata({
-      commandId: CommandId.make(`${commandId}:draft-loadout`),
+      commandId: CommandId.make(
+        `${commandId}:${thread.loadout === undefined ? "draft-folder" : "draft-loadout"}`,
+      ),
       threadId: input.threadId,
-      loadout,
+      ...(thread.loadout === undefined ? {} : { loadout: thread.loadout }),
+      ...(thread.folder === undefined ? {} : { folder: thread.folder }),
     });
   },
 );
