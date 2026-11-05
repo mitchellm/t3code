@@ -5,6 +5,8 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import * as Stream from "effect/Stream";
 
 import * as ProcessRunner from "./processRunner.ts";
 import * as WorkerProcessSpawner from "./workerProcessSpawner.ts";
@@ -30,6 +32,69 @@ const isAlive = (pid: number) => {
     return false;
   }
 };
+
+// The server-wide spawner, forced to route through workers on every platform.
+const PreferWorkerLayer = WorkerProcessSpawner.layerPreferWorker.pipe(
+  Layer.provide(Layer.effect(WorkerProcessSpawner.WorkerProcessSpawner, WorkerProcessSpawner.make)),
+  Layer.provideMerge(NodeServices.layer),
+);
+
+describe("layerPreferWorker", () => {
+  it("routes only commands the worker supports", () => {
+    expect(WorkerProcessSpawner.isWorkerCompatible(ChildProcess.make("git", ["status"]))).toBe(
+      true,
+    );
+    expect(
+      WorkerProcessSpawner.isWorkerCompatible(
+        ChildProcess.make("git", ["status"], { stdin: "ignore", stdout: "ignore" }),
+      ),
+    ).toBe(true);
+    expect(
+      WorkerProcessSpawner.isWorkerCompatible(
+        ChildProcess.make("git", ["status"], { stdout: "inherit" }),
+      ),
+    ).toBe(false);
+  });
+
+  it.live("runs a command with ignored stdio and reports its exit code", () =>
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const code = yield* spawner.exitCode(
+        ChildProcess.make(process.execPath, ["-e", "process.stdout.write('x'); process.exit(4)"], {
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        }),
+      );
+      expect(Number(code)).toBe(4);
+    }).pipe(Effect.provide(PreferWorkerLayer)),
+  );
+
+  it.live("interleaves stdout and stderr in the combined stream", () =>
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const handle = yield* spawner.spawn(
+        ChildProcess.make(process.execPath, [
+          "-e",
+          "process.stdout.write('out'); process.stderr.write('err')",
+        ]),
+      );
+      const all = yield* handle.all.pipe(Stream.decodeText(), Stream.mkString);
+      expect([...all].sort().join("")).toBe([..."outerr"].sort().join(""));
+      expect(Number(yield* handle.exitCode)).toBe(0);
+    }).pipe(Effect.scoped, Effect.provide(PreferWorkerLayer)),
+  );
+
+  it.live("still runs commands the worker cannot, in-process", () =>
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const code = yield* spawner.exitCode(
+        ChildProcess.make(process.execPath, ["-e", "process.exit(5)"], { stdout: "inherit" }),
+      );
+      expect(Number(code)).toBe(5);
+    }).pipe(Effect.provide(PreferWorkerLayer)),
+  );
+});
 
 describe("WorkerProcessSpawner", () => {
   it.live("returns stdout, stderr and a non-zero exit code", () =>

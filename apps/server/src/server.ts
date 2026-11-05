@@ -384,12 +384,16 @@ const layerHttpServer = Layer.unwrap(
   }),
 ).pipe(Layer.provide(ManagedPolicy.layer));
 
-// ProcessRunner spawns from a worker on Windows, where CreateProcess can stall the event loop.
+// Every compatible spawn runs from a worker on Windows, where CreateProcess can stall the event
+// loop; layerPreferWorker replaces NodeServices' ChildProcessSpawner for the whole server.
 const layerPlatformServices = DocumentText.layer.pipe(
   Layer.provideMerge(
     Layer.provideMerge(
-      WorkerProcessSpawner.layer,
-      Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
+      WorkerProcessSpawner.layerPreferWorker,
+      Layer.provideMerge(
+        WorkerProcessSpawner.layer,
+        Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
+      ),
     ),
   ),
 );

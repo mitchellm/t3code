@@ -76,7 +76,31 @@ export type SpawnExecutableResolver = (
   env: NodeJS.ProcessEnv,
 ) => string | undefined;
 
+// Fork: a PATH search is up to (PATH dirs x PATHEXT) synchronous stats on the event loop; on
+// 2026-11-04 that was 585 stats and 6-80 ms per spawn. Answers are reused for 30 seconds.
+const SPAWN_RESOLUTION_TTL_MS = 30_000;
+const SPAWN_RESOLUTION_MAX_ENTRIES = 512;
+const spawnResolutions = new Map<string, { path: string | undefined; expiresAt: number }>();
+
 function resolveSpawnExecutableWithNode(
+  command: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const key = [platform, command, readEnvPath(env) ?? "", env.PATHEXT ?? ""].join("\0");
+  const now = performance.now();
+  const cached = spawnResolutions.get(key);
+  if (cached !== undefined && cached.expiresAt > now) return cached.path;
+  const resolved = searchSpawnExecutable(command, platform, env);
+  if (spawnResolutions.size >= SPAWN_RESOLUTION_MAX_ENTRIES) {
+    const oldest = spawnResolutions.keys().next().value;
+    if (oldest !== undefined) spawnResolutions.delete(oldest);
+  }
+  spawnResolutions.set(key, { path: resolved, expiresAt: now + SPAWN_RESOLUTION_TTL_MS });
+  return resolved;
+}
+
+function searchSpawnExecutable(
   command: string,
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,

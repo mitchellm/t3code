@@ -51,9 +51,9 @@ parentPort.on("message", (message) => {
     child.on("error", (error) => { if (!spawned) post({ type: "spawn-error", id, error: describeError(error) }); });
     child.on("exit", (code, signal) => post({ type: "exit", id, code, signal }));
     child.on("close", () => children.delete(id));
-    child.stdin.on("error", () => {});
-    forward(id, child.stdout, "stdout");
-    forward(id, child.stderr, "stderr");
+    if (child.stdin) child.stdin.on("error", () => {});
+    if (child.stdout) forward(id, child.stdout, "stdout"); else post({ type: "stdout-end", id });
+    if (child.stderr) forward(id, child.stderr, "stderr"); else post({ type: "stderr-end", id });
     return;
   }
   const child = children.get(id);
@@ -63,8 +63,9 @@ parentPort.on("message", (message) => {
     return;
   }
   if (message.type === "stdin") {
-    child.stdin.write(message.chunk);
+    if (child.stdin) child.stdin.write(message.chunk);
   } else if (message.type === "stdin-end") {
+    if (!child.stdin) return post({ type: "stdin-done", id });
     child.stdin.end((error) => post({ type: "stdin-done", id, error: error ? describeError(error) : undefined }));
   } else if (message.type === "kill") {
     const done = () => post({ type: "killed", id });
@@ -158,6 +159,17 @@ const WORKER_COUNT = 4;
 
 const unsupported = (feature: string) =>
   new Error(`WorkerProcessSpawner does not support ${feature}`);
+
+const pipeOrIgnore = (stdio: unknown) =>
+  stdio === undefined || stdio === "pipe" || stdio === "ignore";
+
+/** Commands the worker can run: one process, each stdio piped or ignored, no extra fds. */
+export const isWorkerCompatible = (command: ChildProcess.Command) =>
+  command._tag === "StandardCommand" &&
+  pipeOrIgnore(command.options.stdin) &&
+  pipeOrIgnore(command.options.stdout) &&
+  pipeOrIgnore(command.options.stderr) &&
+  !command.options.additionalFds;
 
 export const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -277,16 +289,13 @@ export const make = Effect.gen(function* () {
   });
 
   const spawn = Effect.fnUntraced(function* (command: ChildProcess.Command) {
-    if (command._tag !== "StandardCommand") {
-      return yield* Effect.die(unsupported("piped commands"));
+    if (command._tag !== "StandardCommand" || !isWorkerCompatible(command)) {
+      return yield* Effect.die(unsupported("piped commands, custom stdio or extra fds"));
     }
     const options = command.options;
-    if (options.stdin !== undefined && options.stdin !== "pipe") {
-      return yield* Effect.die(unsupported("stdin other than a pipe"));
-    }
-    if (options.stdout !== undefined || options.stderr !== undefined || options.additionalFds) {
-      return yield* Effect.die(unsupported("custom stdio"));
-    }
+    const stdio = [options.stdin, options.stdout, options.stderr].map((value) =>
+      value === "ignore" ? "ignore" : "pipe",
+    );
 
     let cwd: string | undefined;
     if (options.cwd !== undefined) {
@@ -321,7 +330,7 @@ export const make = Effect.gen(function* () {
           options: {
             cwd,
             env,
-            stdio: "pipe",
+            stdio,
             detached,
             shell: options.shell,
             windowsHide: options.windowsHide ?? !detached,
@@ -363,23 +372,44 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+    const stdout = Stream.fromQueue(entry.stdout);
+    const stderr = Stream.fromQueue(entry.stderr);
     return ChildProcessSpawner.makeHandle({
       pid: ChildProcessSpawner.ProcessId(pid),
       exitCode,
       isRunning: Effect.map(Deferred.isDone(entry.exited), (done) => !done),
       kill: (killOptions) => terminate(id, entry, killOptions?.killSignal ?? killSignal),
       stdin,
-      stdout: Stream.fromQueue(entry.stdout),
-      stderr: Stream.fromQueue(entry.stderr),
-      all: Stream.die(unsupported("the combined output stream")),
+      stdout,
+      stderr,
+      // As in @effect/platform-node: both streams interleaved, each consumed once.
+      all: Stream.merge(stdout, stderr),
       getInputFd: () => Sink.die(unsupported("additional file descriptors")),
       getOutputFd: () => Stream.die(unsupported("additional file descriptors")),
-      unref: Effect.die(unsupported("unref")),
+      // Children live in unref'd workers and never hold the server open.
+      unref: Effect.succeed(Effect.void),
     });
   });
 
   return ChildProcessSpawner.make(spawn);
 });
+
+/**
+ * Fork: the server-wide ChildProcessSpawner on Windows sends every compatible command to the
+ * workers, so neither CreateProcess nor the native spawner's taskkill blocks the event loop
+ * (they did, for seconds, on 2026-11-04). Anything else still spawns in-process.
+ */
+export const layerPreferWorker = Layer.effect(
+  ChildProcessSpawner.ChildProcessSpawner,
+  Effect.gen(function* () {
+    const native = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const worker = yield* WorkerProcessSpawner;
+    if (worker === undefined) return native;
+    return ChildProcessSpawner.make((command) =>
+      isWorkerCompatible(command) ? worker.spawn(command) : native.spawn(command),
+    );
+  }),
+);
 
 /** Provides WorkerProcessSpawner on Windows, where a blocking spawn freezes the server. */
 export const layer = Layer.effect(
