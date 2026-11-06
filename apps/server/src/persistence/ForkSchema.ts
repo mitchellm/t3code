@@ -54,6 +54,83 @@ export const ensureForkSchema = Effect.fn("ensureForkSchema")(function* () {
   if (!scheduledTaskColumns.has("quiet_run_count")) {
     yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN quiet_run_count INTEGER NOT NULL DEFAULT 0`;
   }
+
+  yield* ensureTurnItemCounts(sql);
+});
+
+/**
+ * Shell reads sum these per-(thread, run) counters instead of counting turn items, which took
+ * minutes on a large database. Triggers keep them in the writer's transaction, so the upsert that
+ * moves an item between runs, raw SQL and any retention delete are all covered. `INSERT OR
+ * REPLACE` would skip the delete trigger (recursive triggers are off); the projection only upserts.
+ */
+const ensureTurnItemCounts = Effect.fn("ensureTurnItemCounts")(function* (
+  sql: SqlClient.SqlClient,
+) {
+  const existing = yield* sql`
+    SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'orchestration_v2_projection_turn_item_counts'
+  `;
+  // The backfill and the triggers land together: a counter table without triggers would drift.
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      yield* sql`
+        CREATE TABLE IF NOT EXISTS orchestration_v2_projection_turn_item_counts (
+          thread_id TEXT NOT NULL,
+          -- '' stands for items without a run: NULL in a key would let one key hold several rows.
+          run_id TEXT NOT NULL,
+          item_count INTEGER NOT NULL,
+          PRIMARY KEY (thread_id, run_id)
+        ) WITHOUT ROWID
+      `;
+      if (existing.length === 0) {
+        yield* sql`
+          INSERT INTO orchestration_v2_projection_turn_item_counts (thread_id, run_id, item_count)
+          SELECT thread_id, COALESCE(run_id, ''), COUNT(*)
+          FROM orchestration_v2_projection_turn_items
+          GROUP BY thread_id, run_id
+        `;
+      }
+      yield* sql`
+        CREATE TRIGGER IF NOT EXISTS orchestration_v2_turn_item_counts_insert
+        AFTER INSERT ON orchestration_v2_projection_turn_items
+        BEGIN
+          INSERT INTO orchestration_v2_projection_turn_item_counts (thread_id, run_id, item_count)
+          VALUES (new.thread_id, COALESCE(new.run_id, ''), 1)
+          ON CONFLICT (thread_id, run_id)
+          DO UPDATE SET item_count = orchestration_v2_projection_turn_item_counts.item_count + 1;
+        END
+      `;
+      // The upsert rewrites thread_id and run_id on every streamed update; only a real move counts.
+      yield* sql`
+        CREATE TRIGGER IF NOT EXISTS orchestration_v2_turn_item_counts_move
+        AFTER UPDATE OF thread_id, run_id ON orchestration_v2_projection_turn_items
+        WHEN old.thread_id IS NOT new.thread_id OR old.run_id IS NOT new.run_id
+        BEGIN
+          UPDATE orchestration_v2_projection_turn_item_counts
+          SET item_count = item_count - 1
+          WHERE thread_id = old.thread_id AND run_id = COALESCE(old.run_id, '');
+          DELETE FROM orchestration_v2_projection_turn_item_counts
+          WHERE thread_id = old.thread_id AND run_id = COALESCE(old.run_id, '') AND item_count <= 0;
+          INSERT INTO orchestration_v2_projection_turn_item_counts (thread_id, run_id, item_count)
+          VALUES (new.thread_id, COALESCE(new.run_id, ''), 1)
+          ON CONFLICT (thread_id, run_id)
+          DO UPDATE SET item_count = orchestration_v2_projection_turn_item_counts.item_count + 1;
+        END
+      `;
+      yield* sql`
+        CREATE TRIGGER IF NOT EXISTS orchestration_v2_turn_item_counts_delete
+        AFTER DELETE ON orchestration_v2_projection_turn_items
+        BEGIN
+          UPDATE orchestration_v2_projection_turn_item_counts
+          SET item_count = item_count - 1
+          WHERE thread_id = old.thread_id AND run_id = COALESCE(old.run_id, '');
+          DELETE FROM orchestration_v2_projection_turn_item_counts
+          WHERE thread_id = old.thread_id AND run_id = COALESCE(old.run_id, '') AND item_count <= 0;
+        END
+      `;
+    }),
+  );
 });
 
 /**
