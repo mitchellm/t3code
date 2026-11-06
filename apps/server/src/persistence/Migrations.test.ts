@@ -190,6 +190,50 @@ describe("runMigrations", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
+  it.effect("backfills the turn item counters once, then leaves them to the triggers", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations();
+      // A database from before the counters: it has items but neither the table nor its triggers.
+      for (const trigger of ["insert", "move", "delete"]) {
+        yield* sql.unsafe(`DROP TRIGGER orchestration_v2_turn_item_counts_${trigger}`);
+      }
+      yield* sql`DROP TABLE orchestration_v2_projection_turn_item_counts`;
+      const addItem = (id: string, threadId: string, runId: string | null) => sql`
+        INSERT INTO orchestration_v2_projection_turn_items
+          (turn_item_id, thread_id, run_id, ordinal, type, status, updated_at, payload_json)
+        VALUES (${id}, ${threadId}, ${runId}, 1, 'assistant_message', 'completed', '2026-11-06T00:00:00.000Z', '{}')
+      `;
+      yield* addItem("a", "thread:1", "run:1");
+      yield* addItem("b", "thread:1", "run:1");
+      yield* addItem("c", "thread:1", null);
+      yield* addItem("d", "thread:2", "run:2");
+      const counters = sql`
+        SELECT thread_id, run_id, item_count
+        FROM orchestration_v2_projection_turn_item_counts ORDER BY thread_id, run_id
+      `;
+      const expected = [
+        { thread_id: "thread:1", run_id: "", item_count: 1 },
+        { thread_id: "thread:1", run_id: "run:1", item_count: 2 },
+        { thread_id: "thread:2", run_id: "run:2", item_count: 1 },
+      ];
+
+      yield* ensureForkSchema();
+      assert.deepStrictEqual(yield* counters, expected);
+
+      // A second start finds the table and must neither fail nor count the items again.
+      yield* ensureForkSchema();
+      assert.deepStrictEqual(yield* counters, expected);
+
+      yield* addItem("e", "thread:2", "run:2");
+      yield* sql`DELETE FROM orchestration_v2_projection_turn_items WHERE turn_item_id = 'c'`;
+      assert.deepStrictEqual(yield* counters, [
+        { thread_id: "thread:1", run_id: "run:1", item_count: 2 },
+        { thread_id: "thread:2", run_id: "run:2", item_count: 2 },
+      ]);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect("upgrades a database that recorded the fork's old migration 78", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

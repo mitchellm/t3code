@@ -94,6 +94,128 @@ const traceSqlStatements = () => {
   return { statements, tracer, queryTransactions };
 };
 
+/** Writes threads, runs and assistant items through the projection, as the event sink does. */
+const makeShellCountFixture = (
+  projectionStore: ProjectionStore.ProjectionStoreV2["Service"],
+  now: DateTime.Utc,
+  prefix: string,
+) => {
+  const projectId = ProjectId.make(`project:${prefix}`);
+  const ordinals = new Map<string, number>();
+  let events = 0;
+  const eventId = () => EventId.make(`event:${prefix}:${(events += 1)}`);
+  const createThread = (name: string) => {
+    const threadId = ThreadId.make(`thread:${prefix}:${name}`);
+    return projectionStore
+      .apply({
+        id: eventId(),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId,
+          title: name,
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      })
+      .pipe(Effect.as(threadId));
+  };
+  const putRun = (
+    threadId: ThreadId,
+    name: string,
+    ordinal: number,
+    status: "completed" | "rolled_back",
+  ) => {
+    const runId = RunId.make(`run:${prefix}:${name}`);
+    const rootNodeId = NodeId.make(`node:${prefix}:${name}`);
+    return projectionStore
+      .apply({
+        id: eventId(),
+        type: "run.created",
+        threadId,
+        runId,
+        nodeId: rootNodeId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: runId,
+          threadId,
+          ordinal,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: null,
+          userMessageId: MessageId.make(`message:${prefix}:${name}:user`),
+          rootNodeId,
+          activeAttemptId: null,
+          status,
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      })
+      .pipe(Effect.as(runId));
+  };
+  // Applying the same name again rewrites that item, as every streamed update does.
+  const putItem = (threadId: ThreadId, name: string, runId: RunId | null, text = name) => {
+    const ordinal = ordinals.get(name) ?? ordinals.size + 1;
+    ordinals.set(name, ordinal);
+    return projectionStore.apply({
+      id: eventId(),
+      type: "turn-item.updated",
+      threadId,
+      ...(runId === null ? {} : { runId }),
+      occurredAt: now,
+      payload: {
+        id: TurnItemId.make(`turn-item:${prefix}:${name}`),
+        threadId,
+        runId,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "assistant_message",
+        messageId: MessageId.make(`message:${prefix}:${name}`),
+        text,
+        streaming: false,
+      },
+    });
+  };
+  return {
+    projectId,
+    createThread,
+    putRun,
+    putItem,
+    itemId: (name: string) => TurnItemId.make(`turn-item:${prefix}:${name}`),
+  };
+};
+
 /** The shell index flags every live shell and matches its shells on the fields subscriber trims read. */
 const assertShellIndexCoversShells = Effect.fnUntraced(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -4545,6 +4667,117 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           assert.equal(shell?.itemCount, itemCount);
         }
       }),
+  );
+
+  it.effect("keeps the stored shell item counts equal to the turn items through every write", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const fixture = makeShellCountFixture(projectionStore, now, "stored-item-counts");
+      const threadId = yield* fixture.createThread("main");
+      const otherThreadId = yield* fixture.createThread("other");
+      const firstRunId = yield* fixture.putRun(threadId, "first", 1, "completed");
+      const secondRunId = yield* fixture.putRun(threadId, "second", 2, "completed");
+      const otherRunId = yield* fixture.putRun(otherThreadId, "other", 1, "completed");
+
+      const assertCounts = Effect.fn("assertCounts")(function* (
+        expected: readonly [main: number, other: number],
+      ) {
+        const stored = yield* sql`
+          SELECT thread_id, run_id, item_count
+          FROM orchestration_v2_projection_turn_item_counts
+          ORDER BY thread_id, run_id
+        `;
+        const actual = yield* sql`
+          SELECT thread_id, COALESCE(run_id, '') AS run_id, COUNT(*) AS item_count
+          FROM orchestration_v2_projection_turn_items
+          GROUP BY thread_id, COALESCE(run_id, '')
+          ORDER BY thread_id, run_id
+        `;
+        assert.deepEqual(stored, actual);
+        const snapshot = yield* projectionStore.getShellSnapshot({ projectId: fixture.projectId });
+        for (const [id, itemCount] of [
+          [threadId, expected[0]],
+          [otherThreadId, expected[1]],
+        ] as const) {
+          const shell = yield* projectionStore.getThreadShell(id);
+          assert.equal(shell?.itemCount, itemCount);
+          assert.deepEqual(
+            snapshot.threads.find((thread) => thread.id === id),
+            shell ?? undefined,
+          );
+        }
+      });
+
+      yield* assertCounts([0, 0]);
+      yield* fixture.putItem(threadId, "runless", null);
+      yield* fixture.putItem(threadId, "a", firstRunId);
+      yield* fixture.putItem(threadId, "b", firstRunId);
+      yield* fixture.putItem(threadId, "c", secondRunId);
+      yield* fixture.putItem(otherThreadId, "d", otherRunId);
+      yield* assertCounts([4, 1]);
+
+      // Streaming rewrites an item many times; none of them adds to the count.
+      for (const text of ["x", "xy", "xyz"]) {
+        yield* fixture.putItem(threadId, "a", firstRunId, text);
+        yield* fixture.putItem(threadId, "c", secondRunId, text);
+      }
+      yield* assertCounts([4, 1]);
+
+      // An item can move between runs, and out of every run.
+      yield* fixture.putItem(threadId, "b", secondRunId);
+      yield* assertCounts([4, 1]);
+      yield* sql`
+        UPDATE orchestration_v2_projection_turn_items SET run_id = NULL
+        WHERE turn_item_id = ${fixture.itemId("c")}
+      `;
+      yield* assertCounts([4, 1]);
+
+      // Rolling a run back hides its items from the shell without touching the stored counts.
+      yield* fixture.putRun(threadId, "second", 2, "rolled_back");
+      yield* assertCounts([3, 1]);
+
+      yield* sql`
+        DELETE FROM orchestration_v2_projection_turn_items
+        WHERE turn_item_id IN (${fixture.itemId("a")}, ${fixture.itemId("d")})
+      `;
+      yield* assertCounts([2, 0]);
+      yield* sql`DELETE FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}`;
+      yield* assertCounts([0, 0]);
+    }),
+  );
+
+  it.effect("reads shell item counts without counting turn items", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const fixture = makeShellCountFixture(projectionStore, now, "shell-count-reads");
+      const threadId = yield* fixture.createThread("main");
+      const forkSourceId = yield* fixture.createThread("source");
+      const runId = yield* fixture.putRun(threadId, "first", 1, "completed");
+      yield* fixture.putItem(threadId, "runless", null);
+      yield* fixture.putItem(threadId, "a", runId);
+      yield* fixture.putItem(forkSourceId, "b", null);
+
+      const { tracer, statements } = traceSqlStatements();
+      const snapshot = yield* projectionStore
+        .getShellSnapshot({ projectId: fixture.projectId })
+        .pipe(Effect.withTracer(tracer));
+      const shell = yield* projectionStore.getThreadShell(threadId).pipe(Effect.withTracer(tracer));
+
+      assert.equal(shell?.itemCount, 2);
+      assert.equal(snapshot.threads.find((thread) => thread.id === threadId)?.itemCount, 2);
+      assert.isAbove(statements.length, 0);
+      assert.deepEqual(
+        statements.filter(
+          (statement) =>
+            /COUNT\(\*\)/i.test(statement) &&
+            statement.includes("orchestration_v2_projection_turn_items"),
+        ),
+        [],
+      );
+    }),
   );
 
   it.effect("does not treat visited or marked-unread state as thread activity", () =>
