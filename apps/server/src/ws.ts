@@ -1963,7 +1963,11 @@ const layerUpstreamWsRpc = (
       const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
         const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
           sql,
-          readThreads: threadManagement.readShellSnapshot({ location: "archive" }),
+          // Archived judges and children stay openable by link; this read runs on demand, not per shell update.
+          readThreads: threadManagement.readShellSnapshot({
+            location: "archive",
+            includeChildren: true,
+          }),
           listProjects: projectStore.listShells(),
           latestSequence: applicationEvents.latestApplicationSequence,
         });
