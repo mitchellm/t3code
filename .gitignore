@@ -46,5 +46,8 @@ node_modules/
 .env*
 !.env.example
 
+# Claude Code's own worktrees (EnterWorktree, Agent isolation): full checkouts, never part of the repo.
+.claude/worktrees/
+
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/

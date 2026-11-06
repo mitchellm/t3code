@@ -378,10 +378,15 @@ function Invoke-Sync {
     $local = GitOut $repo rev-parse "refs/heads/$Branch"
     $remote = (Invoke-Git $repo rev-parse --verify --quiet "refs/remotes/$ForkRemote/$Branch").Out
     $base = $local
+    $diverged = $false
     if ($remote -and $remote -ne $local) {
       if (Test-Ancestor $repo $local $remote) { $base = $remote }
       elseif (-not (Test-Ancestor $repo $remote $local)) {
-        throw "$Branch and $ForkRemote/$Branch have diverged. Merge $ForkRemote/$Branch into $Branch by hand, then sync again."
+        # The shared checkout's main often holds other sessions' stale or reworked commits. What ships is the
+        # remote, so build that and leave the local branch alone instead of failing every publish (3 of 3, 2026-11).
+        $diverged = $true
+        $base = $remote
+        Log "warning: $Branch ($(Short $local)) and $ForkRemote/$Branch ($(Short $remote)) have diverged; building $ForkRemote/$Branch and leaving local $Branch where it is"
       }
     }
     $up = GitOut $repo rev-parse $UpstreamRef
@@ -390,7 +395,7 @@ function Invoke-Sync {
     if (-not $needMerge -and -not $Force -and -not $NoPublish -and $published -and $published.commit -eq $base) {
       Log "Up to date: $($published.version) is $Branch at $(Short $base), upstream $(Short $up) already merged."
       # An earlier fast-forward may have been refused by local edits; try again.
-      if ($local -ne $base) { Log (Move-LocalBranch $repo $Branch $local $base) }
+      if ($local -ne $base -and -not $diverged) { Log (Move-LocalBranch $repo $Branch $local $base) }
       $state.lastRun = @{ at = (Get-Date).ToString('o'); result = 'up-to-date'; message = $published.version }
       return
     }
@@ -471,7 +476,8 @@ function Invoke-Sync {
     ) -join "`n"
     $url = Publish-Release $ver $candidate $files $body
     Log "published $url"
-    Log (Move-LocalBranch $repo $Branch $local $candidate)
+    if ($diverged) { Log "warning: left local $Branch at $(Short $local); it has diverged from $ForkRemote/$Branch, so it was not moved" }
+    else { Log (Move-LocalBranch $repo $Branch $local $candidate) }
     Remove-OldBuilds
     Copy-Item (Join-Path $BuildDir 'fork\fork.ps1') (Join-Path $StateDir 'fork.ps1') -Force
 
