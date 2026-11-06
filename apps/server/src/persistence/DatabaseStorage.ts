@@ -11,15 +11,79 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlError from "effect/sql/SqlError";
 
 import { resolveHostCliCommand } from "../cli/invocation.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
 import { forkParked } from "../serverActivation.ts";
 
-// Bound each reclaim pass to one minute of churn.
 const RECLAIM_PAGES_PER_PASS = 1024;
+const RECLAIM_INTERVAL = Duration.minutes(1);
+// Chat traffic writes every few hundred milliseconds, so a quiet writer means nobody is waiting on it.
+const RECLAIM_WRITER_IDLE = Duration.minutes(2);
 const COMPACTION_INTERVAL = Duration.hours(6);
+
+/**
+ * Whether the writer has changed no rows for `idleFor`. The first sample counts as activity: the
+ * server has just migrated, and a restart is the likeliest time for a burst of reconnecting
+ * clients. Writes between two samples are dated to the later one, which only delays reclaiming.
+ * `total_changes()` counts the connection's own row changes, triggers included, and no reads.
+ */
+export const makeWriterIdleGate = Effect.fn("DatabaseStorage.makeWriterIdleGate")(function* (
+  idleFor: Duration.Duration,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const idleForMs = Duration.toMillis(idleFor);
+  let changes: number | undefined;
+  let lastActiveAt = 0;
+  return Effect.gen(function* () {
+    const rows = yield* sql<{ readonly changes: number }>`SELECT total_changes() AS changes`;
+    const now = yield* Clock.currentTimeMillis;
+    const current = rows[0]?.changes;
+    if (changes === undefined || current !== changes) lastActiveAt = now;
+    changes = current;
+    return now - lastActiveAt >= idleForMs;
+  });
+});
+
+/**
+ * Keeps background maintenance at 10% duty on the writer: after a slice over 25 ms it sleeps nine
+ * times as long. The caller's first slice starts when this is built.
+ */
+const makeDutyCycle = Effect.gen(function* () {
+  let sliceStarted = yield* Clock.monotonicTimeNanos;
+  return Effect.gen(function* () {
+    const elapsed = (yield* Clock.monotonicTimeNanos) - sliceStarted;
+    if (elapsed < 25_000_000n) return;
+    yield* Effect.sleep((Number(elapsed) / 1_000_000) * 9);
+    sliceStarted = yield* Clock.monotonicTimeNanos;
+  });
+});
+
+/**
+ * Frees pages one statement at a time until `maxPages`, an empty freelist, or `proceed` says stop.
+ * The writer runs on the server's main thread and a single freed page took up to 3.7 s on a large
+ * database, so `proceed` is asked before every page: a write that lands mid-pass ends the pass.
+ */
+export const reclaimFreePages = Effect.fn("DatabaseStorage.reclaimFreePages")(function* (
+  sql: SqlClient.SqlClient,
+  maxPages: number,
+  proceed: Effect.Effect<boolean, SqlError.SqlError>,
+) {
+  const paced = yield* makeDutyCycle;
+  let freed = 0;
+  while (freed < maxPages && (yield* proceed)) {
+    const free = yield* sql<{ readonly freelist_count: number }>`PRAGMA freelist_count`;
+    if ((free[0]?.freelist_count ?? 0) === 0) break;
+    // The driver steps once per statement; incremental_vacuum frees one page per step.
+    yield* sql`PRAGMA incremental_vacuum(1)`;
+    freed++;
+    yield* paced;
+    yield* Effect.yieldNow;
+  }
+  return freed;
+});
 
 export class DatabaseStorage extends Context.Service<
   DatabaseStorage,
@@ -82,31 +146,22 @@ const make = Effect.gen(function* () {
     Effect.catch((cause) => Effect.logWarning("Database storage inspection failed", { cause })),
   );
 
-  const reclaim = Effect.gen(function* () {
-    if (!(yield* readLayout).incrementalVacuum) return;
-    // The driver steps once per statement; incremental_vacuum frees one page per step. Yield between pages.
-    for (let page = 0; page < RECLAIM_PAGES_PER_PASS; page++) {
-      const free = yield* sql<{ readonly freelist_count: number }>`PRAGMA freelist_count`;
-      if ((free[0]?.freelist_count ?? 0) === 0) break;
-      yield* sql`PRAGMA incremental_vacuum(1)`;
-      yield* Effect.yieldNow;
-    }
-  }).pipe(
+  const reclaimPass = Effect.fn("DatabaseStorage.reclaimPass")(
+    function* (proceed: Effect.Effect<boolean, SqlError.SqlError>) {
+      if (!(yield* readLayout).incrementalVacuum) return;
+      yield* reclaimFreePages(sql, RECLAIM_PAGES_PER_PASS, proceed);
+    },
     Effect.catch((cause) => Effect.logWarning("Database space reclamation failed", { cause })),
   );
+  // Callers that ask for a reclaim want it now; only the background loop waits for a quiet writer.
+  const reclaim = reclaimPass(Effect.succeed(true));
+  const writerIdle = yield* makeWriterIdleGate(RECLAIM_WRITER_IDLE);
 
   // Even a pass that deletes nothing scans the event store. Persist completion
   // so restarting does not trigger another scan before the six-hour interval.
   const compactedAtPath = path.join(path.dirname(config.dbPath), "compacted-at");
   const compact = Effect.gen(function* () {
-    let sliceStarted = yield* Clock.monotonicTimeNanos;
-    const betweenPages = Effect.gen(function* () {
-      const elapsed = (yield* Clock.monotonicTimeNanos) - sliceStarted;
-      if (elapsed < 25_000_000n) return;
-      // Keep background maintenance at 10% duty, including pages that exceed the budget.
-      yield* Effect.sleep((Number(elapsed) / 1_000_000) * 9);
-      sliceStarted = yield* Clock.monotonicTimeNanos;
-    });
+    const betweenPages = yield* makeDutyCycle;
     const result = yield* maintenance.pruneEventStore(betweenPages);
     const completedAt = yield* Clock.currentTimeMillis;
     yield* fs.writeFileString(compactedAtPath, String(completedAt)).pipe(Effect.ignore);
@@ -142,9 +197,12 @@ const make = Effect.gen(function* () {
   );
   yield* forkParked(
     publishStatus.pipe(
-      Effect.andThen(Effect.sleep("1 minute")),
+      Effect.andThen(Effect.sleep(RECLAIM_INTERVAL)),
       Effect.andThen(
-        reclaim.pipe(Effect.andThen(publishStatus), Effect.repeat(Schedule.spaced("1 minute"))),
+        reclaimPass(writerIdle).pipe(
+          Effect.andThen(publishStatus),
+          Effect.repeat(Schedule.spaced(RECLAIM_INTERVAL)),
+        ),
       ),
     ),
   );

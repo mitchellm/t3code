@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -48,6 +49,74 @@ it.effect("a new database returns freed pages online without losing data", () =>
     assert.equal(yield* freePages, 0);
     assert.deepEqual(yield* sql`SELECT value FROM retained`, [{ value: "keep" }]);
   }).pipe(Effect.provide(storageLayer(testConfig))),
+);
+
+it.effect("calls the writer idle only after a quiet window with no row changes", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE events (value TEXT)`;
+    const idle = yield* DatabaseStorage.makeWriterIdleGate(Duration.minutes(2));
+
+    // A server that just started has not been quiet yet.
+    assert.isFalse(yield* idle);
+    yield* TestClock.adjust(Duration.minutes(1));
+    assert.isFalse(yield* idle);
+    yield* TestClock.adjust(Duration.minutes(1));
+    assert.isTrue(yield* idle);
+
+    // A write restarts the window; reads do not.
+    yield* sql`INSERT INTO events VALUES ('write')`;
+    assert.isFalse(yield* idle);
+    yield* TestClock.adjust(Duration.minutes(1));
+    yield* sql`SELECT * FROM events`;
+    assert.isFalse(yield* idle);
+    yield* TestClock.adjust(Duration.minutes(1));
+    assert.isTrue(yield* idle);
+
+    // A burst keeps it busy however long it lasts.
+    for (let write = 0; write < 3; write++) {
+      yield* sql`INSERT INTO events VALUES ('burst')`;
+      yield* TestClock.adjust(Duration.seconds(90));
+      assert.isFalse(yield* idle);
+    }
+    yield* TestClock.adjust(Duration.minutes(2));
+    assert.isTrue(yield* idle);
+  }).pipe(Effect.provide(Sqlite.layerMemory)),
+);
+
+it.effect("reclaims pages only while the writer is idle and stops when a write lands", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE retained (value TEXT)`;
+    yield* sql`CREATE TABLE discarded (value BLOB)`;
+    yield* sql`INSERT INTO discarded VALUES (zeroblob(1048576))`;
+    yield* sql`DROP TABLE discarded`;
+    const freed = yield* freePages;
+    assert.isAbove(freed, 8);
+    const idle = yield* DatabaseStorage.makeWriterIdleGate(Duration.minutes(2));
+
+    // Straight after the writes above, nothing is reclaimed.
+    assert.equal(yield* DatabaseStorage.reclaimFreePages(sql, 1024, idle), 0);
+    assert.equal(yield* freePages, freed);
+
+    // Quiet for the window: a write after the third page ends the pass.
+    yield* TestClock.adjust(Duration.minutes(2));
+    let asked = 0;
+    const idleUntilWrite = Effect.gen(function* () {
+      asked += 1;
+      if (asked === 4) yield* sql`INSERT INTO retained VALUES ('late')`;
+      return yield* idle;
+    });
+    assert.equal(yield* DatabaseStorage.reclaimFreePages(sql, 1024, idleUntilWrite), 3);
+    assert.isAbove(yield* freePages, 0);
+
+    // The write restarted the window; once it passes the rest is returned.
+    assert.equal(yield* DatabaseStorage.reclaimFreePages(sql, 1024, idle), 0);
+    yield* TestClock.adjust(Duration.minutes(2));
+    assert.isAbove(yield* DatabaseStorage.reclaimFreePages(sql, 1024, idle), 0);
+    assert.equal(yield* freePages, 0);
+    assert.deepEqual(yield* sql`SELECT value FROM retained`, [{ value: "late" }]);
+  }).pipe(Effect.provide(Sqlite.layerMemory)),
 );
 
 const compactionLayer = (
