@@ -344,8 +344,9 @@ export const make = Effect.gen(function* () {
 
   const sweep: BuildModeService["Service"]["sweep"] = Effect.fn("BuildModeService.sweep")(
     function* () {
+      // Audit threads are hidden children, and only the active list is swept.
       const snapshot = yield* threads
-        .getShellSnapshot()
+        .getShellSnapshot({ location: "active", includeChildren: true })
         .pipe(Effect.mapError(failed("Could not read the threads.")));
       const orphans = snapshot.threads.filter(
         (thread) => thread.id.startsWith(AUDIT_THREAD_PREFIX) && !auditsInFlight.has(thread.id),

@@ -2256,6 +2256,26 @@ const make = Effect.gen(function* () {
                 : undefined));
         return yield* judgeRun(result, ran ?? (yield* expectedJudge()));
       }),
+      archiveJudge: (threadId) =>
+        threadManagement
+          .dispatch({
+            type: "thread.archive",
+            commandId: stableCommandId({
+              scope,
+              requestKey: threadId,
+              operation: "ledger-judge-archive",
+            }),
+            threadId,
+          })
+          .pipe(
+            Effect.asVoid,
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not archive a judge thread after its verdict", {
+                threadId,
+                cause,
+              }),
+            ),
+          ),
       userMessages: (threadId) =>
         threadManagement.getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] }).pipe(
           Effect.map(({ messages }) => messages.map(({ text }) => text)),

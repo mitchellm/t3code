@@ -211,7 +211,8 @@ const make = Effect.gen(function* () {
     const dryRun = options?.dryRun === true;
     const now = yield* Clock.currentTimeMillis;
     const settings = yield* settingsService.getSettings.pipe(Effect.orDie);
-    const snapshot = yield* projections.getShellSnapshot();
+    // Delegated children own the worktrees this reaps.
+    const snapshot = yield* projections.getShellSnapshot({ includeChildren: true });
     const projectShells = yield* projectStore.listShells();
     const byPath = Map.groupBy(
       [...snapshot.threads, ...snapshot.archivedThreads].filter(

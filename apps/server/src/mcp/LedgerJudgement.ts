@@ -69,6 +69,11 @@ export interface JudgementPorts {
   readonly checkpoints: () => Effect.Effect<ReadonlyArray<JudgeCheckpoint>, OrchestratorMcpFailure>;
   /** Fork: the judged thread's delegated tasks; read only for an item that links one. */
   readonly taskRecords: () => Effect.Effect<ReadonlyArray<JudgeTaskRecord>, OrchestratorMcpFailure>;
+  /**
+   * Archives a judge thread whose verdict is recorded, so the shell walks stop at it. Best effort:
+   * the verdict stands whether or not the archive does.
+   */
+  readonly archiveJudge: (threadId: ThreadId) => Effect.Effect<void>;
 }
 
 const invalid = (message: string) =>
@@ -486,6 +491,7 @@ export const requestJudgement = Effect.fn("LedgerJudgement.request")(function* (
     verdict,
     taskId: run.taskId,
   });
+  yield* ports.archiveJudge(run.childThreadId);
   return { outcome: verdict.outcome, notes: verdict.notes, judge: run.judge, sequence };
 });
 
@@ -561,6 +567,7 @@ const settleRun = Effect.fn("LedgerJudgement.settleRun")(function* (
     // The close request this answers; a newer or settled request makes the verdict a no-op.
     judgingRequestedAt: item.updatedAt,
   });
+  yield* ports.archiveJudge(run.childThreadId);
 });
 
 /**
