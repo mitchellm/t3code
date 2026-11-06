@@ -16,32 +16,32 @@ const REMOVE_TIMEOUT = "30 minutes";
  * thread pool and stall every file read in the server. Async `rm` only: on Windows,
  * Node 24's `rmSync` follows junctions and deletes their targets.
  */
-const removeTreeInChildProcess = Effect.fn("WorktreeRemoval.removeTreeInChildProcess")(function* (
-  target: string,
-) {
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  return yield* spawner
-    .exitCode(
-      ChildProcess.make(
-        process.execPath,
-        [
-          "-e",
-          "require('node:fs').promises.rm(process.argv[1], { recursive: true, maxRetries: 3 })" +
-            ".catch(() => process.exit(1))",
-          target,
-        ],
-        // The packaged server runs on Electron's binary, which acts as Node with this set.
-        {
-          env: { ELECTRON_RUN_AS_NODE: "1" },
-          extendEnv: true,
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-        },
-      ),
-    )
-    .pipe(Effect.timeout(REMOVE_TIMEOUT));
-});
+export const removeTreeInChildProcess = Effect.fn("WorktreeRemoval.removeTreeInChildProcess")(
+  function* (target: string) {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    return yield* spawner
+      .exitCode(
+        ChildProcess.make(
+          process.execPath,
+          [
+            "-e",
+            "require('node:fs').promises.rm(process.argv[1], { recursive: true, maxRetries: 3 })" +
+              ".catch(() => process.exit(1))",
+            target,
+          ],
+          // The packaged server runs on Electron's binary, which acts as Node with this set.
+          {
+            env: { ELECTRON_RUN_AS_NODE: "1" },
+            extendEnv: true,
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          },
+        ),
+      )
+      .pipe(Effect.timeout(REMOVE_TIMEOUT));
+  },
+);
 
 /**
  * Git for Windows before 2.54 follows NTFS junctions; newer Git leaves them behind.

@@ -10,6 +10,7 @@ import {
   type WorktreeKeepWhen,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -30,6 +31,14 @@ import * as DelegatedWorktreeReaper from "./DelegatedWorktreeReaper.ts";
 const NOW_MS = Date.parse("2026-10-26T12:00:00.000Z");
 const HOUR_MS = 60 * 60 * 1_000;
 const at = (offsetMs: number) => DateTime.makeUnsafe(NOW_MS + offsetMs);
+const dateAt = (offsetMs: number) => DateTime.toDateUtc(at(offsetMs));
+// Git stamps commits and reflog entries from these, so a fixture repo looks three days old.
+const gitDatesAt = (offsetMs: number) => ({
+  GIT_AUTHOR_DATE: DateTime.formatIso(at(offsetMs)),
+  GIT_COMMITTER_DATE: DateTime.formatIso(at(offsetMs)),
+});
+
+class PullRequestLookupError extends Data.TaggedError("PullRequestLookupError")<{}> {}
 const projectId = ProjectId.make("project-1");
 const parentId = ThreadId.make("thread-parent");
 
@@ -88,8 +97,8 @@ const fixture = (names: ReadonlyArray<string>) =>
     const config = yield* ServerConfig.ServerConfig;
     const git = yield* GitVcsDriver.GitVcsDriver;
     const repo = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({ prefix: "reaper-repo-" }));
-    const run = (cwd: string, args: string[]) =>
-      git.execute({ operation: "reaper-test", cwd, args });
+    const run = (cwd: string, args: string[], env: NodeJS.ProcessEnv = gitDatesAt(-72 * HOUR_MS)) =>
+      git.execute({ operation: "reaper-test", cwd, args, env });
     yield* run(repo, ["init", "-b", "main"]);
     yield* run(repo, ["config", "user.email", "reaper@example.test"]);
     yield* run(repo, ["config", "user.name", "Reaper test"]);
@@ -108,7 +117,71 @@ const fixture = (names: ReadonlyArray<string>) =>
     return { fs, repo, run, worktrees, config };
   });
 
+type Run = (
+  cwd: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+) => ReturnType<GitVcsDriver.GitVcsDriver["Service"]["execute"]>;
+
+/** Claude Code's own layout: a linked worktree at <repo>/.claude/worktrees/<name>. */
+const addClaudeWorktree = (repo: string, run: Run, name: string) =>
+  Effect.gen(function* () {
+    const dir = `${repo}/.claude/worktrees/${name}`;
+    yield* run(repo, ["worktree", "add", "-b", name, dir]);
+    yield* run(dir, ["config", "user.email", "reaper@example.test"]);
+    yield* run(dir, ["config", "user.name", "Reaper test"]);
+    return dir;
+  });
+
+/** A bare origin that knows `main`, so "pushed" and the default branch both exist. */
+const addRemote = (repo: string, run: Run) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const remote = yield* fs.makeTempDirectoryScoped({ prefix: "reaper-remote-" });
+    yield* run(remote, ["init", "--bare", "-b", "main"]);
+    yield* run(repo, ["remote", "add", "origin", remote]);
+    yield* run(repo, ["push", "origin", "main"]);
+    yield* run(repo, ["remote", "set-head", "origin", "main"]);
+  });
+
+const commitFile = (dir: string, run: Run, name: string, env?: NodeJS.ProcessEnv) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.writeFileString(`${dir}/${name}`, `${name}\n`);
+    yield* run(dir, ["add", name]);
+    yield* run(dir, ["commit", "-m", name], env);
+  });
+
+const headOf = (dir: string, run: Run) =>
+  run(dir, ["rev-parse", "HEAD"]).pipe(Effect.map((result) => result.stdout.trim()));
+
+/** Files carry the real clock, so push everything under `root` back to the fixture's age. */
+const ageTree = (root: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    if (!(yield* fs.exists(root))) return;
+    const old = dateAt(-72 * HOUR_MS);
+    const entries = yield* fs.readDirectory(root, { recursive: true });
+    for (const target of [root, ...entries.map((entry) => `${root}/${entry}`)])
+      yield* fs.utimes(target, old, old);
+  });
+
+const touch = (target: string, offsetMs: number) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.utimes(target, dateAt(offsetMs), dateAt(offsetMs));
+  });
+
+type PullRequestStub = Pick<
+  GitManager.GitBranchPullRequest,
+  "state" | "headRef" | "baseRef" | "headSha"
+>;
+
 interface ReaperHooks {
+  /** What the pull request lookup answers for a branch; a failure stands for `gh` being unavailable. */
+  pullRequest?: (branch: string) => Effect.Effect<PullRequestStub | null, PullRequestLookupError>;
+  /** More project roots than the repo itself, for checkouts that are projects of their own. */
+  extraProjectRoots?: ReadonlyArray<string>;
   /** Runs right after the reaper reads its snapshot; returns the threads as they are by then. */
   afterSnapshot?: () => ReadonlyArray<OrchestrationV2ThreadShell>;
   /** A provider session whose working directory is this path, reported live. */
@@ -141,7 +214,14 @@ const reaperFor = (
         })),
       } as unknown as Settings.ServerSettingsService["Service"]),
       Effect.provideService(ProjectStore.ProjectStoreV2, {
-        listShells: () => Effect.succeed([{ id: projectId, workspaceRoot: repo }]),
+        listShells: () =>
+          Effect.succeed([
+            { id: projectId, workspaceRoot: repo },
+            ...(hooks.extraProjectRoots ?? []).map((workspaceRoot, index) => ({
+              id: ProjectId.make(`project-extra-${index}`),
+              workspaceRoot,
+            })),
+          ]),
       } as unknown as ProjectStore.ProjectStoreV2["Service"]),
       Effect.provideService(ProjectionStore.ProjectionStoreV2, {
         getShellSnapshot: () =>
@@ -166,6 +246,8 @@ const reaperFor = (
       } as unknown as ProviderSessionManager.ProviderSessionManagerV2["Service"]),
       Effect.provideService(GitManager.GitManager, {
         invalidateStatus: (cwd: string) => Effect.sync(() => void hooks.invalidated.push(cwd)),
+        branchPullRequest: (input: { readonly branch: string }) =>
+          hooks.pullRequest?.(input.branch) ?? Effect.succeed(null),
       } as unknown as GitManager.GitManager["Service"]),
       Effect.provideService(SqlClient.SqlClient, (() =>
         Effect.succeed(
@@ -189,6 +271,9 @@ const reaperFor = (
               ],
         )) as unknown as SqlClient.SqlClient),
     );
+    // Tests that need a recent file or reflog entry set it after this call.
+    yield* ageTree(config.worktreesDir);
+    yield* ageTree(`${repo}/.claude`);
     yield* TestClock.setTime(NOW_MS);
     return Context.get(context, DelegatedWorktreeReaper.DelegatedWorktreeReaper);
   });
@@ -511,36 +596,26 @@ describe("DelegatedWorktreeReaper", () => {
         shell({ id: ThreadId.make("thread-deep"), branch: "deep", worktreePath: deep }),
       ]);
 
-      const entry = outcomeOf(yield* reaper.reap(), deep);
-
-      expect(entry?.outcome).toBe("kept");
-      expect(entry?.reason).toContain("not created by T3");
+      // Neither T3's layout nor Claude Code's, so it is not a candidate at all.
+      expect(outcomeOf(yield* reaper.reap(), deep)).toBeUndefined();
       expect(yield* fs.exists(deep)).toBe(true);
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  it.effect("never touches worktrees T3 did not create for a delegated child", () =>
+  it.effect("keeps a worktree a finished child shares with a thread that is still working", () =>
     Effect.gen(function* () {
-      const { fs, repo, run, worktrees } = yield* fixture(["userthread", "shared"]);
-      // Claude Code's own worktree: a real linked worktree, outside T3's folder, no thread of T3's.
-      const foreign = `${repo}/.claude/worktrees/claude-made`;
-      yield* run(repo, ["worktree", "add", "-b", "claude-made", foreign]);
-      // A delegated thread that points at a path outside T3's folder.
-      const outside = yield* reaperFor(repo, [
+      const { fs, repo, worktrees } = yield* fixture(["shared"]);
+      const reaper = yield* reaperFor(repo, [
         parent,
-        child("userthread", worktrees, { createdBy: "user", creationSource: "web" }),
         child("shared", worktrees),
-        shell({
-          id: ThreadId.make("thread-claude"),
-          branch: "claude-made",
-          worktreePath: foreign,
-        }),
         shell({
           id: ThreadId.make("thread-shares-shared"),
           branch: "shared",
           worktreePath: worktrees.shared!,
           createdBy: "user",
           creationSource: "web",
+          status: "running",
+          activeRunId: "run-1" as never,
           lineage: {
             rootThreadId: ThreadId.make("thread-shares-shared"),
             parentThreadId: null,
@@ -549,15 +624,226 @@ describe("DelegatedWorktreeReaper", () => {
         }),
       ]);
 
-      const report = yield* outside.reap();
+      const entry = outcomeOf(yield* reaper.reap(), worktrees.shared!);
 
-      expect(outcomeOf(report, foreign)?.outcome).toBe("kept");
-      expect(outcomeOf(report, foreign)?.reason).toContain("not created by T3");
-      expect(outcomeOf(report, worktrees.shared!)?.outcome).toBe("kept");
-      // A worktree a user's own thread works in is not a delegated child's to reap.
-      expect(outcomeOf(report, worktrees.userthread!)).toBeUndefined();
-      for (const path of [foreign, worktrees.shared!, worktrees.userthread!])
-        expect(yield* fs.exists(path)).toBe(true);
+      expect(entry?.outcome).toBe("kept");
+      expect(entry?.reason).toContain("still running");
+      expect(yield* fs.exists(worktrees.shared!)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+});
+
+describe("DelegatedWorktreeReaper over every worktree of a project repo", () => {
+  it.effect("removes an unowned clean pushed idle .claude worktree", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run } = yield* fixture([]);
+      yield* addRemote(repo, run);
+      const dir = yield* addClaudeWorktree(repo, run, "pushed-work");
+      yield* commitFile(dir, run, "work.txt");
+      yield* run(dir, ["push", "origin", "pushed-work"]);
+      const reaper = yield* reaperFor(repo, []);
+
+      const entry = outcomeOf(yield* reaper.reap(), dir);
+
+      expect(entry?.outcome).toBe("removed");
+      expect(entry?.threadId).toBeNull();
+      expect(yield* fs.exists(dir)).toBe(false);
+      expect((yield* run(repo, ["worktree", "list", "--porcelain"])).stdout).not.toContain(
+        "pushed-work",
+      );
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("keeps an unowned worktree that is dirty, unpushed, recently used, or open", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run } = yield* fixture([]);
+      const dirty = yield* addClaudeWorktree(repo, run, "dirty");
+      yield* fs.writeFileString(`${dirty}/tracked.txt`, "edited\n");
+      const unpushed = yield* addClaudeWorktree(repo, run, "unpushed");
+      yield* commitFile(unpushed, run, "unpushed.txt");
+      const recentFile = yield* addClaudeWorktree(repo, run, "recent-file");
+      // Moving HEAD touches no file and makes no commit; only the reflog records it.
+      const recentReflog = yield* addClaudeWorktree(repo, run, "recent-reflog");
+      yield* run(recentReflog, ["checkout", "-b", "moved"], gitDatesAt(-HOUR_MS));
+      // Made before main moves on, so its own HEAD is still three days old.
+      const open = yield* addClaudeWorktree(repo, run, "open");
+      const recentCommit = yield* addClaudeWorktree(repo, run, "recent-commit");
+      yield* commitFile(recentCommit, run, "recent.txt", gitDatesAt(-HOUR_MS));
+      yield* run(repo, ["merge", "--ff-only", "recent-commit"]);
+      const reaper = yield* reaperFor(repo, [], { invalidated: [], liveSessionCwd: open });
+      yield* touch(`${recentFile}/tracked.txt`, -HOUR_MS);
+
+      const report = yield* reaper.reap();
+
+      const reasons = {
+        [dirty]: "uncommitted",
+        [unpushed]: "not merged or pushed",
+        [recentFile]: "last 24 hours",
+        [recentReflog]: "last 24 hours",
+        [recentCommit]: "last 24 hours",
+        [open]: "session is still open",
+      };
+      for (const [dir, reason] of Object.entries(reasons)) {
+        const entry = outcomeOf(report, dir);
+        expect({ dir, outcome: entry?.outcome }).toEqual({ dir, outcome: "kept" });
+        expect(entry?.reason).toContain(reason);
+        expect(yield* fs.exists(dir)).toBe(true);
+      }
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("treats a squash-merged branch as merged only when its pull request names HEAD", () =>
+    Effect.gen(function* () {
+      const { repo, run } = yield* fixture([]);
+      yield* addRemote(repo, run);
+      const dirs: Record<string, string> = {};
+      const heads: Record<string, string> = {};
+      for (const name of ["squashed", "stale", "open", "offline"]) {
+        dirs[name] = yield* addClaudeWorktree(repo, run, name);
+        // Squash-merged: the remote has a different commit, so no remote ref contains this one.
+        // Each file name is unique, or the branches would share one commit and look merged.
+        yield* commitFile(dirs[name]!, run, `${name}.txt`);
+        heads[name] = yield* headOf(dirs[name]!, run);
+      }
+      const pullRequest = (branch: string) =>
+        branch === "squashed"
+          ? Effect.succeed({
+              state: "merged",
+              headRef: branch,
+              baseRef: "main",
+              headSha: heads[branch]!,
+            } as const)
+          : branch === "stale"
+            ? Effect.succeed({
+                state: "merged",
+                headRef: branch,
+                baseRef: "main",
+                headSha: "0".repeat(40),
+              } as const)
+            : branch === "open"
+              ? Effect.succeed({
+                  state: "open",
+                  headRef: branch,
+                  baseRef: "main",
+                  headSha: heads[branch]!,
+                } as const)
+              : Effect.fail(new PullRequestLookupError());
+      const reaper = yield* reaperFor(repo, [], { invalidated: [], pullRequest });
+
+      const report = yield* reaper.reap();
+
+      expect(outcomeOf(report, dirs.squashed!)?.outcome).toBe("removed");
+      for (const name of ["stale", "open", "offline"]) {
+        const entry = outcomeOf(report, dirs[name]!);
+        expect(entry?.outcome).toBe("kept");
+        expect(entry?.reason).toContain("not merged or pushed");
+      }
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("removes dead folders with no .git, prunes git, and spares everything else", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run, config } = yield* fixture([]);
+      const claudeRoot = `${repo}/.claude/worktrees`;
+      const dead = `${claudeRoot}/dead`;
+      // T3 names the folder after the project root.
+      const deadManaged = `${config.worktreesDir}/${repo.split(/[\\/]/).at(-1)}/dead-managed`;
+      const fresh = `${claudeRoot}/fresh`;
+      const nestedClone = `${claudeRoot}/nested-clone`;
+      const half = yield* addClaudeWorktree(repo, run, "half");
+      for (const dir of [dead, deadManaged, fresh]) {
+        yield* fs.makeDirectory(`${dir}/sub`, { recursive: true });
+        yield* fs.writeFileString(`${dir}/sub/leftover.txt`, "x\n");
+      }
+      yield* fs.makeDirectory(`${nestedClone}/.git`, { recursive: true });
+      // A delete that stopped partway: files remain, `.git` is gone, git still has the record.
+      yield* fs.remove(`${half}/.git`);
+      yield* fs.makeDirectory(`${repo}/.claude/other`, { recursive: true });
+      const reaper = yield* reaperFor(repo, []);
+      yield* touch(`${fresh}/sub`, -HOUR_MS);
+
+      const report = yield* reaper.reap();
+
+      for (const dir of [dead, deadManaged, half]) {
+        expect(outcomeOf(report, dir)?.outcome).toBe("removed");
+        expect(yield* fs.exists(dir)).toBe(false);
+      }
+      expect(outcomeOf(report, fresh)?.outcome).toBe("kept");
+      expect(outcomeOf(report, fresh)?.reason).toContain("last 24 hours");
+      for (const dir of [fresh, nestedClone, `${repo}/.claude/other`])
+        expect(yield* fs.exists(dir)).toBe(true);
+      expect(outcomeOf(report, nestedClone)?.outcome).not.toBe("removed");
+      expect(yield* fs.exists(`${repo}/.git/worktrees/half`)).toBe(false);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("previews dead folders and worktrees without removing them", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run } = yield* fixture([]);
+      const dead = `${repo}/.claude/worktrees/dead`;
+      yield* fs.makeDirectory(dead, { recursive: true });
+      const stale = yield* addClaudeWorktree(repo, run, "stale");
+      const reaper = yield* reaperFor(repo, []);
+
+      const report = yield* reaper.reap({ dryRun: true });
+
+      expect(outcomeOf(report, dead)?.outcome).toBe("would_remove");
+      expect(outcomeOf(report, stale)?.outcome).toBe("would_remove");
+      expect(yield* fs.exists(dead)).toBe(true);
+      expect(yield* fs.exists(stale)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("never judges the main checkout, or a checkout that is a project of its own", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run } = yield* fixture([]);
+      const own = yield* addClaudeWorktree(repo, run, "own-project");
+      const reaper = yield* reaperFor(repo, [], { invalidated: [], extraProjectRoots: [own] });
+
+      const report = yield* reaper.reap();
+
+      expect(outcomeOf(report, repo)).toBeUndefined();
+      expect(outcomeOf(report, own)?.outcome).toBe("kept");
+      expect(yield* fs.exists(`${repo}/tracked.txt`)).toBe(true);
+      expect(yield* fs.exists(own)).toBe(true);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("reaps an idle thread's managed worktree and keeps the ones it must not", () =>
+    Effect.gen(function* () {
+      const { fs, repo, run, worktrees } = yield* fixture(["idle", "busy", "unrecorded"]);
+      const claudeOwned = yield* addClaudeWorktree(repo, run, "claude-owned");
+      const userThread = (name: string, worktreePath: string, overrides = {}) =>
+        shell({
+          id: ThreadId.make(`thread-${name}`),
+          branch: name,
+          worktreePath,
+          createdBy: "user",
+          creationSource: "web",
+          lineage: {
+            rootThreadId: ThreadId.make(`thread-${name}`),
+            parentThreadId: null,
+            relationshipToParent: null,
+          },
+          ...overrides,
+        });
+      const reaper = yield* reaperFor(repo, [
+        userThread("idle", worktrees.idle!),
+        userThread("busy", worktrees.busy!, { status: "running", activeRunId: "run-1" }),
+        userThread("unrecorded", worktrees.unrecorded!, { branch: null }),
+        userThread("claude-owned", claudeOwned),
+      ]);
+
+      const report = yield* reaper.reap();
+
+      expect(outcomeOf(report, worktrees.idle!)?.outcome).toBe("removed");
+      expect(outcomeOf(report, worktrees.busy!)?.outcome).toBe("kept");
+      expect(outcomeOf(report, worktrees.unrecorded!)?.reason).toContain("no recorded branch");
+      // T3 recreates only worktrees in its own folder, so a thread's .claude one must stay.
+      expect(outcomeOf(report, claudeOwned)?.reason).toContain("cannot recreate");
+      expect(yield* fs.exists(worktrees.idle!)).toBe(false);
+      for (const dir of [worktrees.busy!, worktrees.unrecorded!, claudeOwned])
+        expect(yield* fs.exists(dir)).toBe(true);
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 });
