@@ -583,6 +583,8 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly readThreadPins?: () => Effect.Effect<ReadonlyArray<ThreadRulePin>, unknown>;
   // Fork: absent means the provider gets no harness port.
   readonly harnessReads?: HarnessThreadReads;
+  /** Fork: whether this delegated child is the server's ledger judge; absent means it is not. */
+  readonly readIsServerJudge?: () => Effect.Effect<boolean, unknown>;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -1725,6 +1727,24 @@ export const layer: Layer.Layer<
         // pins until its compact hook runs or the session restarts, because
         // the system prompt is fixed at open.
         const pinnedRules = (yield* readPinnedRules) ?? "";
+        // A judge or delegated child opens a whole extra provider session. A failed judge check
+        // leaves the child an ordinary delegated one, which is still scoped.
+        const mcpScope: ProviderAdapter.ProviderAdapterV2McpScope | undefined =
+          input.appThread.lineage.relationshipToParent !== "subagent"
+            ? undefined
+            : (
+                  input.readIsServerJudge === undefined
+                    ? false
+                    : yield* input.readIsServerJudge().pipe(Effect.orElseSucceed(() => false))
+                )
+              ? { kind: "judge" }
+              : {
+                  kind: "delegated",
+                  userServers: yield* serverSettings.getSettings.pipe(
+                    Effect.map((settings) => settings.childMcpServers),
+                    Effect.orElseSucceed(() => []),
+                  ),
+                };
         const turnInput = {
           appThread: input.appThread,
           threadId: input.run.threadId,
@@ -1748,6 +1768,7 @@ export const layer: Layer.Layer<
           ...(appContext.length === 0 ? {} : { appContext }),
           ...(pinnedRules === "" ? {} : { pinnedRules }),
           readPinnedRules,
+          ...(mcpScope === undefined ? {} : { mcpScope }),
           ...(input.harnessReads === undefined
             ? {}
             : {

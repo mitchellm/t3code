@@ -1165,6 +1165,144 @@ describe("thread rule pins", () => {
   );
 });
 
+describe("MCP scope for judges and delegated children", () => {
+  const startWithLineage = (input: {
+    readonly name: string;
+    readonly relationshipToParent: "subagent" | "fork" | null;
+    readonly readIsServerJudge?: () => Effect.Effect<boolean, unknown>;
+  }) =>
+    Effect.gen(function* () {
+      const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
+      const started = yield* Deferred.make<ProviderAdapter.ProviderAdapterV2TurnInput>();
+      const threadId = ThreadId.make(`thread:${input.name}`);
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const attemptId = RunAttemptId.make(`attempt:${input.name}`);
+      yield* runExecution.startRootRun({
+        commandId: CommandId.make(`command:${input.name}`),
+        appThread: {
+          id: threadId,
+          lineage: {
+            parentThreadId:
+              input.relationshipToParent === null ? null : ThreadId.make("thread:parent"),
+            relationshipToParent: input.relationshipToParent,
+            rootThreadId: threadId,
+          },
+        } as OrchestrationV2AppThread,
+        providerSessionId: ProviderSessionId.make(`session:${input.name}`),
+        session: {
+          events: Stream.never,
+          startTurn: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+            Deferred.succeed(started, turn),
+        } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        run: {
+          id: RunId.make(`run:${input.name}`),
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+        } as OrchestrationV2Run,
+        rootNode: { id: NodeId.make(`node:${input.name}`) } as OrchestrationV2ExecutionNode,
+        checkpointScope: {
+          id: CheckpointScopeId.make(`checkpoint-scope:${input.name}`),
+        } as OrchestrationV2CheckpointScope,
+        providerThread: {
+          id: ProviderThreadId.make(`provider-thread:${input.name}`),
+          driver,
+        } as OrchestrationV2ProviderThread,
+        attempt: { id: attemptId, providerTurnId: null } as OrchestrationV2RunAttempt,
+        attemptId,
+        providerTurnOrdinal: 1,
+        ...(input.readIsServerJudge === undefined
+          ? {}
+          : { readIsServerJudge: input.readIsServerJudge }),
+        message: {
+          messageId: MessageId.make(`message:${input.name}`),
+          text: "go",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        },
+      });
+      return (yield* Deferred.await(started)).mcpScope;
+    }).pipe(
+      Effect.provide(
+        RunExecutionService.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              McpAppModelContext.layerEmpty,
+              PreviewAgentActivity.layer,
+              Layer.mock(CheckpointService.CheckpointServiceV2)({
+                captureBaseline: () => Effect.void,
+              }),
+              layerTurnItemPositionsTest,
+              Layer.mock(EventSink.EventSinkV2)({}),
+              IdAllocator.layer,
+              Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+                ingestNormalized: () => Effect.succeed([]),
+              }),
+              ServerSettings.layerTest({ childMcpServers: ["ask-ps99"] }),
+            ),
+          ),
+        ),
+      ),
+    );
+
+  it.effect("leaves a top-level thread and a fork unscoped", () =>
+    Effect.gen(function* () {
+      assert.isUndefined(
+        yield* startWithLineage({ name: "mcp-scope-top-level", relationshipToParent: null }),
+      );
+      assert.isUndefined(
+        yield* startWithLineage({ name: "mcp-scope-fork", relationshipToParent: "fork" }),
+      );
+    }),
+  );
+
+  it.effect("scopes a delegated child to T3's server and the listed user servers", () =>
+    Effect.gen(function* () {
+      assert.deepEqual(
+        yield* startWithLineage({
+          name: "mcp-scope-delegated",
+          relationshipToParent: "subagent",
+          readIsServerJudge: () => Effect.succeed(false),
+        }),
+        { kind: "delegated", userServers: ["ask-ps99"] },
+      );
+    }),
+  );
+
+  it.effect("scopes the server's judge to T3's server alone", () =>
+    Effect.gen(function* () {
+      assert.deepEqual(
+        yield* startWithLineage({
+          name: "mcp-scope-judge",
+          relationshipToParent: "subagent",
+          readIsServerJudge: () => Effect.succeed(true),
+        }),
+        { kind: "judge" },
+      );
+    }),
+  );
+
+  it.effect("treats a child whose judge check fails as an ordinary delegated child", () =>
+    Effect.gen(function* () {
+      assert.deepEqual(
+        yield* startWithLineage({
+          name: "mcp-scope-unreadable",
+          relationshipToParent: "subagent",
+          readIsServerJudge: () => Effect.fail("database unavailable"),
+        }),
+        { kind: "delegated", userServers: ["ask-ps99"] },
+      );
+    }),
+  );
+});
+
 it.effect("fails the run when its ownership check cannot be read before calling the provider", () =>
   Effect.gen(function* () {
     const guardCalls = yield* Ref.make(0);

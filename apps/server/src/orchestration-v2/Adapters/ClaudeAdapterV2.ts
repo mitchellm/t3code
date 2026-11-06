@@ -182,10 +182,12 @@ import { spawnAndCollect } from "@t3tools/provider-core/server/snapshotProbe";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
 import {
   claudeSignedOutMessage,
+  hasClaudeManagedMcpConfig,
   makeClaudeEnvironment,
   mergeClaudeProcessEnvironment,
   resolveClaudeHomePath,
 } from "../../provider/Drivers/ClaudeHome.ts";
+import { claudeGlobalConfigFile, claudeScopedMcpServers } from "./ClaudeScopedMcp.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
   resolveClaudeCatalogContextWindowTokens,
@@ -1553,6 +1555,11 @@ export function makeClaudeQueryOptions(input: {
   readonly sdkSettings?: string | ClaudeSdkSettings;
   readonly environment?: NodeJS.ProcessEnv;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  /**
+   * Fork: a judge or delegated child starts only T3's `mcpServers` plus these, and none of the
+   * servers in Claude's own config (see ClaudeScopedMcp.ts). Absent leaves Claude's config in force.
+   */
+  readonly scopedMcpServers?: ClaudeQueryOptions["mcpServers"];
   /** The thread's T3 MCP session holds the `device` capability. */
   readonly deviceToolsAvailable?: boolean;
   readonly tools?: ClaudeAgentSdkQueryTools;
@@ -1673,6 +1680,11 @@ export function makeClaudeQueryOptions(input: {
     onHookError: input.onPinnedRulesReadRejected ?? (() => {}),
   });
   const deviceInstructions = input.mcpServers !== undefined && input.deviceToolsAvailable === true;
+  // T3's server wins a name clash. `ledgerTools` and the instructions key off T3's alone.
+  const sessionMcpServers =
+    input.scopedMcpServers === undefined
+      ? input.mcpServers
+      : { ...input.scopedMcpServers, ...input.mcpServers };
   // Both sources fill the one `hooks` option, so the device hook joins the harness hooks.
   const hooks: ClaudeQueryOptions["hooks"] = deviceInstructions
     ? {
@@ -1730,7 +1742,8 @@ export function makeClaudeQueryOptions(input: {
       ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
       : {}),
     ...(input.environment === undefined ? {} : { env: input.environment }),
-    ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
+    ...(sessionMcpServers === undefined ? {} : { mcpServers: sessionMcpServers }),
+    ...(input.scopedMcpServers === undefined ? {} : { strictMcpConfig: true }),
     ...(input.pluginDirs === undefined || input.pluginDirs.length === 0
       ? {}
       : { plugins: input.pluginDirs.map((path) => ({ type: "local" as const, path })) }),
@@ -4745,6 +4758,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   ).pipe(Effect.provideService(Path.Path, path));
   const hostEnvironment = yield* HostProcess.Environment;
   const hostPlatform = yield* HostProcess.Platform;
+  const claudeGlobalConfig = claudeGlobalConfigFile({
+    path,
+    configDir: homePath,
+    homeDirectory: yield* HostProcess.HomeDirectory,
+    configDirIsExplicit:
+      adapterOptions.settings.homePath.trim().length > 0 ||
+      (adapterOptions.environment.CLAUDE_CONFIG_DIR?.trim() ?? "").length > 0,
+  });
+  const hasManagedMcpConfig = hasClaudeManagedMcpConfig().pipe(
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+    Effect.provideService(HostProcess.Platform, hostPlatform),
+  );
   const customHome =
     adapterOptions.settings.homePath.trim().length > 0 ||
     adapterOptions.environment.CLAUDE_CONFIG_DIR !== hostEnvironment.CLAUDE_CONFIG_DIR;
@@ -10687,6 +10712,25 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             turnInput.runtimePolicy.cwd,
             launchArgSettings,
           );
+          // Fork: a judge or delegated child starts only the servers ClaudeScopedMcp.ts names.
+          // managed-mcp.json already excludes other MCP config, and Claude refuses the flag beside it.
+          const scopedMcpServers =
+            turnInput.mcpScope === undefined || (yield* hasManagedMcpConfig)
+              ? undefined
+              : yield* claudeScopedMcpServers({
+                  scope: turnInput.mcpScope,
+                  cwd: turnInput.runtimePolicy.cwd,
+                  globalConfigFile: claudeGlobalConfig,
+                  fileSystem,
+                  path,
+                });
+          const queryEnvironment = claudeQueryEnvironment(
+            adapterOptions.environment,
+            turnInput.appThread,
+            turnInput.appThread.lineage.relationshipToParent === "subagent"
+              ? yield* resolveSubagentPromptCacheTtl(turnInput.runtimePolicy.cwd)
+              : undefined,
+          );
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,
             nativeThreadId,
@@ -10699,13 +10743,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(launchArgSettings === undefined
               ? {}
               : { sdkSettings: claudeSdkLaunchArgSettings(launchArgSettings) }),
-            environment: claudeQueryEnvironment(
-              adapterOptions.environment,
-              turnInput.appThread,
-              turnInput.appThread.lineage.relationshipToParent === "subagent"
-                ? yield* resolveSubagentPromptCacheTtl(turnInput.runtimePolicy.cwd)
-                : undefined,
-            ),
+            // claude.ai connectors are found outside the MCP config, so the strict flag misses them.
+            environment:
+              scopedMcpServers === undefined
+                ? queryEnvironment
+                : { ...queryEnvironment, ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
             ...(mcpOverrides.allowedTools === undefined
               ? {}
@@ -10713,6 +10755,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(mcpOverrides.mcpServers === undefined
               ? {}
               : { mcpServers: mcpOverrides.mcpServers }),
+            ...(scopedMcpServers === undefined ? {} : { scopedMcpServers }),
             deviceToolsAvailable: mcpSession?.capabilities?.has("device") === true,
             permissionMode: queryPolicy.permissionMode,
             ...(queryPolicy.allowDangerouslySkipPermissions === undefined

@@ -14,6 +14,7 @@ import {
   type HarnessThreadReads,
   makeHarnessPort,
   makeHarnessThreadReads,
+  makeServerJudgeRead,
 } from "./HarnessState.ts";
 
 const pullRequest = (
@@ -54,6 +55,31 @@ it.effect("reads a watched pull request as a wait, but not an unwatched or dismi
         pullRequest(3, { source: "stack-dismissed" }),
       ])).pullRequestWatched,
     ).toBe(false);
+  }),
+);
+
+it.effect("recognizes the server's judge only by its parent's task record", () =>
+  Effect.gen(function* () {
+    const judge = ThreadId.make("judge");
+    const worker = ThreadId.make("worker");
+    const parent = ThreadId.make("parent");
+    const store = {
+      getThread: (threadId: ThreadId) =>
+        Effect.succeed({
+          lineage: { parentThreadId: threadId === ThreadId.make("top-level") ? null : parent },
+        }),
+      getThreadRecords: () =>
+        Effect.succeed({
+          subagents: [
+            { childThreadId: judge, serverJudge: true },
+            { childThreadId: worker, role: "judge" },
+          ],
+        }),
+    } as unknown as Parameters<typeof makeServerJudgeRead>[0];
+    expect(yield* makeServerJudgeRead(store, judge)()).toBe(true);
+    // An agent can name the judge role on a worker it delegates; only the server's task counts.
+    expect(yield* makeServerJudgeRead(store, worker)()).toBe(false);
+    expect(yield* makeServerJudgeRead(store, ThreadId.make("top-level"))()).toBe(false);
   }),
 );
 
