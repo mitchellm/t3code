@@ -47,7 +47,7 @@ import {
 } from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs, withInlineContext } from "./ContextHandoffDelivery.ts";
 import { contextStartOrdinal } from "./FreshProviderThread.ts";
-import { makeHarnessThreadReads } from "./HarnessState.ts";
+import { makeHarnessThreadReads, makeServerJudgeRead } from "./HarnessState.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -271,6 +271,7 @@ export const layer: Layer.Layer<
           input.threadId,
           RunExecutionService.USER_STOP_REASON,
         ),
+        readIsServerJudge: makeServerJudgeRead(projectionStore, input.threadId),
         shouldFinalizeRun: () =>
           projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
             Effect.map((current) => {
@@ -1727,6 +1728,7 @@ export const layer: Layer.Layer<
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         readThreadPins: runControls.readThreadPins,
         harnessReads: runControls.harnessReads,
+        readIsServerJudge: runControls.readIsServerJudge,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
         loadRunInterruptReason: runControls.loadRunInterruptReason,

@@ -97,6 +97,17 @@ Claude receives an HTTP MCP server in its query options:
 The adapter logs only whether MCP configuration exists; it does not log the
 server headers or token.
 
+A ledger judge or delegated child is a whole extra Claude session, and Claude
+starts every server in `~/.claude.json`, the project's `.mcp.json`, plugins and
+claude.ai connectors for each one. A top-level thread keeps that. A judge or
+child opens with `strictMcpConfig` (and `ENABLE_CLAUDEAI_MCP_SERVERS=false`, since
+connectors are found outside the MCP config), so it starts only what `mcpServers` names:
+`t3-code`, plus the project's `.mcp.json` servers for a child, plus the
+user-scoped servers named in the `childMcpServers` setting
+(`ClaudeScopedMcp.ts`). The flag is the only switch that leaves MCP alone while
+`settingSources` still loads hooks, permissions and skills. It is skipped when a
+`managed-mcp.json` exists, which Claude refuses to start beside it.
+
 ### Cursor Agent SDK V2
 
 Cursor receives the same authenticated HTTP MCP endpoint through the SDK's

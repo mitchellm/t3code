@@ -174,6 +174,8 @@ function makeClaudeTestAppThread(input: {
   readonly threadId: ThreadId;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly now: DateTime.Utc;
+  /** Makes the thread a delegated child of this parent. */
+  readonly delegatedParent?: ThreadId;
 }): OrchestrationV2AppThread {
   return {
     createdBy: "user",
@@ -188,11 +190,14 @@ function makeClaudeTestAppThread(input: {
     branch: null,
     worktreePath: null,
     activeProviderThreadId: input.providerThread.id,
-    lineage: {
-      parentThreadId: null,
-      relationshipToParent: null,
-      rootThreadId: input.threadId,
-    },
+    lineage:
+      input.delegatedParent === undefined
+        ? { parentThreadId: null, relationshipToParent: null, rootThreadId: input.threadId }
+        : {
+            parentThreadId: input.delegatedParent,
+            relationshipToParent: "subagent",
+            rootThreadId: input.delegatedParent,
+          },
     forkedFrom: null,
     createdAt: input.now,
     updatedAt: input.now,
@@ -217,9 +222,12 @@ function makeClaudeTestTurnInput(input: {
   readonly messageCreationSource?: ProviderAdapter.ProviderAdapterV2TurnInput["message"]["creationSource"];
   readonly modelSelection?: ModelSelection;
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+  readonly delegatedParent?: ThreadId;
+  readonly mcpScope?: ProviderAdapter.ProviderAdapterV2McpScope;
 }): ProviderAdapter.ProviderAdapterV2TurnInput {
   return {
     appThread: makeClaudeTestAppThread(input),
+    ...(input.mcpScope === undefined ? {} : { mcpScope: input.mcpScope }),
     threadId: input.threadId,
     runId: RunId.make(`run-${input.attemptId}`),
     runOrdinal: 1,
@@ -3995,6 +4003,119 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
       ),
   );
+
+  describe("MCP servers for judges and delegated children", () => {
+    const openWithScope = (scope: ProviderAdapter.ProviderAdapterV2McpScope | undefined) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-mcp-home-" });
+        const cwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-mcp-cwd-" });
+        const server = (name: string) => ({ command: "npx", args: ["-y", name] });
+        // User scope sits at the top of .claude.json; local scope is keyed by the project path.
+        yield* fileSystem.writeFileString(
+          path.join(home, ".claude.json"),
+          JSON.stringify({
+            mcpServers: { "ask-ps99": server("ask-ps99"), listed: server("listed") },
+            projects: { [cwd.replaceAll("\\", "/")]: { mcpServers: { notion: server("notion") } } },
+          }),
+        );
+        yield* fileSystem.writeFileString(
+          path.join(cwd, ".mcp.json"),
+          JSON.stringify({ mcpServers: { "project-db": server("project-db") } }),
+        );
+        const harness = yield* makeWakeHarnessWithOptions({
+          environment: { CLAUDE_CONFIG_DIR: home },
+        });
+        yield* (yield* McpProviderSessions.McpProviderSessions).set({
+          environmentId: EnvironmentId.make("environment-claude-mcp-scope"),
+          threadId: harness.threadId,
+          providerSessionId: "mcp-session-claude-scope",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer scoped",
+          browserToolsAvailable: false,
+        });
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-claude-mcp-scope"),
+            text: "Work.",
+            attachments: [],
+            runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd,
+            }),
+            ...(scope === undefined
+              ? {}
+              : { delegatedParent: ThreadId.make("thread-mcp-scope-parent"), mcpScope: scope }),
+          }),
+        );
+        const options = harness.getOpenedOptions()!;
+        return {
+          servers: Object.keys(options.mcpServers ?? {}).sort(),
+          // A stdio server (no type, or "stdio") is a child process; T3's is HTTP.
+          processes: Object.values(options.mcpServers ?? {}).filter(
+            (server) => server.type === undefined || server.type === "stdio",
+          ).length,
+          strict: options.strictMcpConfig,
+          claudeAiConnectors: options.env?.ENABLE_CLAUDEAI_MCP_SERVERS,
+        };
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      );
+
+    it.effect("leaves a top-level thread on its own configuration", () =>
+      Effect.gen(function* () {
+        const opened = yield* openWithScope(undefined);
+        assert.isUndefined(opened.strict);
+        assert.isUndefined(opened.claudeAiConnectors);
+        assert.deepEqual(opened.servers, ["t3-code"]);
+      }),
+    );
+
+    it.effect("starts a judge with T3's server and nothing from Claude's own config", () =>
+      Effect.gen(function* () {
+        const opened = yield* openWithScope({ kind: "judge" });
+        assert.isTrue(opened.strict);
+        assert.equal(opened.claudeAiConnectors, "false");
+        assert.deepEqual(opened.servers, ["t3-code"]);
+        assert.equal(opened.processes, 0);
+      }),
+    );
+
+    it.effect("starts a delegated child with T3's server and the project's .mcp.json", () =>
+      Effect.gen(function* () {
+        const opened = yield* openWithScope({ kind: "delegated", userServers: [] });
+        assert.isTrue(opened.strict);
+        assert.equal(opened.claudeAiConnectors, "false");
+        assert.deepEqual(opened.servers, ["project-db", "t3-code"]);
+        assert.equal(opened.processes, 1);
+      }),
+    );
+
+    it.effect("adds back the user-scoped servers a setting lists, at user or local scope", () =>
+      Effect.gen(function* () {
+        const opened = yield* openWithScope({
+          kind: "delegated",
+          userServers: ["ask-ps99", "notion", "not-configured"],
+        });
+        assert.isTrue(opened.strict);
+        assert.deepEqual(opened.servers, ["ask-ps99", "notion", "project-db", "t3-code"]);
+        assert.equal(opened.processes, 3);
+      }),
+    );
+  });
 
   describe("Claude settings restrictions", () => {
     it.effect("resolves cached managed policy from the configured home through the real SDK", () =>

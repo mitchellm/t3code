@@ -86,6 +86,20 @@ describe("plan before editing setting", () => {
   });
 });
 
+describe("child MCP servers setting", () => {
+  it("lists no user-scoped server for settings written before it existed", () => {
+    expect(decodeServerSettings({}).childMcpServers).toEqual([]);
+    expect(DEFAULT_SERVER_SETTINGS.childMcpServers).toEqual([]);
+  });
+
+  it("patches the list and rejects a blank name", () => {
+    expect(decodeServerSettingsPatch({ childMcpServers: [" ask-ps99 ", "notion"] })).toEqual({
+      childMcpServers: ["ask-ps99", "notion"],
+    });
+    expect(() => decodeServerSettingsPatch({ childMcpServers: ["  "] })).toThrow();
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();

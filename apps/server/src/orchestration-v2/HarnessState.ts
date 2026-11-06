@@ -115,6 +115,37 @@ export function makeHarnessThreadReads(
   };
 }
 
+/**
+ * Whether the thread is the server's ledger judge. Only the parent's task record says so: a
+ * judge is an ordinary delegated child whose task carries `serverJudge`.
+ */
+export const makeServerJudgeRead =
+  (
+    projectionStore: Pick<
+      ProjectionStore.ProjectionStoreV2["Service"],
+      "getThread" | "getThreadRecords"
+    >,
+    threadId: ThreadId,
+  ) =>
+  () =>
+    projectionStore
+      .getThread(threadId)
+      .pipe(
+        Effect.flatMap(({ lineage }) =>
+          lineage.parentThreadId === null
+            ? Effect.succeed(false)
+            : projectionStore
+                .getThreadRecords(lineage.parentThreadId, ["subagents"])
+                .pipe(
+                  Effect.map(({ subagents }) =>
+                    subagents.some(
+                      (task) => task.childThreadId === threadId && task.serverJudge === true,
+                    ),
+                  ),
+                ),
+        ),
+      );
+
 /** A failed read resolves undefined (logged) so a hook falls back to doing nothing. */
 export function makeHarnessPort<E>(
   reads: HarnessThreadReads,

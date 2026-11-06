@@ -500,7 +500,22 @@ export interface ProviderAdapterV2TurnInput {
   readonly readPinnedRules?: Effect.Effect<string | undefined>;
   /** Fork: thread state the harness reads mid-turn (Claude hooks, Codex ledger_state). */
   readonly harness?: ProviderAdapterV2HarnessPort;
+  /**
+   * Fork: set for the ledger judge and for delegated children, which each open a whole extra
+   * provider session. Absent on a top-level thread, which keeps every server its provider
+   * configures. Only the Claude adapter acts on it; see ClaudeScopedMcp.ts.
+   */
+  readonly mcpScope?: ProviderAdapterV2McpScope;
 }
+
+export type ProviderAdapterV2McpScope =
+  /** The server's judge reads files and answers in text, so it needs no server beyond T3's. */
+  | { readonly kind: "judge" }
+  | {
+      readonly kind: "delegated";
+      /** User-scoped servers, by name, that the `childMcpServers` setting opts back in. */
+      readonly userServers: ReadonlyArray<string>;
+    };
 
 /**
  * Fork: thread-scoped reads, so a provider session that outlives the turn that opened it still

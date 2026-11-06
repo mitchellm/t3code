@@ -1390,6 +1390,14 @@ export const ServerSettings = Schema.Struct({
    * unfinished item. Every provider's instructions ask for the plan either way.
    */
   planBeforeEditing: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Claude only: delegated children start T3's server and the project's .mcp.json servers, not the
+   * servers in the user's Claude config, because each child is a full extra session. Names listed
+   * here are started for children too. The ledger judge never starts them.
+   */
+  childMcpServers: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   branchNamingMode: BranchNamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("static" as const)),
   ),
@@ -1752,6 +1760,7 @@ export const ServerSettingsPatch = Schema.Struct({
   pinnedRules: Schema.optionalKey(TrimmedString),
   loadouts: Schema.optionalKey(Schema.Array(Loadout)),
   planBeforeEditing: Schema.optionalKey(Schema.Boolean),
+  childMcpServers: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   branchNamingMode: Schema.optionalKey(BranchNamingMode),
   branchNamePrefix: Schema.optionalKey(TrimmedString),
   branchNameInstructions: Schema.optionalKey(TrimmedString),
