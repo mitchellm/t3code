@@ -698,14 +698,17 @@ export function runOrchestratorV2Scenario(
             yield* releaseReplayGate(step.label);
             break;
           case "capture_shell_snapshot":
-            capturedShellSnapshots.set(step.key, yield* orchestrator.getShellSnapshot());
+            capturedShellSnapshots.set(
+              step.key,
+              yield* orchestrator.getShellSnapshot({ includeChildren: true }),
+            );
             break;
           case "respond_to_next_runtime_request": {
             const request = yield* waitForPendingRuntimeRequest(step.threadId);
             if (step.shellSnapshotKeyWhilePending !== undefined) {
               capturedShellSnapshots.set(
                 step.shellSnapshotKeyWhilePending,
-                yield* orchestrator.getShellSnapshot(),
+                yield* orchestrator.getShellSnapshot({ includeChildren: true }),
               );
             }
             const result = yield* orchestrator.dispatch({
@@ -729,7 +732,7 @@ export function runOrchestratorV2Scenario(
         yield* options.afterSteps;
       }
 
-      const shellSnapshot = yield* orchestrator.getShellSnapshot();
+      const shellSnapshot = yield* orchestrator.getShellSnapshot({ includeChildren: true });
       const projectionThreadIds = new Set(collectProjectionThreadIds(scenario));
       for (const thread of shellSnapshot.threads) {
         projectionThreadIds.add(thread.id);

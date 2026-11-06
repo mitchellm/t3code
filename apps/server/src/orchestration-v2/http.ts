@@ -85,7 +85,8 @@ export const layer = HttpApiBuilder.group(
           readThreads: (threadIds) =>
             threadManagement.readShellSnapshot({
               location: "active",
-              ...(threadIds === undefined ? {} : { threadIds }),
+              // Without the index trims every child is sent: older clients cannot read families.
+              ...(threadIds === undefined ? { includeChildren: true } : { threadIds }),
             }),
           listProjects: projectStore.listShells(),
           latestSequence: applicationEvents.latestApplicationSequence,

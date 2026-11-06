@@ -146,7 +146,7 @@ const setup = Effect.gen(function* () {
 });
 
 const retroThreads = (threads: ThreadManagementService.ThreadManagementService["Service"]) =>
-  threads.getShellSnapshot().pipe(
+  threads.getShellSnapshot({ includeChildren: true }).pipe(
     Effect.map(({ threads: active, archivedThreads }) => ({
       active: active.filter(({ id }) => id.startsWith("thread:retro:")),
       archived: archivedThreads.filter(({ id }) => id.startsWith("thread:retro:")),

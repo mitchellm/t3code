@@ -301,7 +301,10 @@ it.effect("an audit returns at once and its findings join the ledger when the ju
         "Audit: Plan skips the migration",
       ]);
       // The judge's hidden thread is archived once its answer is in.
-      const { archivedThreads } = yield* threads.getShellSnapshot({ location: "archive" });
+      const { archivedThreads } = yield* threads.getShellSnapshot({
+        location: "archive",
+        includeChildren: true,
+      });
       expect(archivedThreads.some(({ id }) => id.startsWith("thread:audit:"))).toBe(true);
     }),
   ),

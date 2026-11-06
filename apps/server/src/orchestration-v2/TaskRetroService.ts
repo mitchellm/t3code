@@ -310,7 +310,10 @@ export const make = Effect.gen(function* () {
   const sweep: TaskRetroService["Service"]["sweep"] = Effect.fn("TaskRetroService.sweep")(
     function* () {
       // A restart mid-retro leaves its thread behind with nothing left to finish it.
-      const snapshot = yield* threads.getShellSnapshot().pipe(Effect.mapError(readFailed));
+      // Retro threads are hidden children, and only the active list is swept.
+      const snapshot = yield* threads
+        .getShellSnapshot({ location: "active", includeChildren: true })
+        .pipe(Effect.mapError(readFailed));
       const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
       // A retro in flight is between its create and its send for a moment and has no run yet.
       const stale = snapshot.threads.filter(

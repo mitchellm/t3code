@@ -219,7 +219,7 @@ const makeShellCountFixture = (
 /** The shell index flags every live shell and matches its shells on the fields subscriber trims read. */
 const assertShellIndexCoversShells = Effect.fnUntraced(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
-  const snapshot = yield* store.getShellSnapshot();
+  const snapshot = yield* store.getShellSnapshot({ includeChildren: true });
   const shells = snapshot.threads;
   const index = yield* store.listActiveShellIndex();
   const { tracer, statements, queryTransactions } = traceSqlStatements();
@@ -2028,6 +2028,33 @@ it.effect("SQL shells read a subagent family and a worktree's threads", () =>
       onWorktree.threads.map((thread) => thread.id),
       [id("root"), id("child"), id("other-child")],
     );
+
+    // An unscoped read leaves out subagent children; naming threads, a family or a worktree
+    // (above) returns them, as does asking for them.
+    const idsOf = (snapshot: OrchestrationV2ThreadShellSnapshot) =>
+      [...snapshot.threads, ...snapshot.archivedThreads].map((thread) => thread.id);
+    assert.sameMembers(idsOf(yield* store.getShellSnapshot()), [id("root"), id("other")]);
+    assert.sameMembers(idsOf(yield* store.getShellSnapshot({ location: "active" })), [
+      id("root"),
+      id("other"),
+    ]);
+    assert.sameMembers(idsOf(yield* store.getShellSnapshot({ location: "archive" })), []);
+    assert.sameMembers(
+      idsOf(yield* store.getShellSnapshot({ location: "archive", familyOf: id("root") })),
+      [id("archived-child")],
+    );
+    assert.sameMembers(
+      idsOf(yield* store.getShellSnapshot({ threadIds: [id("child"), id("grandchild")] })),
+      [id("child"), id("grandchild")],
+    );
+    assert.sameMembers(idsOf(yield* store.getShellSnapshot({ includeChildren: true })), [
+      id("root"),
+      id("child"),
+      id("grandchild"),
+      id("archived-child"),
+      id("other"),
+      id("other-child"),
+    ]);
     // A fork keeps its deleted source's root, so the deleted root still names the live tree.
     yield* store.apply({
       id: EventId.make("event:family:root-deleted"),
@@ -6849,7 +6876,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       yield* applyAssistantItem("imported-two", null, 2);
       yield* applyAssistantItem("native-run", sourceRunId, 3);
 
-      const shell = yield* projectionStore.getShellSnapshot();
+      const shell = yield* projectionStore.getShellSnapshot({ includeChildren: true });
       const targetShell = shell.threads.find((thread) => thread.id === targetThreadId);
       const targetProjection = yield* projectionStore.getThreadProjection(targetThreadId);
 

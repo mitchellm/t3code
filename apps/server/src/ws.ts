@@ -1126,7 +1126,8 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         readThreads: (threadIds) =>
           threadManagement.readShellSnapshot({
             location: "active",
-            ...(threadIds === undefined ? {} : { threadIds }),
+            // Without the index trims every child is sent: older clients cannot read families.
+            ...(threadIds === undefined ? { includeChildren: true } : { threadIds }),
           }),
         listProjects: projects.listShells(),
         latestSequence: applicationEvents.latestApplicationSequence,

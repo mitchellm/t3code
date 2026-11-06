@@ -406,7 +406,7 @@ export interface ThreadManagementServiceShape {
   readonly getShellSnapshot: (
     options?: Pick<
       ShellSnapshotOptions,
-      "location" | "projectId" | "unsettledOnly" | "worktreePath" | "threadIds"
+      "location" | "projectId" | "unsettledOnly" | "worktreePath" | "threadIds" | "includeChildren"
     >,
   ) => Effect.Effect<OrchestrationV2ThreadShellSnapshot, Orchestrator.OrchestratorV2Error>;
   readonly listActiveSubagentThreadIds: Orchestrator.OrchestratorV2["Service"]["listActiveSubagentThreadIds"];
@@ -414,7 +414,10 @@ export interface ThreadManagementServiceShape {
   readonly listActiveShellIndex: Orchestrator.OrchestratorV2["Service"]["listActiveShellIndex"];
   readonly listOlderSettledThreads: Orchestrator.OrchestratorV2["Service"]["listOlderSettledThreads"];
   readonly readShellSnapshot: (
-    options?: Pick<ShellSnapshotOptions, "location" | "familyOf" | "worktreePath" | "threadIds">,
+    options?: Pick<
+      ShellSnapshotOptions,
+      "location" | "familyOf" | "worktreePath" | "threadIds" | "includeChildren"
+    >,
   ) => Effect.Effect<
     Effect.Effect<OrchestrationV2ThreadShellSnapshot, Orchestrator.OrchestratorV2Error>,
     Orchestrator.OrchestratorV2Error
@@ -784,6 +787,7 @@ const make = Effect.gen(function* () {
     orchestrator
       .getShellSnapshot({
         location: "active",
+        includeChildren: input.includeSubagents,
         ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
       })
       .pipe(

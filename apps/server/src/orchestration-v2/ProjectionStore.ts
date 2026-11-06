@@ -428,6 +428,12 @@ export interface ShellSnapshotOptions {
   readonly familyOf?: ThreadId;
   readonly worktreePath?: string;
   readonly threadIds?: ReadonlyArray<ThreadId>;
+  /**
+   * Subagent children (delegated work and ledger judges) and side chats. A read that names its
+   * threads (`threadIds`, `familyOf`, `worktreePath`) returns them; an unscoped read walks every
+   * child's shell queries for rows no list shows, so it leaves them out unless this is true.
+   */
+  readonly includeChildren?: boolean;
 }
 
 /** What a shell subscriber's trims read from an active thread, without building its shell. */
@@ -6286,8 +6292,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         familyOf,
         worktreePath,
         threadIds,
-        listedOnly = false,
-      }: ShellSnapshotOptions & { readonly listedOnly?: boolean } = {},
+        includeChildren = threadId !== undefined ||
+          threadIds !== undefined ||
+          familyOf !== undefined ||
+          worktreePath !== undefined,
+      }: ShellSnapshotOptions = {},
     ) =>
       sql<ShellThreadRow>`
             SELECT
@@ -6470,10 +6479,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               LIMIT 1
             ) AND blocked.status = 'failed'
             WHERE t.deleted_at IS NULL${
-              listedOnly
-                ? sql` AND json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
+              includeChildren
+                ? sql``
+                : sql` AND json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
                     AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1`
-                : sql``
             }${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
               projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`
             }${
@@ -7225,7 +7234,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             Effect.gen(function* () {
               const threadRows = yield* selectShellThreadRows(
                 threadId,
-                threadId === undefined ? { location: "active", listedOnly: true } : {},
+                threadId === undefined ? { location: "active" } : {},
               );
               const ids = threadRows.map((row) => ThreadId.make(row.thread_id));
               const providerThreadRows =

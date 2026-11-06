@@ -103,7 +103,12 @@ const harness = (
     taskId: string;
   }> = [];
   const reads = { taskRecords: 0 };
+  const archived: Array<string> = [];
   const ports: JudgementPorts = {
+    archiveJudge: (threadId) =>
+      Effect.sync(() => {
+        archived.push(threadId);
+      }),
     taskRecords: () =>
       Effect.sync(() => {
         reads.taskRecords += 1;
@@ -123,7 +128,7 @@ const harness = (
       }),
     checkpoints: () => Effect.succeed(options.checkpoints ?? []),
   };
-  return { ports, delegated, recorded, reads };
+  return { ports, delegated, recorded, reads, archived };
 };
 
 const linkedTask = (name: string, role?: string) => ({
@@ -169,6 +174,26 @@ it.effect("records the judge's pass verdict, server side, against the evidence i
     expect(delegated[0]?.prompt).toContain("smoke.test.ts: 3 passed");
     expect(delegated[0]?.prompt).toContain("VERDICT: PASS");
     expect(delegated[0]?.keySource).toContain("smoke.test.ts: 3 passed");
+  });
+});
+
+it.effect("archives the judge's thread once its verdict is recorded, pass or fail", () => {
+  const passed = harness();
+  const failed = harness({ run: run({ summary: "No CLI entry exists.\nVERDICT: FAIL" }) });
+  return Effect.gen(function* () {
+    yield* requestJudgement({ ledger: ledgerOf(), itemId, ports: passed.ports });
+    yield* requestJudgement({ ledger: ledgerOf(), itemId, ports: failed.ports });
+    expect(passed.archived).toEqual(["thread:judge"]);
+    expect(failed.archived).toEqual(["thread:judge"]);
+  });
+});
+
+it.effect("keeps the thread of a judge that records no verdict", () => {
+  const { ports, archived, recorded } = harness({ run: run({ status: "running", summary: null }) });
+  return Effect.gen(function* () {
+    yield* Effect.exit(requestJudgement({ ledger: ledgerOf(), itemId, ports }));
+    expect(recorded).toEqual([]);
+    expect(archived).toEqual([]);
   });
 });
 
@@ -612,6 +637,7 @@ const backgroundHarness = (options: {
   const delegated: Array<string> = [];
   /** The judge thread's user messages: what the server delegated, unless a test tampers. */
   const judgeThread: Array<string> = [];
+  const archived: Array<string> = [];
   const apply = (command: LedgerCommand) => {
     const planned = planLedgerCommand({ command, ledger, now: at });
     if (Result.isFailure(planned)) throw new Error(planned.failure);
@@ -640,6 +666,10 @@ const backgroundHarness = (options: {
     current = options.ended ?? running;
   };
   const ports: BackgroundJudgementPorts = {
+    archiveJudge: (threadId) =>
+      Effect.sync(() => {
+        archived.push(threadId);
+      }),
     delegate: (input) =>
       Effect.suspend(() => {
         delegated.push(input.prompt);
@@ -690,7 +720,7 @@ const backgroundHarness = (options: {
       finish();
       return settleBackgroundJudgement({ ledger, taskId: "task:judge" as NodeId, ports });
     });
-  return { ports, delegated, judgeThread, start, settle, ledger: () => ledger };
+  return { ports, delegated, judgeThread, archived, start, settle, ledger: () => ledger };
 };
 
 it.effect("settles a judge that ended before its task was recorded", () => {
@@ -726,6 +756,27 @@ it.effect("starts the judge without waiting, then closes the item when it passes
     expect(judged?.status).toBe("closed");
     expect(judged?.judging).toBeUndefined();
     expect(judged?.verdict?.outcome).toBe("pass");
+  });
+});
+
+it.effect("archives the judge's thread when its verdict lands in the background", () => {
+  const harnessed = backgroundHarness({ ended: run() });
+  return Effect.gen(function* () {
+    yield* harnessed.start();
+    expect(harnessed.archived).toEqual([]);
+    yield* harnessed.settle();
+    expect(harnessed.ledger().items[0]?.verdict?.outcome).toBe("pass");
+    expect(harnessed.archived).toEqual(["thread:judge"]);
+  });
+});
+
+it.effect("keeps the thread of a background judge that ended without a verdict", () => {
+  const harnessed = backgroundHarness({ ended: run({ status: "failed", summary: null }) });
+  return Effect.gen(function* () {
+    yield* harnessed.start();
+    yield* harnessed.settle();
+    expect(harnessed.ledger().items[0]?.judgeError).toContain("ended failed");
+    expect(harnessed.archived).toEqual([]);
   });
 });
 
