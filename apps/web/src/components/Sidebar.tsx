@@ -363,6 +363,7 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
 
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
+const EMPTY_NESTED_THREADS: ReadonlySet<EnvironmentThreadShell> = new Set();
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
@@ -474,6 +475,10 @@ function useSidebarThreads(input: {
     readonly pinnedThreads: readonly EnvironmentThreadShell[];
     readonly snoozeNow: string;
   }) => SidebarActiveArrangement<EnvironmentThreadShell>;
+  // Pairs each active thread with whether it sits under the thread that launched it.
+  readonly nestLaunched: (
+    threads: readonly EnvironmentThreadShell[],
+  ) => readonly { thread: EnvironmentThreadShell; nested: boolean }[];
   readonly pinsInGroups: boolean;
 }) {
   const {
@@ -489,6 +494,7 @@ function useSidebarThreads(input: {
     keepEmptyFolders: keepEmpty,
     viewThreadKeys,
     arrangeActive,
+    nestLaunched,
     pinsInGroups,
   } = input;
   // Folders already separate the work, so boring mode has no Working shelf.
@@ -595,25 +601,30 @@ function useSidebarThreads(input: {
   const projectFolders =
     folderGroups === null
       ? null
-      : groupSidebarThreadsByProject(folderGroups, displayedActiveThreads, keepEmpty).map(
-          (folder) => {
-            const collapsed = !resolveProjectExpanded(
-              projectExpandedById,
-              sidebarFolderExpansionKeys(folder.group),
-            );
-            return {
-              group: folder.group,
-              collapsed,
-              // A closed folder still shows the open thread, and hints at the rest.
-              threads: collapsed
-                ? routeThreadOnly(folder.threads, routeRowThreadKey)
-                : folder.threads,
-              hiddenThreads: collapsed
-                ? folder.threads.filter((thread) => threadShellKey(thread) !== routeRowThreadKey)
-                : EMPTY_THREADS,
-            };
-          },
-        );
+      : groupSidebarThreadsByProject(
+          folderGroups,
+          displayedActiveThreads,
+          keepEmpty,
+          nestLaunched,
+        ).map((folder) => {
+          const collapsed = !resolveProjectExpanded(
+            projectExpandedById,
+            sidebarFolderExpansionKeys(folder.group),
+          );
+          return {
+            group: folder.group,
+            collapsed,
+            // A closed folder still shows the open thread, and hints at the rest.
+            threads: collapsed
+              ? routeThreadOnly(folder.threads, routeRowThreadKey)
+              : folder.threads,
+            // Alone in a closed folder, the open thread has no launcher row to sit under.
+            nested: collapsed ? EMPTY_NESTED_THREADS : folder.nested,
+            hiddenThreads: collapsed
+              ? folder.threads.filter((thread) => threadShellKey(thread) !== routeRowThreadKey)
+              : EMPTY_THREADS,
+          };
+        });
   const orderedThreads = [
     // Fork: grouped pins already sit in displayedActiveThreads, at their group's top.
     ...(pinsInGroups ? [] : pinnedThreads),
@@ -1199,6 +1210,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const threads = useQuietThreadShells();
   // Fork: launcher and subagent lookups: one map per shell update, not a scan per thread.
   const threadIndex = indexSidebarThreads(threads);
+  const nestLaunchedActiveThreads = (list: readonly EnvironmentThreadShell[]) =>
+    nestLaunchedSidebarThreads(list, threadIndex);
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
@@ -1513,7 +1526,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }
           : {}),
         pinnedThreads: sidebarPinsInGroups ? pinned : null,
+        nest: nestLaunchedActiveThreads,
       }),
+    nestLaunched: nestLaunchedActiveThreads,
     pinsInGroups: sidebarPinsInGroups,
     threads,
     delegatedUnderParent,
@@ -2212,7 +2227,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const hasProjectFolders = projectFolders !== null && projectFolders.length > 0;
   const sidebarListItemsFresh = ((): readonly SidebarListItem[] => {
     // A thread an agent launched sits under its launcher within one section's
-    // list. Grouped active rows render under project headers, which stay flat.
+    // list. Grouped active rows render from their groups, which nest on their own.
     const rowsOf = (
       list: readonly EnvironmentThreadShell[],
       section: SidebarSection,
@@ -3747,14 +3762,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             hideProjectIcon={!showProjectIcons}
                             grouped={indented}
                             // A nested row must look nested even when the user's Indent is none.
-                            indent={folderIndent(
-                              nested && threadIndent === "none"
-                                ? "small"
-                                : indented || nested
-                                  ? threadIndent
-                                  : "none",
-                              folderDepth,
-                            )}
+                            // Under a group header the launcher already takes the Indent, so a
+                            // launched row goes one step past it.
+                            indent={
+                              indented
+                                ? folderIndent(threadIndent, folderDepth + (nested ? 1 : 0))
+                                : folderIndent(
+                                    nested && threadIndent === "none"
+                                      ? "small"
+                                      : nested
+                                        ? threadIndent
+                                        : "none",
+                                    folderDepth,
+                                  )
+                            }
                             propertiesText={threadsView.propertiesTextOf(threadKey)}
                             navigationParent={
                               folderRow ??
@@ -3898,6 +3919,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                   thread,
                                   "active",
                                   sidebarFolderRowId(folder.group.projectKey),
+                                  false,
+                                  folder.nested.has(thread),
                                 ),
                               );
                             }
@@ -4049,7 +4072,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                     "active",
                                     undefined,
                                     true,
-                                    false,
+                                    row.nested === true,
                                     row.depth,
                                   ),
                                 );

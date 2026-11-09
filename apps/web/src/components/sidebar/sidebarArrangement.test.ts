@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { filterSidebarV2VisibleThreads } from "~/components/Sidebar.logic";
+import {
+  filterSidebarV2VisibleThreads,
+  nestLaunchedSidebarThreads,
+} from "~/components/Sidebar.logic";
+import type { SidebarThreadSummary } from "~/types";
 
 import {
   appliedSidebarProjectScopeKey,
@@ -20,6 +24,11 @@ type Fixture = Parameters<typeof resolveSidebarThreadDisplayStatus>[0] & {
   readonly createdAt: string;
   readonly latestUserMessageAt: string | null;
 };
+
+type LaunchFields = Pick<
+  SidebarThreadSummary,
+  "id" | "environmentId" | "launchedByThreadId" | "lineage"
+>;
 
 const at = (minute: number) => new Date(Date.UTC(2026, 8, 29, 12, minute)).toISOString();
 
@@ -176,6 +185,57 @@ describe("arrangeSidebarActiveThreads", () => {
     expect(ids(folded.threads)).toEqual(["vault-loose", "flux-a"]);
     // The header still counts what the folder hides.
     expect(folded.groups?.[0]?.threads).toHaveLength(3);
+  });
+
+  it("nests a launched thread under its launcher, in the launcher's group and folder", () => {
+    const launched = (id: string, launchedBy: string | null, overrides: Record<string, unknown>) =>
+      thread(id, {
+        environmentId: "environment",
+        lineage: { rootThreadId: id, parentThreadId: null, relationshipToParent: null },
+        launchedByThreadId: launchedBy,
+        ...overrides,
+      }) as Fixture & LaunchFields;
+    const threads = [
+      launched("worker", "orchestrator", { projectId: "vault", latestRun: turn(50) }),
+      launched("cross-project-worker", "orchestrator", { projectId: "flux", latestRun: turn(40) }),
+      launched("unrelated", null, { projectId: "vault", latestRun: turn(30) }),
+      launched("orchestrator", null, { projectId: "vault", folder: "U82", latestRun: turn(10) }),
+      launched("stray", "archived-launcher", { projectId: "flux", latestRun: turn(5) }),
+    ];
+    const arranged = arrangeSidebarActiveThreads(threads, {
+      sort: { field: "activity", reversed: false },
+      groupByProject: true,
+      projectSort: DEFAULT_SIDEBAR_PROJECT_SORT,
+      statusOf: noStatus,
+      groupOf,
+      collapsedGroupKeys: new Set(),
+      folderOf: (entry) => (entry as unknown as { folder?: string }).folder,
+      collapsedFolderKeys: new Set(),
+      nest: (list) => nestLaunchedSidebarThreads(list),
+    });
+    expect(
+      arranged.groups?.map((group) => [
+        group.label,
+        group.rows.map((row) =>
+          row.kind === "folder"
+            ? `[${row.path}]`
+            : `${"  ".repeat(row.depth)}${row.nested === true ? "> " : ""}${row.thread.id}`,
+        ),
+      ]),
+    ).toEqual([
+      [
+        "Pet Vault",
+        ["unrelated", "[U82]", "  orchestrator", "  > worker", "  > cross-project-worker"],
+      ],
+      ["flux", ["stray"]],
+    ]);
+    expect(ids(arranged.threads)).toEqual([
+      "unrelated",
+      "orchestrator",
+      "worker",
+      "cross-project-worker",
+      "stray",
+    ]);
   });
 
   it("keeps pins in their project, above the sorted rows, in pin order", () => {

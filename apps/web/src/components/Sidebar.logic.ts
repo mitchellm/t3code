@@ -1078,9 +1078,9 @@ export function sidebarFolderExpansionKeys(group: {
 }
 
 /**
- * Boring sidebar folders. Folders follow `groups` order and threads keep their
- * input order. A project with no threads gets a folder only when `keepEmpty` says so.
- * A thread whose project is in no group has no folder and is left out.
+ * Boring sidebar folders, in `groups` order with threads in input order; an empty one only when
+ * `keepEmpty` says so, and a thread in no group's project is left out. A thread `nest` nests
+ * follows its launcher's folder and lands in `nested`, or keeps its own when the launcher has none.
  */
 export function groupSidebarThreadsByProject<
   TGroup extends {
@@ -1094,16 +1094,33 @@ export function groupSidebarThreadsByProject<
   groups: readonly TGroup[],
   threads: readonly TThread[],
   keepEmpty: (group: TGroup) => boolean,
-): Array<{ group: TGroup; threads: TThread[] }> {
-  const folders = groups.map((group) => ({ group, threads: [] as TThread[] }));
+  nest?: (threads: readonly TThread[]) => readonly { thread: TThread; nested: boolean }[],
+): Array<{ group: TGroup; threads: TThread[]; nested: Set<TThread> }> {
+  const folders = groups.map((group) => ({
+    group,
+    threads: [] as TThread[],
+    nested: new Set<TThread>(),
+  }));
   const folderByProject = new Map<string, (typeof folders)[number]>();
   for (const folder of folders) {
     for (const ref of folder.group.memberProjectRefs) {
       folderByProject.set(`${ref.environmentId}:${ref.projectId}`, folder);
     }
   }
-  for (const thread of threads) {
-    folderByProject.get(`${thread.environmentId}:${thread.projectId}`)?.threads.push(thread);
+  const folderOf = (thread: TThread) =>
+    folderByProject.get(`${thread.environmentId}:${thread.projectId}`);
+  // Nested rows directly follow their launcher, so the last root's folder is the launcher's.
+  let launcherFolder: (typeof folders)[number] | undefined;
+  for (const { thread, nested } of nest?.(threads) ??
+    threads.map((thread) => ({ thread, nested: false }))) {
+    if (nested && launcherFolder !== undefined) {
+      launcherFolder.threads.push(thread);
+      launcherFolder.nested.add(thread);
+      continue;
+    }
+    const folder = folderOf(thread);
+    if (!nested) launcherFolder = folder;
+    folder?.threads.push(thread);
   }
   return folders.filter((folder) => folder.threads.length > 0 || keepEmpty(folder.group));
 }

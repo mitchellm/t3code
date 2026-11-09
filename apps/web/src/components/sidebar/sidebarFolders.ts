@@ -38,6 +38,8 @@ export interface SidebarFolderThreadRow<T> {
   readonly thread: T;
   /** Folder levels above the thread; 0 for an unfiled thread. */
   readonly depth: number;
+  /** Sits under the thread that launched it, which is the row just above its run of siblings. */
+  readonly nested?: boolean;
 }
 
 export type SidebarGroupRow<T> = SidebarFolderRow | SidebarFolderThreadRow<T>;

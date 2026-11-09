@@ -286,6 +286,14 @@ export function arrangeSidebarActiveThreads<T extends SortableThread>(
     readonly folderOf?: (thread: T) => string | null | undefined;
     /** Folder keys (see `sidebarFolderKey`) whose rows are folded away. */
     readonly collapsedFolderKeys?: ReadonlySet<string>;
+    /**
+     * Marks each thread an agent launched to sit under its launcher (see
+     * `nestLaunchedSidebarThreads`). A launched thread then follows its launcher
+     * into the launcher's group and folder, even when its own would differ.
+     */
+    readonly nest?: (
+      threads: readonly T[],
+    ) => readonly { readonly thread: T; readonly nested: boolean }[];
   },
 ): SidebarActiveArrangement<T> {
   const sorted = sortSidebarThreads(threads, options.sort, options.statusOf, options.openedAtOf);
@@ -307,8 +315,25 @@ export function arrangeSidebarActiveThreads<T extends SortableThread>(
           options.openedAtOf,
         );
 
+  // Only launchers are grouped and filed; each carries its launched threads along.
+  const launchedUnder = new Map<T, T[]>();
+  const roots: T[] = [];
+  let launcher: T | undefined;
+  for (const { thread, nested } of options.nest?.(ordered) ??
+    ordered.map((thread) => ({ thread, nested: false }))) {
+    if (!nested || launcher === undefined) {
+      roots.push(thread);
+      launcher = thread;
+      continue;
+    }
+    const launched = launchedUnder.get(launcher);
+    if (launched === undefined) launchedUnder.set(launcher, [thread]);
+    else launched.push(thread);
+  }
+  const withLaunched = (thread: T): T[] => [thread, ...(launchedUnder.get(thread) ?? [])];
+
   const byKey = new Map<string, { ref: SidebarProjectGroupRef; threads: T[] }>();
-  for (const thread of ordered) {
+  for (const thread of roots) {
     const ref = options.groupOf(thread) ?? UNKNOWN_PROJECT_GROUP;
     const entry = byKey.get(ref.key);
     if (entry === undefined) byKey.set(ref.key, { ref, threads: [thread] });
@@ -333,12 +358,28 @@ export function arrangeSidebarActiveThreads<T extends SortableThread>(
               folderOf,
               collapsedFolderKeys: options.collapsedFolderKeys ?? noCollapsedFolders,
             });
+      const rows: readonly SidebarGroupRow<T>[] =
+        layout?.rows ?? threads.map((thread) => ({ kind: "thread" as const, thread, depth: 0 }));
       return {
         key: entry.ref.key,
         label: entry.ref.label,
-        threads: layout?.ordered ?? threads,
+        threads: (layout?.ordered ?? threads).flatMap(withLaunched),
         rows:
-          layout?.rows ?? threads.map((thread) => ({ kind: "thread" as const, thread, depth: 0 })),
+          launchedUnder.size === 0
+            ? rows
+            : rows.flatMap((row): SidebarGroupRow<T>[] =>
+                row.kind === "folder"
+                  ? [row]
+                  : [
+                      row,
+                      ...(launchedUnder.get(row.thread) ?? []).map((thread) => ({
+                        kind: "thread" as const,
+                        thread,
+                        depth: row.depth,
+                        nested: true,
+                      })),
+                    ],
+              ),
         collapsed: options.collapsedGroupKeys.has(entry.ref.key),
       };
     },

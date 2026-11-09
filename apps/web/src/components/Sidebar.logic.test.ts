@@ -1824,6 +1824,49 @@ describe("groupSidebarThreadsByProject", () => {
       { projectKey: "fleet", threads: [] },
     ]);
   });
+
+  it("files a launched thread under its launcher, in the launcher's folder", () => {
+    const t3code = ProjectId.make("t3code");
+    const fleet = ProjectId.make("fleet");
+    const make = (id: string, projectId: ProjectId, launchedBy?: string) =>
+      makeThreadFixture({
+        id: ThreadId.make(id),
+        environmentId: localEnvironmentId,
+        projectId,
+        ...(launchedBy === undefined ? {} : { launchedByThreadId: ThreadId.make(launchedBy) }),
+      });
+    const groups = [
+      {
+        projectKey: "fleet",
+        memberProjectRefs: [{ environmentId: localEnvironmentId, projectId: fleet }],
+      },
+      {
+        projectKey: "t3code",
+        memberProjectRefs: [{ environmentId: localEnvironmentId, projectId: t3code }],
+      },
+    ];
+    const threads = [
+      make("cross-project-worker", fleet, "orchestrator"),
+      make("fleet-own", fleet),
+      make("orchestrator", t3code),
+      make("worker", t3code, "orchestrator"),
+      make("orphan-launcher-worker", fleet, "deleted-orchestrator"),
+    ];
+
+    expect(
+      groupSidebarThreadsByProject(groups, threads, () => false, nestLaunchedSidebarThreads).map(
+        (folder) => ({
+          projectKey: folder.group.projectKey,
+          threads: folder.threads.map(
+            (entry) => `${folder.nested.has(entry) ? "  " : ""}${entry.id}`,
+          ),
+        }),
+      ),
+    ).toEqual([
+      { projectKey: "fleet", threads: ["fleet-own", "orphan-launcher-worker"] },
+      { projectKey: "t3code", threads: ["orchestrator", "  cross-project-worker", "  worker"] },
+    ]);
+  });
 });
 
 describe("resolveSidebarFolderDot", () => {
