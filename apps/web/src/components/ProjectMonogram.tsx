@@ -7,7 +7,8 @@ import { cn } from "~/lib/utils";
 const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 // Fork: the sidebar's "Icon style" setting. Inside its provider a project's
-// initials tile is drawn as a folder in the same colour instead.
+// initials tile is drawn as a folder in the same colour instead. Thread rows
+// set it back to initials: a folder on a row reads as a project header.
 export const ProjectMonogramStyleContext = createContext<SidebarProjectIconStyle>("initials");
 
 export function ProjectMonogram({

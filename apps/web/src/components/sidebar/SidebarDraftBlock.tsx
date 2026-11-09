@@ -13,6 +13,7 @@ import { useShallow } from "zustand/react/shallow";
 import { cn } from "~/lib/utils";
 import { resolveSidebarRowAccessibility } from "../Sidebar.logic";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
+import { ProjectMonogramStyleContext } from "../ProjectMonogram";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   composerDraftHasUserContent,
@@ -89,7 +90,9 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   };
   const projectIcon =
     props.project && !props.grouped ? (
-      <ProjectFavicon project={props.project} className="size-4 shrink-0" />
+      <ProjectMonogramStyleContext.Provider value="initials">
+        <ProjectFavicon project={props.project} className="size-4 shrink-0" />
+      </ProjectMonogramStyleContext.Provider>
     ) : null;
   const discardButton = (
     <Tooltip>

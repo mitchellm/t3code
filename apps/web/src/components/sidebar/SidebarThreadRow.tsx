@@ -103,6 +103,7 @@ import {
 import { pickSnoozePreset, resolveSnoozePresets, type SnoozePreset } from "../Sidebar.snooze";
 import { useThreadShell } from "../../state/entities";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
+import { ProjectMonogramStyleContext } from "../ProjectMonogram";
 import { ThreadSearchMatchExcerpt } from "../ThreadSearchMatch";
 import { makeWorkspaceFileDropHandlers } from "../chat/workspaceFileDrop";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -502,7 +503,11 @@ export function SortableThreadRow(
     useThreadShell(scopeThreadRef(rowProps.thread.environmentId, rowProps.thread.id)) ??
     rowProps.thread;
   // Keyed by variant so a card/slim switch remounts the row.
-  return <SidebarThreadRow key={rowProps.variant} {...rowProps} thread={thread} sortable={bag} />;
+  return (
+    <ProjectMonogramStyleContext.Provider value="initials">
+      <SidebarThreadRow key={rowProps.variant} {...rowProps} thread={thread} sortable={bag} />
+    </ProjectMonogramStyleContext.Provider>
+  );
 }
 export type SidebarSweepAction = "settle" | "unsettle" | "unsnooze";
 const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
@@ -1818,16 +1823,18 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
           }
         >
           {props.project ? (
-            <ProjectFavicon
-              project={props.project}
-              className={cn(
-                "size-4 shrink-0 transition-opacity",
-                props.isSettled &&
-                  !props.isRouteActive &&
-                  !props.isHighlighted &&
-                  "opacity-40 grayscale group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
-              )}
-            />
+            <ProjectMonogramStyleContext.Provider value="initials">
+              <ProjectFavicon
+                project={props.project}
+                className={cn(
+                  "size-4 shrink-0 transition-opacity",
+                  props.isSettled &&
+                    !props.isRouteActive &&
+                    !props.isHighlighted &&
+                    "opacity-40 grayscale group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
+                )}
+              />
+            </ProjectMonogramStyleContext.Provider>
           ) : null}
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="flex min-w-0 items-center gap-2.5">

@@ -370,7 +370,7 @@ export function AppearanceSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("sidebar-project-icon-style")}
-          description="Folder: project headers are a folder in the project's colour, and rows show a folder for a project with no icon of its own. Initials: headers and rows show the project's own icon, or its initials. Favicons and custom icons always stay."
+          description="Folder: project headers are a folder in the project's colour. Initials: headers show the project's own icon, or its initials. Thread rows always show the project's own icon, or its initials, so they never look like a header. Favicons and custom icons always stay."
           resetAction={
             settings.sidebarProjectIconStyle !==
             DEFAULT_UNIFIED_SETTINGS.sidebarProjectIconStyle ? (
