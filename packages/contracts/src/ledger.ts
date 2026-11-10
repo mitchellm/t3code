@@ -84,6 +84,12 @@ export const LedgerItem = Schema.Struct({
   title: TrimmedNonEmptyString,
   /** What "done" means for this item; the judge and the harness check against it. */
   acceptance: Schema.String,
+  /**
+   * Fork: the user's own words this item answers, copied from their message. Present makes the item
+   * one of the user's asks: top level only, closed only with proof, never dropped or deferred by an
+   * agent, and judged against these words.
+   */
+  quote: Schema.optionalKey(TrimmedNonEmptyString),
   status: LedgerItemStatus,
   evidence: Schema.NullOr(Schema.String),
   dropReason: Schema.NullOr(Schema.String),
@@ -212,6 +218,8 @@ export const LedgerItemDraft = Schema.Struct({
   id: LedgerItemId,
   title: TrimmedNonEmptyString,
   acceptance: Schema.String,
+  /** Fork: the user's words this item answers; see `LedgerItem.quote`. */
+  quote: Schema.optionalKey(TrimmedNonEmptyString),
   blockedBy: Schema.optionalKey(Schema.Array(LedgerItemId)),
   parentItemId: Schema.optionalKey(LedgerItemId),
   /** Present means the item starts deferred, for out-of-scope work recorded for later. */

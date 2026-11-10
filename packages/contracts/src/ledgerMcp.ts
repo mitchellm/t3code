@@ -39,6 +39,12 @@ const ItemDraft = Schema.Struct({
   acceptance: Schema.String.annotate({
     description: "What must be true, and how it is checked, for this item to count as done.",
   }),
+  quote: Schema.optionalKey(
+    TrimmedNonEmptyString.annotate({
+      description:
+        "Makes this one of the user's asks: their words, copied exactly from their message (it is checked). Asks are top-level, close only with proof the user can see, and you can never drop or defer one. Leave it out for your own plan steps, which go under an ask with parentItemId.",
+    }),
+  ),
   blockedBy: Schema.optionalKey(
     Schema.Array(LedgerMcpItemKey).annotate({
       description:
@@ -158,6 +164,8 @@ export const LedgerMcpSnapshot = Schema.Struct({
       id: Schema.String,
       title: Schema.String,
       acceptance: Schema.String,
+      /** Fork: present on the user's asks; their words, which the item is judged against. */
+      quote: Schema.optionalKey(Schema.String),
       status: LedgerItemStatus,
       /** Tree order: each parent is followed by its sub-items, one level deeper. */
       depth: NonNegativeInt,

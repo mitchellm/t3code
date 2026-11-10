@@ -8,6 +8,44 @@ import type {
 /** Consecutive server follow-ups per thread before it stops and waits for the user. */
 export const LEDGER_AUTO_CONTINUE_CAP = 5;
 
+/**
+ * Fork: a reply that asks the user something ends on their answer, not on more ledger work.
+ * Agents lead with the question (or end on it), so the first and last lines are what count.
+ */
+export function asksTheUser(message: string | undefined): boolean {
+  const lines = (message ?? "")
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const isQuestion = (line: string | undefined) =>
+    line !== undefined && /\?[\s*_`"')\]]*$/u.test(line);
+  return isQuestion(lines[0]) || isQuestion(lines.at(-1));
+}
+
+// Quotes are compared on words alone, so smart quotes, markdown and line breaks the agent tidied
+// away do not make a faithful quote look invented.
+const quoteWords = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}+]+/gu, " ")
+    .trim();
+
+/**
+ * Fork: the first item whose quote is not in anything the user wrote, so an agent cannot make up
+ * one of the user's asks. Undefined when every quote is found.
+ */
+export function unquotedAsk<Item extends { readonly id: string; readonly quote?: string }>(
+  items: ReadonlyArray<Item>,
+  userTexts: ReadonlyArray<string>,
+): Item | undefined {
+  const said = userTexts.map(quoteWords);
+  return items.find((item) => {
+    if (item.quote === undefined) return false;
+    const words = quoteWords(item.quote);
+    return words === "" || !said.some((text) => text.includes(words));
+  });
+}
+
 export type LedgerAutoContinueDecision =
   | { readonly type: "idle" }
   | {

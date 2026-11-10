@@ -319,9 +319,10 @@ export function composerStateAtPromptEnd(
 }
 
 const LEDGER_PREAMBLE =
-  "Before you start, create a task ledger with the ledger_create tool: itemize the task below into " +
-  "items, each with acceptance criteria that say what done means. Then work the ledger, updating " +
-  "each item with evidence as you finish it.";
+  "Before you start, create a task ledger with the ledger_create tool: one top-level ask for each " +
+  "thing the task below asks for, quoting my words, with acceptance criteria that say what done " +
+  "means, and your plan steps under them. Then work the ledger, updating each item with evidence " +
+  "as you finish it.";
 
 /**
  * `/ledger <task>` is sent as an ordinary message: the agent is told to build the ledger itself,

@@ -7,6 +7,7 @@ import {
   type NodeId,
   OrchestratorMcpFailure,
   type OrchestratorMcpDelegatedTaskStatus,
+  type OrchestrationV2ConversationMessage,
   type ThreadId,
 } from "@t3tools/contracts";
 import { parseJudgeVerdict } from "@t3tools/shared/loadouts";
@@ -266,9 +267,32 @@ function judgedCriteria(ledger: Ledger, item: LedgerItem): ReadonlyArray<string>
   const refuting =
     investigation !== undefined && item.parentItemId === investigation.approachesItemId;
   const criteria = acceptanceCriteria(refuting ? investigation.solvedWhen : item.acceptance);
+  // Fork: one of the user's asks is held to their words first; the agent's lines come after.
+  if (!refuting && item.quote !== undefined) return [userAskCriterion(item.quote), ...criteria];
   if (criteria.length > 0) return criteria;
   return [refuting ? investigation.goal : item.title];
 }
+
+const userAskCriterion = (quote: string) =>
+  `What the user asked for, in their own words, is actually true now: "${quote}"`;
+
+/**
+ * Fork: server messages that are the judge's own background work waking it (a command or task it
+ * started finishing, a monitor firing). They are not anyone else's words, so they do not taint
+ * the judge thread; everything else still does.
+ */
+const JUDGE_OWN_WAKES: ReadonlySet<string> = new Set([
+  "background_command",
+  "background_task",
+  "monitor",
+]);
+
+export const judgeThreadPrompts = (
+  messages: ReadonlyArray<Pick<OrchestrationV2ConversationMessage, "text" | "notification">>,
+): ReadonlyArray<string> =>
+  messages
+    .filter((message) => !JUDGE_OWN_WAKES.has(message.notification?.source.kind ?? ""))
+    .map((message) => message.text);
 
 function judgementPrompt(
   ledger: Ledger,
@@ -293,6 +317,14 @@ function judgementPrompt(
     "",
     fenced(`Item ${item.id} title`, item.title),
     "",
+    ...(item.quote === undefined
+      ? []
+      : [
+          "This item is one of the user's own asks. Their words, copied from their message and checked by the server, are:",
+          item.quote,
+          "Criterion 1 is those words. Judge it by what the user would see or get, not by the agent's plan: tests passing or a PR existing does not prove it on its own.",
+          "",
+        ]),
     fenced(
       item.acceptance.trim() === ""
         ? "Acceptance, what done means (none given, so the title is the one criterion)"

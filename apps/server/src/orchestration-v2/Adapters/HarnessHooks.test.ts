@@ -139,6 +139,27 @@ describe("Stop hook", () => {
     expect(output.reason).toContain("close with evidence, or drop with a reason");
   });
 
+  it("lets a turn that asks the user a question end, with the question first or last", async () => {
+    const current = { value: state(ledgerOf([item("L1", "in_progress")])) };
+    const { fire } = make(ledgerReader(current));
+    const asks = [
+      "Should the 18+ split come from the live API or the config?\n\nI checked both; the API needs a cookie.",
+      "I have the backend done and the page routed.\n\nWhich account should the cookie come from?",
+      "Done with the parser. **Which branch do you want this on?**",
+    ];
+    for (const message of asks) {
+      expect(await fire("Stop", stop(false, { last_assistant_message: message }))).toEqual({});
+    }
+    // A report that only mentions a question mid-way still gets the nudge.
+    const report = await fire(
+      "Stop",
+      stop(false, {
+        last_assistant_message: "Fixed it. The old question (why it 404s?) is answered: the token.",
+      }),
+    );
+    expect(report.decision).toBe("block");
+  });
+
   it("allows the stop when nothing is open, or the ledger is closed or absent", async () => {
     const current: Current = {
       value: state(ledgerOf([item("L1", "closed"), item("L2", "dropped")])),

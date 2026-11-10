@@ -115,6 +115,7 @@ function newItem(draft: LedgerItemDraft, now: DateTime.Utc): LedgerItem {
     id: draft.id,
     title: draft.title,
     acceptance: draft.acceptance,
+    ...(draft.quote === undefined ? {} : { quote: draft.quote }),
     status: draft.deferReason === undefined ? "open" : "deferred",
     evidence: null,
     dropReason: null,
@@ -243,10 +244,26 @@ function draftProblem(drafts: ReadonlyArray<LedgerItemDraft>): string | undefine
   const blank = drafts.find(
     (draft) => draft.deferReason !== undefined && isBlank(draft.deferReason),
   );
-  return blank === undefined
-    ? undefined
-    : `Item ${blank.id} needs a non-empty deferReason to start deferred.`;
+  if (blank !== undefined)
+    return `Item ${blank.id} needs a non-empty deferReason to start deferred.`;
+  for (const draft of drafts) {
+    if (draft.quote === undefined) continue;
+    if (draft.parentItemId !== undefined) {
+      return `Item ${draft.id} quotes the user, so it is one of their asks and stays at the top level. Put your plan steps under it instead.`;
+    }
+    if (draft.deferReason !== undefined) {
+      return `Item ${draft.id} quotes the user, so it is one of their asks and cannot start deferred.`;
+    }
+  }
+  return undefined;
 }
+
+/**
+ * Fork: the user's asks are theirs to set aside. An agent closes one with proof or leaves it open,
+ * so a thread with an unmet ask never looks finished.
+ */
+const askSetAsideRefusal = (item: LedgerItem, target: "dropped" | "deferred") =>
+  `Item ${item.id} is one of the user's asks ("${item.quote}"), so you cannot ${target === "dropped" ? "drop" : "defer"} it. Close it with proof the user can see. If something blocks it, clear the blocker yourself (request_secret, the box, the app's own CLI); if only the user can, ask them once through the question tool. The ask stays open until then.`;
 
 function blockersOf(ledger: Ledger, item: LedgerItem): ReadonlyArray<LedgerItem> {
   if (item.blockedBy === undefined || item.blockedBy.length === 0) return [];
@@ -518,7 +535,19 @@ function planCoreLedgerCommand(input: {
         const setsAside =
           command.verdict.outcome === "pass" &&
           (setAside.status === "dropped" || dependentsOf(ledger, item).length === 0);
-        if (!setsAside) return itemUpdated(ledger.id, { ...settled, status: "in_progress" }, now);
+        // A pass on setting the work aside says nothing about the work, so it must not let a later
+        // close skip the judge. A fail keeps its notes for the agent.
+        if (!setsAside) {
+          return itemUpdated(
+            ledger.id,
+            {
+              ...settled,
+              status: "in_progress",
+              verdict: command.verdict.outcome === "pass" ? null : settled.verdict,
+            },
+            now,
+          );
+        }
         return itemUpdated(
           ledger.id,
           withOptional(
@@ -639,6 +668,19 @@ function planCoreLedgerCommand(input: {
       if (changesStatus && !LEGAL_TRANSITIONS[item.status].includes(target)) {
         return reject(`Item ${item.id} cannot go from ${item.status} to ${target}.`);
       }
+      if (
+        byAgent &&
+        item.quote !== undefined &&
+        changesStatus &&
+        (target === "dropped" || target === "deferred")
+      ) {
+        return reject(askSetAsideRefusal(item, target));
+      }
+      if (item.quote !== undefined && command.parentItemId != null) {
+        return reject(
+          `Item ${item.id} is one of the user's asks and stays at the top level. Move your plan steps under it instead.`,
+        );
+      }
       // On a judged ledger the agent's close, drop or defer of started work is a request the judge
       // settles, so it never needs the user and cannot skip the gate; un-starting would let a later
       // unjudged drop through. Fork: dropping a refuted investigation approach claims nothing, so
@@ -712,7 +754,8 @@ function planCoreLedgerCommand(input: {
         return itemUpdated(
           ledger.id,
           item.status === "deferred"
-            ? { ...revived, status: "open", updatedAt: now }
+            ? // A verdict kept from the defer judged setting the work aside, not the work itself.
+              { ...revived, status: "open", verdict: null, updatedAt: now }
             : {
                 // Starting over restarts the failure count the replan nudge reads.
                 ...withOptional(revived, "judgementsAtReopen", item.judgements),

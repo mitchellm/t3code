@@ -155,9 +155,9 @@ export function hardeningRules(base: JudgeBase | undefined): ReadonlyArray<strin
       ? "- No base commit is known for this work. Find its changes yourself: `git status`, `git diff HEAD`, and `git log` for the recent commits."
       : `- Inspect every change since the work started: the working tree as it was then is the git ref ${base.ref} (captured ${DateTime.formatIso(base.capturedAt)}). Run \`git diff ${base.ref} --stat\` and \`git diff ${base.ref}\`, plus \`git status\` for untracked files. If that ref is missing, fall back to \`git status\`, \`git diff HEAD\` and \`git log\` for the recent commits.`,
     "- Check whether any test files were added, modified or deleted, and whether any assertion, check or expected value was weakened, skipped or deleted (skip/only/todo markers, loosened matchers, commented-out or removed tests, expectations edited to match the output, checks bypassed or mocked away). A criterion met that way is FAIL, even when the agent says it was intentional, approved or temporary.",
-    "- Run the relevant tests yourself where you can and report the exact command and its result. If you cannot run them, say why.",
+    "- Run the relevant tests yourself where you can and report the exact command and its result. If you cannot run them, say why. Run every command in the foreground and wait for it; do not start background tasks.",
     "",
-    "Answer format. Write one line per criterion, for every criterion, numbered as in the list (Criterion 1 is C1): `C1: PASS - <proof you checked>` or `C1: FAIL - <what is wrong>`. Any FAIL, or a criterion with no line, fails the item, whatever your final verdict says. Then a line `Tests: <command> -> <result>`.",
+    "Answer format. Write one line per criterion, for every criterion, numbered as in the list (Criterion 1 is C1): `C1: PASS - <proof you checked>` or `C1: FAIL - <what is wrong>`. Any FAIL, or a criterion with no line, fails the item, whatever your final verdict says. Then a line `Tests: <command> -> <result>`. Only your last message is read, so if you write again after answering, repeat every criterion line and the verdict line in full.",
   ];
 }
 

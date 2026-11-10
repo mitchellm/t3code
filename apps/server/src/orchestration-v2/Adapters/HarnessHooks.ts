@@ -23,6 +23,7 @@ import type {
   ProviderAdapterV2HarnessThreadPolicy,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import { loadoutStructure } from "@t3tools/shared/loadouts";
+import { asksTheUser } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 // Hooks are plain promises and must judge a Windows path whatever the host, so they need both
 // path.win32 and path.posix rather than one Effect Path layer.
@@ -344,7 +345,7 @@ function planFirstReason(tool: string, ledger: Ledger | null, subagent: boolean)
     ledger === null
       ? "this thread has no task ledger"
       : `its task ledger "${clip(ledger.title, TITLE_MAX_CHARS)}" is closed`;
-  return `${denied} ${why}, so ${tool} is denied. Write the plan first with mcp__t3-code__ledger_create (a deferred tool: load it first with ToolSearch query select:mcp__t3-code__ledger_create): each item with what done means (one item is fine for a small change). If the task earns more structure than solo, propose a loadout with mcp__t3-code__t3_loadout_propose. Then work through the items, closing each with evidence. Reading and searching stay allowed.`;
+  return `${denied} ${why}, so ${tool} is denied. Write the ledger first with mcp__t3-code__ledger_create (a deferred tool: load it first with ToolSearch query select:mcp__t3-code__ledger_create): the user's asks as top-level items, each with their words as quote and what done means, and your plan steps under them (one ask is fine for a small change). If the task earns more structure than solo, propose a loadout with mcp__t3-code__t3_loadout_propose. Then work through the items, closing each with evidence. Reading and searching stay allowed.`;
 }
 
 /**
@@ -551,6 +552,7 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
         // First, so every stop's report replaces the last, whatever this hook decides.
         port.onSessionCrons?.(input.session_crons ?? []);
         if (waitsOnBackgroundWork(input, port.isAmbientTask)) return {};
+        if (asksTheUser(input.last_assistant_message)) return {};
         const state = await readLedgerState(signal);
         // Past the deadline the stop was already allowed, so no block may be counted for it.
         if (signal.aborted) return {};

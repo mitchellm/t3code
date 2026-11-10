@@ -135,6 +135,7 @@ import {
 import * as Metrics from "../observability/Metrics.ts";
 import {
   type BackgroundJudgementPorts,
+  judgeThreadPrompts,
   requestJudgement,
   settleBackgroundJudgement,
   startBackgroundJudgement,
@@ -2278,7 +2279,7 @@ const make = Effect.gen(function* () {
           ),
       userMessages: (threadId) =>
         threadManagement.getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] }).pipe(
-          Effect.map(({ messages }) => messages.map(({ text }) => text)),
+          Effect.map(({ messages }) => judgeThreadPrompts(messages)),
           Effect.mapError(threadManagementFailure),
         ),
       checkpoints: () =>

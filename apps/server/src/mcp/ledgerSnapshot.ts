@@ -66,6 +66,7 @@ export function snapshotLedger(
         id: item.id,
         title: item.title,
         acceptance: item.acceptance,
+        ...(item.quote === undefined ? {} : { quote: item.quote }),
         status: item.status,
         depth,
         parentItemId: item.parentItemId ?? null,

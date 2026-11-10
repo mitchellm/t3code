@@ -1257,3 +1257,171 @@ it.effect("gives a failing live settle up after a bounded number of tries", () =
     assert.equal(flaky.attempts(), LedgerJudgeService.SETTLE_ATTEMPTS);
   }).pipe(Effect.provide(Layer.merge(layerTest, flaky.layer)));
 });
+
+/** A judged ledger whose item "a" is in progress with some evidence, and a second item to keep it open. */
+const judgedWorkInProgress = (name: string) =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread(name);
+    yield* setLoadout(threadId, judged);
+    yield* createLedger(threadId, { items: ["a", "b"] });
+    yield* updateItem(threadId, "a", { status: "in_progress", createdBy: "agent" });
+    yield* updateItem(threadId, "a", { evidence: "half done", createdBy: "agent" });
+    return threadId;
+  });
+
+it.effect("a judge's pass on deferring work does not let a later close skip the judge", () =>
+  Effect.gen(function* () {
+    const threadId = yield* judgedWorkInProgress("defer-pass-revive");
+    yield* updateItem(threadId, "a", {
+      status: "deferred",
+      deferReason: "waits on a cookie",
+      createdBy: "agent",
+    });
+    yield* recordVerdict(threadId, "a", "pass");
+    assert.equal(itemOf(yield* ledgerOf(threadId), "a")?.status, "deferred");
+
+    // Revived and closed on the same evidence, the work itself has never been judged.
+    yield* updateItem(threadId, "a", { status: "open", createdBy: "agent" });
+    yield* updateItem(threadId, "a", { status: "in_progress", createdBy: "agent" });
+    yield* updateItem(threadId, "a", { status: "closed", createdBy: "agent" });
+    const item = itemOf(yield* ledgerOf(threadId), "a");
+    assert.equal(item?.status, "in_progress");
+    assert.equal(item?.judging, true);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a passed defer handed back because work came to depend on it keeps the judge gate", () =>
+  Effect.gen(function* () {
+    const threadId = yield* judgedWorkInProgress("defer-pass-handback");
+    yield* updateItem(threadId, "a", {
+      status: "deferred",
+      deferReason: "out of scope",
+      createdBy: "agent",
+    });
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "ledger.item.add",
+      commandId: nextCommandId(),
+      threadId,
+      ledgerId,
+      items: [{ ...draft("c"), blockedBy: [itemId("a")] }],
+    });
+    yield* recordVerdict(threadId, "a", "pass");
+    assert.equal(itemOf(yield* ledgerOf(threadId), "a")?.status, "in_progress");
+
+    yield* updateItem(threadId, "a", { status: "closed", createdBy: "agent" });
+    assert.equal(itemOf(yield* ledgerOf(threadId), "a")?.judging, true);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+const createAskLedger = (
+  threadId: ThreadId,
+  items: ReadonlyArray<{
+    readonly name: string;
+    readonly quote?: string;
+    readonly parent?: string;
+    readonly deferReason?: string;
+  }>,
+) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    return yield* orchestrator.dispatch({
+      type: "ledger.create",
+      commandId: nextCommandId(),
+      threadId,
+      ledgerId,
+      title: "Settlement into tooling",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: items.map((item) => ({
+        ...draft(item.name),
+        ...(item.quote === undefined ? {} : { quote: item.quote }),
+        ...(item.parent === undefined ? {} : { parentItemId: itemId(item.parent) }),
+        ...(item.deferReason === undefined ? {} : { deferReason: item.deferReason }),
+      })),
+      createdBy: "agent",
+    });
+  });
+
+it.effect("an agent cannot drop or defer one of the user's asks, while the user can", () =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread("asks-set-aside");
+    yield* createAskLedger(threadId, [
+      { name: "ask", quote: "It needs to be completely functional" },
+      { name: "step", parent: "ask" },
+    ]);
+    assert.equal(
+      itemOf(yield* ledgerOf(threadId), "ask")?.quote,
+      "It needs to be completely functional",
+    );
+    yield* updateItem(threadId, "ask", { status: "in_progress", createdBy: "agent" });
+    yield* assertRejected(
+      threadId,
+      updateItem(threadId, "ask", {
+        status: "deferred",
+        deferReason: "needs a cookie",
+        createdBy: "agent",
+      }),
+      "one of the user's asks",
+    );
+    yield* assertRejected(
+      threadId,
+      updateItem(threadId, "ask", {
+        status: "dropped",
+        dropReason: "too hard",
+        createdBy: "agent",
+      }),
+      "cannot drop it",
+    );
+    // A plan step under the ask is the agent's own and may still be set aside.
+    yield* updateItem(threadId, "step", {
+      status: "dropped",
+      dropReason: "not needed",
+      createdBy: "agent",
+    });
+    yield* updateItem(threadId, "ask", {
+      status: "dropped",
+      dropReason: "the user changed their mind",
+    });
+    assert.equal(itemOf(yield* ledgerOf(threadId), "ask")?.status, "dropped");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("the user's asks stay at the top level and cannot start deferred", () =>
+  Effect.gen(function* () {
+    const nested = yield* createThread("asks-nested");
+    yield* assertRejected(
+      nested,
+      createAskLedger(nested, [
+        { name: "top" },
+        { name: "ask", quote: "pull the 18+ split", parent: "top" },
+      ]),
+      "stays at the top level",
+    );
+    const deferred = yield* createThread("asks-deferred");
+    yield* assertRejected(
+      deferred,
+      createAskLedger(deferred, [
+        { name: "ask", quote: "pull the 18+ split", deferReason: "later" },
+      ]),
+      "cannot start deferred",
+    );
+    const moved = yield* createThread("asks-moved");
+    yield* createAskLedger(moved, [{ name: "top" }, { name: "ask", quote: "pull the 18+ split" }]);
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* assertRejected(
+      moved,
+      orchestrator.dispatch({
+        type: "ledger.item.update",
+        commandId: nextCommandId(),
+        threadId: moved,
+        ledgerId,
+        itemId: itemId("ask"),
+        parentItemId: itemId("top"),
+        createdBy: "agent",
+      }),
+      "stays at the top level",
+    );
+  }).pipe(Effect.provide(layerTest)),
+);

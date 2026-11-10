@@ -277,6 +277,45 @@ it.effect("enqueues one follow-up naming the open items after a completed run", 
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("waits for the user's answer when the run ended by asking them a question", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("asked");
+    yield* sendUserMessage(threadId);
+    const run = yield* latestRun(threadId);
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const messageId = MessageId.make(nextId("assistant-message"));
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(nextId("event:assistant-message")),
+          type: "message.updated",
+          threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: {
+            id: messageId,
+            threadId,
+            runId: run.id,
+            nodeId: null,
+            role: "assistant",
+            text: "Should the asks count include deferred ones?\n\n- Yes: counts them as done\n- No: leaves them open",
+            attachments: [],
+            streaming: false,
+            createdBy: "agent",
+            creationSource: "provider",
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      ],
+    });
+    yield* completeLatest(threadId);
+
+    assert.deepEqual(yield* autoContinues(threadId), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("lists actionable items before blocked ones and leaves deferred items out", () =>
   Effect.gen(function* () {
     const threadId = yield* setup("actionable", []);

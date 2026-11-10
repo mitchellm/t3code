@@ -10,6 +10,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import {
+  asksTheUser,
   isLedgerFollowUpRound,
   LEDGER_AUTO_CONTINUE_CAP,
   type LedgerAutoContinueDecision,
@@ -197,6 +198,12 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   // A stop that raced the provider's own completion still means the user wants this to end.
   if (userStoppedRunIds.has(run.id)) return;
   if (runtimeRequests.some((request) => request.status === "pending")) return;
+  // Fork: a run that ended by asking the user waits for their answer, not a "continue".
+  const { messages: replies } = yield* orchestrator.getThreadRecords(input.threadId, ["messages"], {
+    messageRoles: ["assistant"],
+    messageRunIds: [run.id],
+  });
+  if (asksTheUser(replies.at(-1)?.text)) return;
 
   const ordinalByRun = new Map(runs.map((candidate) => [candidate.id, candidate.ordinal]));
   const newestFirst = runs.toSorted((a, b) => b.ordinal - a.ordinal);

@@ -11,6 +11,7 @@ import {
 import {
   deriveLedgerPanel,
   formatLedgerPanelCount,
+  ledgerPanelFigure,
   shortModelLabel,
   type LedgerPanelRow,
   type LedgerRowBadge,
@@ -321,6 +322,14 @@ function ItemDetail({
   const setAsideReason = item.dropReason ?? item.deferReason ?? null;
   return (
     <div className="mt-1 mb-2 ms-6 flex flex-col gap-3 rounded-lg border border-border/70 bg-muted/30 p-3 text-xs">
+      {item.quote === undefined ? null : (
+        <div className="flex flex-col gap-1">
+          <SectionLabel>You asked</SectionLabel>
+          <blockquote className="m-0 border-s-2 border-border ps-2 break-words whitespace-pre-wrap text-foreground/90">
+            {item.quote}
+          </blockquote>
+        </div>
+      )}
       <div className="flex flex-col gap-1">
         <SectionLabel>Done when</SectionLabel>
         <p className="m-0 break-words whitespace-pre-wrap text-foreground/90">
@@ -374,17 +383,24 @@ function ItemRow({
             {item.id}
           </span>
           {/* Titles wrap rather than truncate: the point of the pane is to read them. */}
-          <span
-            className={cn(
-              "min-w-0 flex-1 break-words",
-              item.status === "dropped"
-                ? "text-muted-foreground line-through"
-                : item.status === "closed"
-                  ? "text-foreground/70"
-                  : "text-foreground",
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span
+              className={cn(
+                "break-words",
+                item.status === "dropped"
+                  ? "text-muted-foreground line-through"
+                  : item.status === "closed"
+                    ? "text-foreground/70"
+                    : "text-foreground",
+              )}
+            >
+              {item.title}
+            </span>
+            {item.quote === undefined ? null : (
+              <span className="line-clamp-2 break-words text-xs text-muted-foreground">
+                “{item.quote}”
+              </span>
             )}
-          >
-            {item.title}
           </span>
           {row.badges.length === 0 ? null : (
             <span className="flex shrink-0 flex-wrap justify-end gap-1">
@@ -478,6 +494,7 @@ function LedgerOverview({
   panel: ReturnType<typeof deriveLedgerPanel>;
 }) {
   const { count } = panel;
+  const figure = ledgerPanelFigure(count);
   const hasGoal = ledger.startState.trim() !== "" || ledger.winConditions.length > 0;
   // One segment per item in plan order, so the bar shows where the work is, not only how much.
   const segments = ledger.items.filter((item) => item.parentItemId === undefined);
@@ -493,8 +510,8 @@ function LedgerOverview({
       </div>
       <div className="flex items-baseline gap-2">
         <span className="text-2xl leading-none font-semibold tabular-nums">
-          {count.done}
-          <span className="text-base text-muted-foreground"> / {count.total}</span>
+          {figure.done}
+          <span className="text-base text-muted-foreground"> / {figure.total}</span>
         </span>
         <span className="min-w-0 text-xs text-muted-foreground">
           {formatLedgerPanelCount(count)}

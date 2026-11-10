@@ -152,7 +152,9 @@ export function ThreadLedgerCard({ threadRef }: { threadRef: ScopedThreadRef }) 
         >
           <span className="truncate">Task ledger</span>
           <span className="tabular-nums text-muted-foreground/80">
-            {progress.closed}/{progress.scope}
+            {progress.asks === null
+              ? `${progress.closed}/${progress.scope}`
+              : `${progress.asks.done}/${progress.asks.total} asks`}
           </span>
           <span className="sr-only">{formatLedgerProgress(progress)}</span>
         </button>
@@ -216,7 +218,9 @@ export function ThreadLedgerHeaderProgress({ threadRef }: { threadRef: ScopedThr
   return (
     <Badge variant="info" size="sm">
       <span aria-hidden>
-        Ledger {progress.closed}/{progress.scope}
+        {progress.asks === null
+          ? `Ledger ${progress.closed}/${progress.scope}`
+          : `Asks ${progress.asks.done}/${progress.asks.total}`}
       </span>
       <span className="sr-only">Task ledger: {formatLedgerProgress(progress)}</span>
     </Badge>

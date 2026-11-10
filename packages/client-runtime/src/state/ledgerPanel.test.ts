@@ -23,6 +23,7 @@ import {
   deriveLedgerAgentCard,
   deriveLedgerPanel,
   formatLedgerPanelCount,
+  ledgerPanelFigure,
   ledgerAgentEffort,
   shortModelLabel,
   type LedgerAgentLine,
@@ -125,6 +126,23 @@ describe("deriveLedgerPanel count", () => {
     );
     expect(panel.count).toMatchObject({ done: 1, total: 3, addedSincePlan: 2, deferred: 1 });
     expect(formatLedgerPanelCount(panel.count)).toBe("done · 2 added since the plan · 1 deferred");
+  });
+
+  it("leads with the user's asks when the ledger quotes them, items after", () => {
+    const panel = deriveLedgerPanel(
+      ledgerOf([
+        item("A1", "closed", { quote: "make the ledger help" }),
+        item("A2", "open", { quote: "show my asks" }),
+        item("S1", "closed", { parentItemId: id("A2") }),
+        item("S2", "in_progress", { parentItemId: id("A2") }),
+      ]),
+      [],
+    );
+    expect(ledgerPanelFigure(panel.count)).toMatchObject({ done: 1, total: 2 });
+    expect(formatLedgerPanelCount(panel.count)).toBe("asks done · 2 of 4 items");
+    const plain = deriveLedgerPanel(ledgerOf([item("A", "closed"), item("B", "open")]), []);
+    expect(ledgerPanelFigure(plain.count)).toMatchObject({ done: 1, total: 2 });
+    expect(formatLedgerPanelCount(plain.count)).toBe("done");
   });
 
   it("follows the ledger as items close, and has nothing to measure when empty", () => {

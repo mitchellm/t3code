@@ -17,7 +17,13 @@ export interface LedgerProgress {
   readonly remaining: number;
   /** The ledger has unfinished work: not closed, and an item is open or in progress. */
   readonly active: boolean;
+  /** The user's own asks still in scope, or null when the ledger quotes none. */
+  readonly asks: { readonly done: number; readonly total: number } | null;
 }
+
+/** One of the user's asks: a top-level item carrying their words. */
+const isLedgerAsk = (item: Pick<LedgerItem, "quote" | "parentItemId">): boolean =>
+  item.quote !== undefined && item.parentItemId === undefined;
 
 const LEDGER_ITEM_STATUS_LABELS: Record<LedgerItemStatus, string> = {
   open: "Open",
@@ -42,7 +48,15 @@ export function deriveLedgerProgress(ledger: Ledger): LedgerProgress {
   };
   for (const item of ledger.items) counts[item.status] += 1;
   const remaining = counts.open + counts.in_progress;
+  // Only the user can set an ask aside, and then it is out of scope like any other item.
+  const asks = ledger.items.filter(
+    (item) => isLedgerAsk(item) && item.status !== "dropped" && item.status !== "deferred",
+  );
   return {
+    asks:
+      asks.length === 0
+        ? null
+        : { done: asks.filter((item) => item.status === "closed").length, total: asks.length },
     total: ledger.items.length,
     closed: counts.closed,
     dropped: counts.dropped,
@@ -66,7 +80,12 @@ export function formatLedgerProgress(progress: LedgerProgress): string {
   if (progress.scope === 0) {
     return progress.deferred === 0 ? `All ${progress.dropped} dropped` : setAside.join(" · ");
   }
-  return [`${progress.closed} of ${progress.scope} done`, ...setAside].join(" · ");
+  const items = `${progress.closed} of ${progress.scope}`;
+  const done =
+    progress.asks === null
+      ? `${items} done`
+      : `${progress.asks.done} of ${progress.asks.total} asks done · ${items} items`;
+  return [done, ...setAside].join(" · ");
 }
 
 type LedgerTaskRecord = Pick<

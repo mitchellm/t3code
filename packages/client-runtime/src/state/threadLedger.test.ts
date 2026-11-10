@@ -105,6 +105,29 @@ describe("formatLedgerProgress", () => {
     expect(deriveLedgerProgress(ledgerOf(["closed", "deferred"])).active).toBe(false);
   });
 
+  it("leads with the user's asks, counting only top-level quoted items in scope", () => {
+    const ask = (id: string, status: LedgerItem["status"]): LedgerItem => ({
+      ...item(id, status),
+      quote: `the user's words for ${id}`,
+    });
+    const ledger: Ledger = {
+      ...ledgerOf([]),
+      items: [
+        ask("A1", "closed"),
+        ask("A2", "in_progress"),
+        { ...item("S1", "closed"), parentItemId: LedgerItemId.make("A2") },
+        { ...item("S2", "open"), parentItemId: LedgerItemId.make("A2") },
+        // The user set this one aside, so it is out of scope like any other item.
+        ask("A3", "deferred"),
+        item("plain", "open"),
+      ],
+    };
+    const progress = deriveLedgerProgress(ledger);
+    expect(progress.asks).toEqual({ done: 1, total: 2 });
+    expect(formatLedgerProgress(progress)).toBe("1 of 2 asks done · 2 of 5 items · 1 deferred");
+    expect(deriveLedgerProgress(ledgerOf(["open"])).asks).toBeNull();
+  });
+
   it("handles a ledger with no items and one where everything was dropped", () => {
     expect(formatLedgerProgress(deriveLedgerProgress(ledgerOf([])))).toBe("No items yet");
     expect(formatLedgerProgress(deriveLedgerProgress(ledgerOf(["dropped", "dropped"])))).toBe(

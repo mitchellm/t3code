@@ -15,7 +15,40 @@ import {
   decideLedgerAutoContinue,
   LEDGER_AUTO_CONTINUE_CAP,
   type LedgerDomainEvent,
+  unquotedAsk,
 } from "./taskLedger.ts";
+
+describe("unquotedAsk", () => {
+  const said = [
+    "I want to take the settlement page, import it into the pet-simulator tooling.\nIt needs to be **completely functional**.",
+  ];
+
+  it("accepts the user's words despite case, punctuation, markdown and line breaks", () => {
+    expect(
+      unquotedAsk(
+        [
+          { id: "A1", quote: "import it into the pet-simulator tooling" },
+          { id: "A2", quote: "It needs to be “completely functional”" },
+          { id: "S1" },
+        ],
+        said,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("names the first ask whose words the user never wrote", () => {
+    expect(
+      unquotedAsk(
+        [
+          { id: "A1", quote: "import it into the tooling" },
+          { id: "A2", quote: "make it fast" },
+        ],
+        said,
+      )?.id,
+    ).toBe("A1");
+    expect(unquotedAsk([{ id: "A1", quote: "..." }], said)?.id).toBe("A1");
+  });
+});
 
 const at = (seconds: number) => DateTime.makeUnsafe(Date.UTC(2026, 0, 1, 0, 0, seconds));
 const threadId = ThreadId.make("thread:ledger-reducer");

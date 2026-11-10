@@ -340,6 +340,42 @@ it.effect(
   },
 );
 
+it.effect("accepts an ask only when its quote is something a person wrote on the thread", () => {
+  const said = (createdBy: "user" | "agent", text: string) =>
+    ({
+      id: MessageId.make(`message:${createdBy}`),
+      runId: RunId.make(`run:${createdBy}`),
+      role: "user",
+      text,
+      createdAt: NOW,
+      createdBy,
+      creationSource: createdBy === "user" ? "web" : "server",
+    }) as unknown as OrchestrationV2ConversationMessage;
+  const fake = makeFakeThreads();
+  fake.messages.set(ownThread, [
+    said("user", "Import the settlement page. It needs to be completely functional."),
+    said("agent", "Also make it fast."),
+  ]);
+  const ask = (quote: string) => ({
+    title: "Settlement",
+    items: [
+      { id: "A1", title: "Fully working", acceptance: "a live re-pull shows the totals", quote },
+    ],
+  });
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      const invented = yield* call("ledger_create", ask("make it fast"));
+      expect(failureOf(invented)?.message).toContain("not in anything the user wrote");
+      expect(fake.ledgers.get(ownThread)).toBeUndefined();
+      const quoted = yield* call("ledger_create", ask("it needs to be completely functional"));
+      expect(failureOf(quoted)).toBeUndefined();
+      expect(fake.ledgers.get(ownThread)?.items[0]?.quote).toBe(
+        "it needs to be completely functional",
+      );
+    }),
+  );
+});
+
 it.effect("reads a thread with no ledger as null", () =>
   withServer(makeFakeThreads(), (call) =>
     Effect.gen(function* () {

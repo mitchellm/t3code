@@ -22,7 +22,11 @@ import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 
 import { formatModelSelectionEffort, REASONING_EFFORT_OPTION_IDS } from "./threadExecution.ts";
-import { deriveLedgerItemTasks, deriveLedgerProgress } from "./threadLedger.ts";
+import {
+  deriveLedgerItemTasks,
+  deriveLedgerProgress,
+  type LedgerProgress,
+} from "./threadLedger.ts";
 import type { EnvironmentThreadState } from "./threadState.ts";
 
 /** What the panel reads of a linked task: its live state on the thread, never its prompt. */
@@ -77,6 +81,8 @@ export interface LedgerPanelCount {
   readonly addedSincePlan: number;
   readonly dropped: number;
   readonly deferred: number;
+  /** The user's own asks, which lead the count when the ledger quotes any. */
+  readonly asks: LedgerProgress["asks"];
 }
 
 export interface LedgerPanel {
@@ -245,6 +251,7 @@ export function deriveLedgerPanel(
       addedSincePlan,
       dropped: progress.dropped,
       deferred: progress.deferred,
+      asks: progress.asks,
     },
     checkpoints: {
       reached: ledger.checkpoints.filter((checkpoint) => checkpoint.reached).length,
@@ -256,11 +263,14 @@ export function deriveLedgerPanel(
   };
 }
 
+/** The figure the count leads with: the user's asks when the ledger quotes any, else its items. */
+export const ledgerPanelFigure = (count: LedgerPanelCount) => count.asks ?? count;
+
 /** The words after the "done / total" figure. */
 export function formatLedgerPanelCount(count: LedgerPanelCount): string {
   if (count.total === 0 && count.dropped === 0 && count.deferred === 0) return "No items yet";
   return [
-    "done",
+    count.asks === null ? "done" : `asks done · ${count.done} of ${count.total} items`,
     count.addedSincePlan > 0 ? `${count.addedSincePlan} added since the plan` : null,
     count.deferred > 0 ? `${count.deferred} deferred` : null,
     count.dropped > 0 ? `${count.dropped} dropped` : null,

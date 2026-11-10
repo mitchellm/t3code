@@ -22,6 +22,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import { unquotedAsk } from "@t3tools/shared/taskLedger";
 
 import {
   investigationSpawnGuard,
@@ -271,10 +272,33 @@ const make = Effect.gen(function* () {
       changedItemIds,
     );
 
+  // Fork: an ask must quote what a person actually wrote on this thread.
+  const checkQuotes = Effect.fn("LedgerMcpService.checkQuotes")(function* (
+    scope: McpInvocationScope,
+    items: ReadonlyArray<{ readonly id: string; readonly quote?: string }>,
+  ) {
+    if (!items.some((item) => item.quote !== undefined)) return;
+    const { threadId } = yield* loadOwnLedger(scope);
+    const { messages } = yield* threads
+      .getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] })
+      .pipe(Effect.mapError(unavailable));
+    const missing = unquotedAsk(
+      items,
+      messages.filter((message) => message.createdBy === "user").map((message) => message.text),
+    );
+    if (missing !== undefined) {
+      return yield* failure(
+        "invalid_request",
+        `Item ${missing.id}'s quote is not in anything the user wrote on this thread: "${missing.quote}". Copy their words exactly, or leave quote out for a plan step of your own.`,
+      );
+    }
+  });
+
   const create = Effect.fn("LedgerMcpService.create")(function* (
     scope: McpInvocationScope,
     input: LedgerMcpCreateInput,
   ) {
+    yield* checkQuotes(scope, input.items);
     const args = { ...input, clientRequestId: undefined };
     return yield* write(
       scope,
@@ -321,6 +345,7 @@ const make = Effect.gen(function* () {
     scope: McpInvocationScope,
     input: LedgerMcpAddItemsInput,
   ) {
+    yield* checkQuotes(scope, input.items);
     return yield* onExisting(
       "add-items",
       scope,
