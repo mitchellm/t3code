@@ -63,6 +63,7 @@ const CLAUDE_HOST_SESSION_VARIABLES = [
 ];
 
 export const CLAUDE_WORKFLOW_MAX_CONCURRENT_AGENTS_DEFAULT = "32";
+const CLAUDE_MODEL_CAPABILITIES_DEFAULT = "-mid_conv_system";
 
 /**
  * Base env for the Claude processes T3 Code runs, before `makeClaudeEnvironment`.
@@ -77,6 +78,10 @@ export const mergeClaudeProcessEnvironment = Effect.fn("mergeClaudeProcessEnviro
     // Fork: Claude Code runs 8 workflow agents at a time by default, which serializes a research
     // run's fan-out. The host, the instance environment and settings.json env all still win.
     CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: CLAUDE_WORKFLOW_MAX_CONCURRENT_AGENTS_DEFAULT,
+    // Fork: Claude Code 2.1.321 sends per-turn reminders as a system message after the user turn,
+    // which moves the cache breakpoint and re-writes ~7k tokens every turn. This keeps them in the
+    // user message, as older engines did; older engines ignore the variable.
+    CLAUDE_CODE_MODEL_CAPABILITIES: CLAUDE_MODEL_CAPABILITIES_DEFAULT,
     ...hostEnvironment,
     CLAUDE_CODE_ENTRYPOINT: "t3-code",
   };
