@@ -376,6 +376,46 @@ it.effect("accepts an ask only when its quote is something a person wrote on the
   );
 });
 
+it.effect("accepts an ask quoting the task another agent or the CLI sent, never a wake", () => {
+  const sent = (id: string, text: string, extra: Record<string, unknown> = {}) =>
+    ({
+      id: MessageId.make(`message:${id}`),
+      runId: RunId.make(`run:${id}`),
+      role: "user",
+      text,
+      createdAt: NOW,
+      createdBy: "agent",
+      creationSource: "mcp",
+      ...extra,
+    }) as unknown as OrchestrationV2ConversationMessage;
+  const fake = makeFakeThreads();
+  fake.messages.set(ownThread, [
+    // `t3 thread start` and t3_thread_launch store the task this way: nobody typed it here.
+    sent("task", "Port the raffle machine. Keep the old ticket names working."),
+    sent("wake", "Delegated task finished: the importer now retries twice.", {
+      notification: { summary: "Delegated task finished", source: { kind: "delegated_task" } },
+    }),
+    sent("continue", "Continue the task ledger: polish the copy.", { creationSource: "server" }),
+  ]);
+  const ask = (quote: string) => ({
+    title: "Raffle",
+    items: [{ id: "A1", title: "Ported", acceptance: "old ticket names still redeem", quote }],
+  });
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      for (const invented of ["the importer now retries twice", "polish the copy"]) {
+        const refused = yield* call("ledger_create", ask(invented));
+        expect(failureOf(refused)?.message).toContain("not in anything the user wrote");
+      }
+      const quoted = yield* call("ledger_create", ask("Keep the old ticket names working"));
+      expect(failureOf(quoted)).toBeUndefined();
+      expect(fake.ledgers.get(ownThread)?.items[0]?.quote).toBe(
+        "Keep the old ticket names working",
+      );
+    }),
+  );
+});
+
 it.effect("reads a thread with no ledger as null", () =>
   withServer(makeFakeThreads(), (call) =>
     Effect.gen(function* () {

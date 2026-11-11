@@ -11,6 +11,7 @@ import {
   type LedgerMcpUpdateItemInput,
   type LedgerMcpWriteResult,
   OrchestratorMcpFailure,
+  type OrchestrationV2ConversationMessage,
   type OrchestrationV2ServerCommand,
   type ProjectId,
   type ThreadId,
@@ -272,7 +273,14 @@ const make = Effect.gen(function* () {
       changedItemIds,
     );
 
-  // Fork: an ask must quote what a person actually wrote on this thread.
+  // Fork: an ask must quote what this thread was asked. A task that another agent or the CLI sent
+  // (a launched thread, `t3 thread start`) is stored as agent-authored though nobody typed it
+  // here, so authorship cannot be the test. What never counts is what the server wrote itself:
+  // wakes carry a notification, and its follow-ups come from the server.
+  const wasAsked = (message: OrchestrationV2ConversationMessage) =>
+    message.createdBy === "user" ||
+    (message.notification === undefined && message.creationSource !== "server");
+
   const checkQuotes = Effect.fn("LedgerMcpService.checkQuotes")(function* (
     scope: McpInvocationScope,
     items: ReadonlyArray<{ readonly id: string; readonly quote?: string }>,
@@ -284,7 +292,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError(unavailable));
     const missing = unquotedAsk(
       items,
-      messages.filter((message) => message.createdBy === "user").map((message) => message.text),
+      messages.filter(wasAsked).map((message) => message.text),
     );
     if (missing !== undefined) {
       return yield* failure(
