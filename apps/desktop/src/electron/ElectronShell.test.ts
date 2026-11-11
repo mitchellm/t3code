@@ -93,6 +93,43 @@ describe("ElectronShell", () => {
     }).pipe(Effect.provide(ElectronShell.layer)),
   );
 
+  it.effect("opens Roblox play links for one place", () =>
+    Effect.gen(function* () {
+      openExternalMock.mockResolvedValue(undefined);
+
+      const urls = [
+        "roblox://placeId=78825617090715",
+        "roblox://experiences/start?placeId=78825617090715&launchData=abc",
+      ];
+      const electronShell = yield* ElectronShell.ElectronShell;
+      const results = yield* Effect.forEach(urls, (url) => electronShell.openExternal(url));
+
+      assert.deepEqual(results, [true, true]);
+      assert.deepEqual(
+        openExternalMock.mock.calls,
+        urls.map((url) => [url]),
+      );
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
+
+  it.effect("does not open other Roblox scheme URLs", () =>
+    Effect.gen(function* () {
+      openExternalMock.mockResolvedValue(undefined);
+
+      const electronShell = yield* ElectronShell.ElectronShell;
+      const results = yield* Effect.all([
+        electronShell.openExternal("roblox://"),
+        electronShell.openExternal("roblox://placeId=abc"),
+        electronShell.openExternal("roblox://placeId=1 --flag"),
+        electronShell.openExternal("roblox-player:1+launchmode:play"),
+        electronShell.openExternal("roblox://navigation/game_details?gameId=1"),
+      ]);
+
+      assert.deepEqual(results, [false, false, false, false, false]);
+      assert.equal(openExternalMock.mock.calls.length, 0);
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
+
   it.effect("does not open unsafe external URLs", () =>
     Effect.gen(function* () {
       const electronShell = yield* ElectronShell.ElectronShell;

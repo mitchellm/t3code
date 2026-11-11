@@ -134,6 +134,7 @@ import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 import {
   resolveInlineCodeFileLinkMeta,
   resolveMarkdownFileLinkMeta,
+  isRobloxPlayHref,
   rewriteMarkdownFileUriHref,
   type MarkdownFileLinkMeta,
 } from "../markdown-links";
@@ -406,6 +407,7 @@ function markdownUrlTransform(href: string) {
   if (parseComposerContextHref(href)) return href;
   if (parseThreadLinkHref(href)) return href;
   if (isWindowsDrivePathHref(href)) return href;
+  if (isRobloxPlayHref(href)) return href;
   return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
 }
 
@@ -1239,6 +1241,20 @@ const CHAT_MARKDOWN_COMPONENTS = {
             onClick?.(event);
             if (isSameDocumentLink && href) {
               handleMarkdownFragmentClick(event, href);
+              return;
+            }
+            if (isRobloxPlayHref(href)) {
+              if (!isElectron || event.defaultPrevented) return;
+              event.preventDefault();
+              event.stopPropagation();
+              void readLocalApi()
+                ?.shell.openExternal(href)
+                .catch((cause) =>
+                  reportMarkdownActionFailure(
+                    { operation: "open-link-external", target: href },
+                    cause,
+                  ),
+                );
               return;
             }
             if (

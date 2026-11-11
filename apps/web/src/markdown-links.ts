@@ -33,6 +33,14 @@ export function shouldOpenMarkdownFileLinkInBrowserByDefault(path: string): bool
   return /\.pdf$/i.test(path.split(/[?#]/, 1)[0] ?? "");
 }
 
+// Same shapes the desktop shell opens: roblox://placeId=<id> and roblox://experiences/start?placeId=<id>.
+const ROBLOX_PLAY_HREF =
+  /^roblox:\/\/(?:placeId=\d+|experiences\/start\?placeId=\d+)(?:&[\w.%-]+=[\w.%-]*)*$/i;
+
+export function isRobloxPlayHref(href: string | undefined): href is string {
+  return href !== undefined && ROBLOX_PLAY_HREF.test(href);
+}
+
 export function rewriteMarkdownFileUriHref(href: string | undefined): string | null {
   if (!href) return null;
   const target = parseFileUrlHref(normalizeMarkdownLinkDestination(href));

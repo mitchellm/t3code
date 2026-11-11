@@ -37,9 +37,18 @@ const isRemoteEditorUrl = (url: URL) =>
         url.pathname.startsWith("/ssh-remote+") &&
         url.pathname.length > "/ssh-remote+".length);
 
+// Roblox play links launch the Roblox client at one place: roblox://placeId=<id> and
+// roblox://experiences/start?placeId=<id>, with plain key=value extras. Nothing else on the scheme.
+const ROBLOX_PLAY_URL =
+  /^roblox:\/\/(?:placeId=\d+|experiences\/start\?placeId=\d+)(?:&[\w.%-]+=[\w.%-]*)*$/i;
+
 export function parseSafeExternalUrl(rawUrl: unknown): Option.Option<string> {
   if (typeof rawUrl !== "string") {
     return Option.none();
+  }
+
+  if (ROBLOX_PLAY_URL.test(rawUrl)) {
+    return Option.some(rawUrl);
   }
 
   try {

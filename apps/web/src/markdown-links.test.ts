@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  isRobloxPlayHref,
   resolveInlineCodeFileLinkMeta,
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
@@ -10,6 +11,27 @@ import {
   markdownFileEditorTarget,
   resolveMarkdownFileHostPath,
 } from "./markdownFileHostPath";
+
+describe("isRobloxPlayHref", () => {
+  it("accepts the two play link shapes for one place", () => {
+    expect(isRobloxPlayHref("roblox://placeId=78825617090715")).toBe(true);
+    expect(isRobloxPlayHref("roblox://experiences/start?placeId=1&launchData=abc")).toBe(true);
+  });
+
+  it("rejects other roblox scheme links and look-alikes", () => {
+    for (const href of [
+      undefined,
+      "roblox://",
+      "roblox://placeId=abc",
+      "roblox://placeId=1 --flag",
+      "roblox://navigation/game_details?gameId=1",
+      "roblox-player:1+launchmode:play",
+      "https://www.roblox.com/games/1",
+    ]) {
+      expect(isRobloxPlayHref(href)).toBe(false);
+    }
+  });
+});
 
 describe("rewriteMarkdownFileUriHref", () => {
   it("preserves encoded octets so file paths are decoded only once later", () => {
