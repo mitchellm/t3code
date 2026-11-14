@@ -101,6 +101,46 @@ describe("command permissions", () => {
     ),
   );
 
+  it.effect(
+    "checks retro actions before recommendations load and respects destination grants",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const registry = yield* setup;
+          const resolve = createCommandPermissions(
+            runtime,
+            ORCHESTRATION_V2_WS_METHODS.resolveTaskRetro,
+          );
+          const apply = { action: "apply" };
+          const dismiss = { action: "dismiss" };
+          registry.set(sessions(env), AsyncResult.success(grant(true)));
+          expect(registry.get(resolve.permissionAtom(env, apply))).toBe(false);
+          expect(registry.get(resolve.permissionAtom(env, dismiss))).toBe(true);
+          expect((yield* resolve.authorize(registry, env, apply).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+          yield* resolve.authorize(registry, env, dismiss);
+
+          registry.set(
+            sessions(env),
+            AsyncResult.success({
+              ...grant(true),
+              scopes: [AuthOrchestrationOperateScope, AuthSettingsWriteScope],
+              permissions: [AuthOrchestrationOperateScope, AuthSettingsWriteScope],
+            }),
+          );
+          expect(registry.get(resolve.permissionAtom(env, apply))).toBe(true);
+          yield* resolve.authorize(registry, env, apply);
+          registry.set(sessions(other), AsyncResult.success(grant(false)));
+          expect(registry.get(resolve.permissionAtom(other, apply))).toBe(false);
+          expect(registry.get(resolve.permissionAtom(other, dismiss))).toBe(false);
+          expect((yield* resolve.authorize(registry, other, apply).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+        }),
+      ),
+  );
+
   it.effect("requires the destination preview grant to close a browser tab", () =>
     Effect.scoped(
       Effect.gen(function* () {

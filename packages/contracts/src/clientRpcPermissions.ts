@@ -85,7 +85,10 @@ export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 
 const decodePrepareThread = Schema.decodeUnknownSync(GitPreparePullRequestThreadInput);
 const decodeStackedAction = Schema.decodeUnknownSync(GitRunStackedActionInput);
-const decodeResolveRetro = Schema.decodeUnknownSync(OrchestrationResolveTaskRetroInput);
+// Availability is checked before a recommendation exists; only its action determines scopes.
+const decodeResolveRetro = Schema.decodeUnknownSync(
+  Schema.Struct({ action: OrchestrationResolveTaskRetroInput.fields.action }),
+);
 
 export function clientRpcRequiredScopes(
   method: string,

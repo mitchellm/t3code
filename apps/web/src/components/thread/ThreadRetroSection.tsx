@@ -149,13 +149,13 @@ export function ThreadRetroSection({
   );
   // Applying can edit the project's loadouts, so it needs the settings-write scope as well; the
   // input says which, as the server's own check does.
-  const applyInput = { threadId: threadRef.threadId, recommendationId: "", action: "apply" };
   const canApply = useAtomValue(
-    orchestrationEnvironment.resolveTaskRetro.permissionAtom(threadRef.environmentId, applyInput),
+    orchestrationEnvironment.resolveTaskRetro.permissionAtom(threadRef.environmentId, {
+      action: "apply",
+    }),
   );
   const canDismiss = useAtomValue(
     orchestrationEnvironment.resolveTaskRetro.permissionAtom(threadRef.environmentId, {
-      ...applyInput,
       action: "dismiss",
     }),
   );
