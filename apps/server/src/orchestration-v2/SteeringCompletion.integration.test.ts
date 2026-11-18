@@ -1385,6 +1385,125 @@ it.effect("marks the model switch on a promoted message that restarts the turn",
   ),
 );
 
+// A run reads as running while its checkpoint baseline is captured, before the
+// provider turn exists. A steer sent then must wait for the turn, not fail.
+it.effect.each(
+  (["starting", "running"] as const).flatMap((status) =>
+    [false, true].map((promoted) => ({ status, promoted })),
+  ),
+)(
+  "delivers a steer sent before a $status run's provider turn starts (via queue: $promoted)",
+  ({ status, promoted }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(
+          `deferred-steer-${status}-${promoted}`,
+        );
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const threadId = yield* startFirstTurn;
+          const before = yield* orchestrator.getThreadProjection(threadId);
+          const run = before.runs[0]!;
+          const turn = before.providerTurns[0]!;
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("setup-run"),
+                type: "run.updated",
+                threadId,
+                occurredAt: now,
+                payload: { ...run, status },
+              },
+              {
+                id: EventId.make("setup-turn"),
+                type: "provider-turn.updated",
+                threadId,
+                occurredAt: now,
+                payload: { ...turn, status: "pending" },
+              },
+            ],
+          });
+          const messageId = MessageId.make("message:early-steer");
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("early-steer"),
+            threadId,
+            messageId,
+            text: "early steer",
+            attachments: [],
+            ...(promoted
+              ? { dispatchMode: { type: "queue_after_active" as const } }
+              : {
+                  dispatchMode: { type: "start_immediately" as const },
+                  deliveryIntent: "steer" as const,
+                }),
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+            (candidate) => candidate.userMessageId === messageId,
+          )!;
+          assert.equal(queued.status, "queued");
+          if (promoted) {
+            const promote = {
+              type: "queued-message.promote-to-steer" as const,
+              commandId: CommandId.make("promote"),
+              threadId,
+              queuedRunId: queued.id,
+              targetRunId: run.id,
+            };
+            yield* orchestrator.dispatch(promote);
+            // A repeated click is acknowledged, not applied twice.
+            yield* orchestrator.dispatch(promote);
+          }
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+              (candidate) => candidate.id === queued.id,
+            )?.steerWhenReadyRunId,
+            run.id,
+          );
+          yield* worker.drain();
+          assert.deepEqual(steered, []);
+
+          const delivered = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.id === queued.id &&
+                event.payload.status === "cancelled",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("ready-run"),
+                type: "run.updated",
+                threadId,
+                occurredAt: now,
+                payload: run,
+              },
+            ],
+          });
+          yield* Queue.offer(events, { type: "provider_turn.updated", driver, providerTurn: turn });
+          yield* Fiber.join(delivered);
+          yield* worker.drain();
+
+          assert.deepEqual(steered, ["early steer"]);
+          assert.lengthOf(started, 1);
+          const after = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(after.messages.find((message) => message.id === messageId)?.runId, run.id);
+          assert.equal(after.runs.find((candidate) => candidate.id === run.id)?.status, "running");
+        }).pipe(Effect.provide(layer));
+      }),
+    ),
+);
+
 it.effect("keeps a queued message queued when promoted into a run that Stop reached", () =>
   Effect.scoped(
     Effect.gen(function* () {

@@ -169,8 +169,15 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
       activeRun === null &&
       projection.thread.archivedAt == null &&
       projection.thread.deletedAt == null,
+    // Before the provider turn starts, the server holds a steer until the turn is running.
     canPromoteToSteer:
       promoteSkipsCompaction ||
+      ((activeRun?.status === "preparing" ||
+        activeRun?.status === "starting" ||
+        (activeRun?.status === "running" && !hasSteerableProviderTurn)) &&
+        (capabilities === undefined ||
+          capabilities.supportsActiveSteering ||
+          capabilities.supportsSteeringByInterruptRestart)) ||
       (hasSteerableProviderTurn &&
         (capabilities?.supportsActiveSteering === true ||
           capabilities?.supportsSteeringByInterruptRestart === true)),
