@@ -14,7 +14,7 @@ describe("T3 ledger instructions", () => {
   it("tell the agent its last ask is checked against the user's message when ledger_read shows askCheck", () => {
     assert.include(
       T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n"),
-      "When ledger_read shows askCheck, the last ask to close is first checked against the user's message by a fresh session: it closes on a pass, or comes back with what is still missing.",
+      "When ledger_read shows askCheck, the last ask to close is first checked against the user's message by a fresh session: it closes on a pass, or comes back with what is still missing. Give the user your full report when you close it: you are woken again only if something is missing.",
     );
   });
 

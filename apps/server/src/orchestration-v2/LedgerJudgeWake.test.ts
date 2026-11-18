@@ -59,6 +59,20 @@ describe("whether a judge verdict wakes the planner", () => {
     expect(wakes(ledger, PASS, false)).toBe(true);
   });
 
+  it("does not wake for a passed ask check that finishes the ledger, since the agent reported when it closed", () => {
+    const checked: Ledger = { ...ledgerOf(judging()), requiresJudge: false, askCheck: true };
+    const pass =
+      "C1: PASS - looked at the forwarded path and the CLI.\nC2: PASS - nothing else was asked; read the message again.\nVERDICT: PASS";
+    expect(wakes(checked, pass, false)).toBe(false);
+    expect(wakes(checked, pass, true)).toBe(false);
+    expect(
+      wakes(checked, "C1: FAIL - the forwarded wait still runs 10 minutes.\nVERDICT: FAIL", false),
+    ).toBe(true);
+    // A pass that leaves other work open still follows the usual rules.
+    const more: Ledger = { ...checked, items: [...checked.items, item("b", { status: "open" })] };
+    expect(wakes(more, pass, false)).toBe(true);
+  });
+
   it("wakes for a pass that unblocks an item or lets a parent close", () => {
     const blocked = ledgerOf(judging(), item("b", { blockedBy: [LedgerItemId.make("item:a")] }));
     expect(wakes(blocked, PASS, true)).toBe(true);
