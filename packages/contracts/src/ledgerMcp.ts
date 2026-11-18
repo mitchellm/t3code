@@ -140,6 +140,12 @@ export const LedgerMcpSnapshot = Schema.Struct({
     description:
       "True when an item closes only on a passing judge verdict. Closing such an item starts the judge automatically: the item shows judging, then closes on a pass or comes back in_progress with the judge's notes. Dropping or deferring an item already started is judged the same way.",
   }),
+  askCheck: Schema.optionalKey(
+    Schema.Literal(true).annotate({
+      description:
+        "Present when the last ask to close is first checked against the user's message by a fresh session: closing it shows judging, then it closes on a pass or comes back in_progress with what is still missing. Closing any other item is immediate.",
+    }),
+  ),
   counts: Schema.Struct({
     open: NonNegativeInt,
     in_progress: NonNegativeInt,

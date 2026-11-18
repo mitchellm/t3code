@@ -46,6 +46,39 @@ export function unquotedAsk<Item extends { readonly id: string; readonly quote?:
   });
 }
 
+/** Fork: whether `text` holds the words of any of `quotes`, compared as `unquotedAsk` does. */
+export function mentionsAnyQuote(text: string, quotes: ReadonlyArray<string>): boolean {
+  const said = quoteWords(text);
+  return quotes.some((quote) => {
+    const words = quoteWords(quote);
+    return words !== "" && said.includes(words);
+  });
+}
+
+/**
+ * Fork: an ask must quote what this thread was asked. A task that another agent or the CLI sent
+ * (a launched thread, `t3 thread start`) is stored as agent-authored though nobody typed it
+ * here, so authorship cannot be the test. What never counts is what the server wrote itself:
+ * wakes carry a notification, and its follow-ups come from the server.
+ */
+export const wasAsked = (
+  message: Pick<
+    OrchestrationV2ConversationMessage,
+    "createdBy" | "creationSource" | "notification"
+  >,
+): boolean =>
+  message.createdBy === "user" ||
+  (message.notification === undefined && message.creationSource !== "server");
+
+/**
+ * Fork: the items an ask check covers: the ledger's asks (items that quote the user), or its
+ * top-level items when none does. Sub-items are plan steps and never count.
+ */
+export function askCheckedItems(ledger: Pick<Ledger, "items">): ReadonlyArray<LedgerItem> {
+  const asks = ledger.items.filter((item) => item.quote !== undefined);
+  return asks.length > 0 ? asks : ledger.items.filter((item) => item.parentItemId === undefined);
+}
+
 export type LedgerAutoContinueDecision =
   | { readonly type: "idle" }
   | {

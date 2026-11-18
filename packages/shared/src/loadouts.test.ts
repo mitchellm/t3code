@@ -20,6 +20,7 @@ import {
   loadoutRoleTarget,
   loadoutStructure,
   matchRoleCandidate,
+  ownModelTarget,
   parseJudgeVerdict,
   resolveLoadout,
   strongerJudgeTarget,
@@ -342,6 +343,22 @@ describe("strongerJudgeTarget", () => {
     ).toEqual({
       providerInstanceId: claude,
       model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "high" }],
+    });
+  });
+});
+
+describe("ownModelTarget", () => {
+  it("names the thread's own model and the options it runs on", () => {
+    const own = { instanceId: claude, model: "claude-sonnet-5-5" };
+    expect(ownModelTarget(own)).toEqual({ providerInstanceId: claude, model: own.model });
+    expect(ownModelTarget({ ...own, options: [] })).toEqual({
+      providerInstanceId: claude,
+      model: own.model,
+    });
+    expect(ownModelTarget({ ...own, options: [{ id: "effort", value: "high" }] })).toEqual({
+      providerInstanceId: claude,
+      model: own.model,
       options: [{ id: "effort", value: "high" }],
     });
   });

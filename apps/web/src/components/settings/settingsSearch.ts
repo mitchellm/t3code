@@ -758,6 +758,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["task ledger plan first checklist edit files gate claude codex"],
   },
   {
+    id: "ask-check",
+    title: "Check finished work against your message",
+    to: "/settings/threads",
+    scope: "project-defaults",
+    searchTerms: [
+      "task ledger ask check verify finished work last ask fresh session judge missing",
+    ],
+  },
+  {
     id: "app-version",
     title: "Version",
     to: "/settings/about",

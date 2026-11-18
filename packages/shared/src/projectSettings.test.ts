@@ -70,6 +70,18 @@ describe("resolveProjectSettings", () => {
     expect(resolveProjectSettings(settings, otherProjectId).settings.defaultAutoPull).toBe(true);
   });
 
+  it("resolves the ask check per project, on unless a project turns it off", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectSettingsOverrides: { [projectId]: { askCheck: false } },
+    });
+    const off = resolveProjectSettings(settings, projectId);
+    expect(off.settings.askCheck).toBe(false);
+    expect(off.sources.askCheck).toBe("project");
+    const other = resolveProjectSettings(settings, otherProjectId);
+    expect(other.settings.askCheck).toBe(true);
+    expect(other.sources.askCheck).toBe("environment");
+  });
+
   it("honours the aggregate's own fields only until the server has folded them", () => {
     const aggregateModel = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.5");
     const project = {

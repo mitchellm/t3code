@@ -142,6 +142,21 @@ export function loadoutRoleCandidates(role: LoadoutRole): ReadonlyArray<{
   }));
 }
 
+/** A thread's own model, with the options it runs on, as a delegation target. */
+export function ownModelTarget(selection: {
+  readonly instanceId: LoadoutRole["instanceId"];
+  readonly model: string;
+  readonly options?: ReadonlyArray<ProviderOptionSelection> | undefined;
+}): OrchestratorMcpTarget {
+  return {
+    providerInstanceId: selection.instanceId,
+    model: selection.model,
+    ...(selection.options === undefined || selection.options.length === 0
+      ? {}
+      : { options: selection.options }),
+  };
+}
+
 /**
  * The judge for an item already failed twice: the role's fallback when it can run (configured as
  * the second opinion), else the planner's own model. A planner-model judge is accepted here
@@ -158,13 +173,8 @@ export function strongerJudgeTarget(
 ): OrchestratorMcpTarget {
   const fallback = loadout.roles.judge?.fallback;
   return (
-    (fallback === undefined ? undefined : loadoutRoleTarget(fallback, providers)) ?? {
-      providerInstanceId: planner.instanceId,
-      model: planner.model,
-      ...(planner.options === undefined || planner.options.length === 0
-        ? {}
-        : { options: planner.options }),
-    }
+    (fallback === undefined ? undefined : loadoutRoleTarget(fallback, providers)) ??
+    ownModelTarget(planner)
   );
 }
 

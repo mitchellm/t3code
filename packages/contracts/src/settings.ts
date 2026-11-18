@@ -1097,6 +1097,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "responseStreamingMode",
   "loadouts",
   "planBeforeEditing",
+  "askCheck",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1137,6 +1138,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   loadouts: Schema.optionalKey(SavedLoadouts),
   planBeforeEditing: Schema.optionalKey(Schema.Boolean),
+  askCheck: Schema.optionalKey(Schema.Boolean),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1390,6 +1392,11 @@ export const ServerSettings = Schema.Struct({
    * unfinished item. Every provider's instructions ask for the plan either way.
    */
   planBeforeEditing: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * A ledger created on a thread with no judge holds its last ask until a fresh session on the
+   * thread's own model has checked the result against the user's message.
+   */
+  askCheck: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /**
    * Claude only: delegated children start T3's server and the project's .mcp.json servers, not the
    * servers in the user's Claude config, because each child is a full extra session. Names listed
@@ -1760,6 +1767,7 @@ export const ServerSettingsPatch = Schema.Struct({
   pinnedRules: Schema.optionalKey(TrimmedString),
   loadouts: Schema.optionalKey(Schema.Array(Loadout)),
   planBeforeEditing: Schema.optionalKey(Schema.Boolean),
+  askCheck: Schema.optionalKey(Schema.Boolean),
   childMcpServers: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   branchNamingMode: Schema.optionalKey(BranchNamingMode),
   branchNamePrefix: Schema.optionalKey(TrimmedString),
