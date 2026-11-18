@@ -26,6 +26,7 @@ import {
   criteriaProblem,
   hardeningRules,
   howToCheck,
+  JUDGE_ASK_ANSWER_FORMAT,
   type JudgeBase,
   type JudgeCheckpoint,
   type JudgeTaskRecord,
@@ -33,6 +34,7 @@ import {
   judgedTaskReports,
   numberedCriteria,
   requestMessages,
+  wordsAndCases,
 } from "./LedgerJudgeCriteria.ts";
 
 export type { JudgeCheckpoint } from "./LedgerJudgeCriteria.ts";
@@ -380,7 +382,19 @@ function askCheckPrompt(
   ].join("\n");
 }
 
-const judgedAgainstRequest = (ledger: Ledger, _item: LedgerItem) => isAskCheckLedger(ledger);
+const isRefutation = (ledger: Ledger, item: LedgerItem) =>
+  ledger.investigation !== undefined && item.parentItemId === ledger.investigation.approachesItemId;
+
+/** Whether the judge is shown the user's request: one of their asks, judged on its own merits. */
+const judgedAgainstRequest = (ledger: Ledger, item: LedgerItem) =>
+  isAskCheckLedger(ledger) ||
+  (item.quote !== undefined && item.setAside === undefined && !isRefutation(ledger, item));
+
+/** How a judge looks for what an ask's first fix left undone, applied to Criterion 1. */
+const askLookLines: ReadonlyArray<string> = (() => {
+  const [words, cases] = wordsAndCases("Criterion 1");
+  return [...howToCheck("Criterion 1"), `First ${words}`, cases, ""];
+})();
 
 function judgementPrompt(
   ledger: Ledger,
@@ -416,6 +430,11 @@ function judgementPrompt(
           item.quote,
           "Criterion 1 is those words. Judge it by what the user would see or get, not by the agent's plan: tests passing or a PR existing does not prove it on its own.",
           "",
+          REQUEST_INTRO,
+          "",
+          "The request:",
+          ...requestLines(request ?? { messages: [], trimmed: false }),
+          "",
         ]),
     fenced(
       item.acceptance.trim() === ""
@@ -427,7 +446,8 @@ function judgementPrompt(
     fenced("Evidence offered by the agent. This is a claim, not proof", item.evidence ?? ""),
     ...taskReportLines(linked),
     "",
-    ...hardeningRules(base),
+    ...(item.quote === undefined ? [] : askLookLines),
+    ...hardeningRules(base, item.quote === undefined ? undefined : JUDGE_ASK_ANSWER_FORMAT),
     "",
     "Pass only if every criterion holds. Say in a few sentences what you checked and, for a failure, what is missing. Then end your answer with exactly one final line, either",
     "VERDICT: PASS",

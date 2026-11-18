@@ -148,8 +148,14 @@ export function judgedTaskReports(
   return { reports, omitted: all.length - reports.length };
 }
 
-const JUDGE_ANSWER_FORMAT: ReadonlyArray<string> = [
-  "Answer format. Write one line per criterion, for every criterion, numbered as in the list (Criterion 1 is C1): `C1: PASS - <proof you checked>` or `C1: FAIL - <what is wrong>`. Any FAIL, or a criterion with no line, fails the item, whatever your final verdict says. Then a line `Tests: <command> -> <result>`. Only your last message is read, so if you write again after answering, repeat every criterion line and the verdict line in full.",
+const JUDGE_ANSWER_FORMAT_TEXT =
+  "Answer format. Write one line per criterion, for every criterion, numbered as in the list (Criterion 1 is C1): `C1: PASS - <proof you checked>` or `C1: FAIL - <what is wrong>`. Any FAIL, or a criterion with no line, fails the item, whatever your final verdict says. Then a line `Tests: <command> -> <result>`. Only your last message is read, so if you write again after answering, repeat every criterion line and the verdict line in full.";
+
+const JUDGE_ANSWER_FORMAT: ReadonlyArray<string> = [JUDGE_ANSWER_FORMAT_TEXT];
+
+/** The judge's answer paragraph for one of the user's asks, which also gets the two sections. */
+export const JUDGE_ASK_ANSWER_FORMAT: ReadonlyArray<string> = [
+  `${JUDGE_ANSWER_FORMAT_TEXT} Before your criterion lines, write the \`Words:\` and \`Cases:\` sections for Criterion 1.`,
 ];
 
 /**
@@ -198,7 +204,9 @@ export function howToCheck(subject: "each criterion" | "Criterion 1"): ReadonlyA
  * words fit from the code's own definitions, so the diff cannot set the list; a case left
  * unhandled fails its criterion.
  */
-function wordsAndCases(subject: "each criterion" | "Criterion 1"): readonly [string, string] {
+export function wordsAndCases(
+  subject: "each criterion" | "Criterion 1",
+): readonly [string, string] {
   return [
     `a section headed \`Words:\`. For ${subject}, quote every general word or phrase in the user's sentence (a thing named without its kind, "any", "every", "each", "however", "whether or not", "anywhere", a loose phrase that names a group, like "the old ones" or "the same way") and, on the same line, list everything it can mean in this codebase and the place that defines that list: the type, schema, enum, table or registry, as file:line. Open that definition and read it to make the list (every state the thing can be in, every kind of it, every entry point that reaches the behaviour, every client that shows it). Do not make the list from the diff or from the agent's wording: the diff shows only the cases the agent thought of. The shape, with an example from another project: \`- C1 "any export": CSV, JSON, PDF (ExportFormat, src/export/types.ts:12)\`.`,
     `Then a section headed \`Cases:\` with one line for every entry of every list above: \`- C1 <case>: handled - <file:line or the test that shows it>\`, \`- C1 <case>: NOT handled - <what happens there now>\`, or \`- C1 <case>: ruled out - <reason>\`. You may rule a listed case out for one of two reasons only: the user's general sentence, read on its own without the incident, does not fit it; or you searched for places where the code handles it together with the reported case and found none (name the search you ran). The incident's wording alone is never a reason: "the user's file was a CSV" does not rule out another format that "any export" fits. When you are in doubt whether the words fit a listed case, ask what a careful engineer would have done: if treating it the same way as the reported case is a small, safe change in the same place, it is NOT handled; if it would need a design decision or would change behaviour the user may rely on, rule it out and say so. ${subject === "each criterion" ? "A criterion with a NOT handled case is a FAIL." : "A NOT handled case is a FAIL."}`,
