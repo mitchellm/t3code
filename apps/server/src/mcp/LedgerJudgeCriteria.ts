@@ -184,17 +184,33 @@ export function howToCheck(subject: "each criterion" | "Criterion 1"): ReadonlyA
     "2. Read the diff (commands below), then look for a case the words cover where it is still false. Search the code; do not reason from the diff alone. Places to look:",
     "   - another caller, code path or entry point that reaches the same behaviour (a second handler, route, tool, command, job, a forwarded or remote path);",
     "   - another client or surface that shows or does the same thing (web, desktop, mobile, CLI, MCP tool, HTTP route, WebSocket handler);",
-    "   - another state or kind of the same thing that the words include (archived and deleted, local and remote, first run and resumed, one and several, with and without the option, any size or duration);",
+    "   - another state or kind of the same thing that the words include (each state it can be in, local and remote, first run and resumed, one and several, with and without the option, any size or duration);",
     "   - a second writer of the same data, or a second copy of the same rule, text or constant;",
     "   - the same change needed in a sibling of the function that was changed (grep for functions and files named like it, and for callers of what it replaced).",
     "3. Where you can, prove the case by running something: an existing test, a short script, a command. A case you only suspect is not a finding; open the code and confirm what happens there now.",
-    "A missing case counts only if the user's words cover it. Do not fail the work for things the user did not ask for, for style, or for extra tests you would have liked.",
+    "When the user describes one incident and then says in general words what should be true, the general sentence is the request and the incident is only its example: work that covers the incident's exact case and not the others the general words fit is not done. A case counts when the general words fit it and the code already treats it like the reported case somewhere else (search for where the two are handled together). If the words do not fit it, or the code treats it differently everywhere, it does not count.",
+    "Do not fail the work for things the user did not ask for, for style, or for extra tests you would have liked.",
+  ];
+}
+
+/**
+ * Fork: the listing the checker does before it answers. It names every case the user's general
+ * words fit from the code's own definitions, so the diff cannot set the list; a case left
+ * unhandled fails its criterion.
+ */
+function wordsAndCases(subject: "each criterion" | "Criterion 1"): readonly [string, string] {
+  return [
+    `a section headed \`Words:\`. For ${subject}, quote every general word or phrase in the user's sentence (a thing named without its kind, "any", "every", "each", "however", "whether or not", "anywhere", a loose phrase that names a group, like "the old ones" or "the same way") and, on the same line, list everything it can mean in this codebase and the place that defines that list: the type, schema, enum, table or registry, as file:line. Open that definition and read it to make the list (every state the thing can be in, every kind of it, every entry point that reaches the behaviour, every client that shows it). Do not make the list from the diff or from the agent's wording: the diff shows only the cases the agent thought of. The shape, with an example from another project: \`- C1 "any export": CSV, JSON, PDF (ExportFormat, src/export/types.ts:12)\`.`,
+    `Then a section headed \`Cases:\` with one line for every entry of every list above: \`- C1 <case>: handled - <file:line or the test that shows it>\`, \`- C1 <case>: NOT handled - <what happens there now>\`, or \`- C1 <case>: ruled out - <reason>\`. You may rule a listed case out for one of two reasons only: the user's general sentence, read on its own without the incident, does not fit it; or you searched for places where the code handles it together with the reported case and found none (name the search you ran). The incident's wording alone is never a reason: "the user's file was a CSV" does not rule out another format that "any export" fits. When you are in doubt whether the words fit a listed case, ask what a careful engineer would have done: if treating it the same way as the reported case is a small, safe change in the same place, it is NOT handled; if it would need a design decision or would change behaviour the user may rely on, rule it out and say so. ${subject === "each criterion" ? "A criterion with a NOT handled case is a FAIL." : "A NOT handled case is a FAIL."}`,
   ];
 }
 
 /** The ask check's answer shape: it hunts for a missing case, so a pass names where it looked. */
+const [CHECK_WORDS, CHECK_CASES] = wordsAndCases("each criterion");
 export const ASK_CHECK_ANSWER_FORMAT: ReadonlyArray<string> = [
-  "Answer format. One line per criterion, numbered as in the list (Criterion 1 is C1):",
+  `Answer format. First ${CHECK_WORDS}`,
+  CHECK_CASES,
+  "Then one line per criterion, numbered as in the list (Criterion 1 is C1):",
   "`C1: PASS - <the other cases you looked for and where you looked (files or commands), at least two>` or",
   "`C1: FAIL - <the case that is still wrong: where it is (file:line or how to reach it), what happens there now, and which of the user's words require otherwise>`.",
   "Any FAIL, or a criterion with no line, fails the work, whatever your final line says. Then a line `Tests: <command> -> <result>`. Only your last message is read, so if you write again after answering, repeat every criterion line and the verdict line in full. End with exactly one final line, either",

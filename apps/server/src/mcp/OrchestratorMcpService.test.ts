@@ -2048,6 +2048,8 @@ describe("OrchestratorMcpService provider resolution", () => {
       readonly summary: string;
       readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
       readonly loadoutId?: string;
+      /** The model the checker's task is recorded as having run on; the thread's own by default. */
+      readonly ranOn?: { readonly instanceId: ProviderInstanceId; readonly model: string };
     }) =>
       Effect.gen(function* () {
         const dispatched = yield* Ref.make<ReadonlyArray<Record<string, unknown>>>([]);
@@ -2063,13 +2065,13 @@ describe("OrchestratorMcpService provider resolution", () => {
           origin: "app_owned",
           createdBy: "agent",
           driver: ProviderDriverKind.make("codex"),
-          providerInstanceId: codexInstanceId,
+          providerInstanceId: input.ranOn?.instanceId ?? codexInstanceId,
           providerThreadId: null,
           childThreadId,
           nativeTaskRef: null,
           prompt: delegatedPrompt,
           title: null,
-          model: "gpt-5.4",
+          model: input.ranOn?.model ?? "gpt-5.4",
           status: finishedWith === null ? "running" : "completed",
           result: finishedWith,
           startedAt: null,
@@ -2234,6 +2236,60 @@ describe("OrchestratorMcpService provider resolution", () => {
           });
           assert.equal(verdictOf(judged)?.outcome, "fail");
           assert.include(verdictOf(judged)?.notes ?? "", "not the one the server started");
+        }),
+    );
+
+    const requestOf = (commands: ReadonlyArray<Record<string, unknown>>) =>
+      commands.find((command) => command.type === "delegated_task.request") as
+        | { readonly modelSelection: { readonly instanceId: string; readonly model: string } }
+        | undefined;
+    const judgedBy = (id: string, structure: "solo" | undefined) => ({
+      providerInstances: { [altInstanceId]: { driver: "codex", enabled: true } },
+      loadouts: [
+        ...DEFAULT_LOADOUTS,
+        {
+          id,
+          name: id,
+          description: "",
+          ...(structure === undefined ? {} : { structure }),
+          roles: { judge: { instanceId: altInstanceId, model: "gpt-5.4" } },
+        },
+      ],
+    });
+
+    it.effect(
+      "checks on the judge model of a solo loadout, and on the thread's own under one that delegates",
+      () =>
+        Effect.gen(function* () {
+          const alt = { instanceId: altInstanceId, model: "gpt-5.4" };
+          // One agent builds and the loadout's judge checks: the check runs on, and is accepted
+          // from, that judge's model, and a check that ran on the thread's own model is not.
+          const solo = { flags: { askCheck: true }, loadoutId: "solo-judged" } as const;
+          const byJudge = yield* checked({
+            ...solo,
+            summary: passes(3),
+            settings: judgedBy("solo-judged", "solo"),
+            ranOn: alt,
+          });
+          assert.equal(requestOf(byJudge)?.modelSelection.instanceId, altInstanceId);
+          assert.equal(verdictOf(byJudge)?.outcome, "pass");
+          const byThread = yield* checked({
+            ...solo,
+            summary: passes(3),
+            settings: judgedBy("solo-judged", "solo"),
+          });
+          assert.equal(verdictOf(byThread)?.outcome, "fail");
+          assert.include(verdictOf(byThread)?.notes ?? "", "not the one the server started");
+
+          // A loadout that delegates leaves the check on the thread's own model, as before.
+          const delegating = yield* checked({
+            flags: { askCheck: true },
+            loadoutId: "workers-judged",
+            summary: passes(3),
+            settings: judgedBy("workers-judged", undefined),
+          });
+          assert.equal(requestOf(delegating)?.modelSelection.instanceId, codexInstanceId);
+          assert.equal(verdictOf(delegating)?.outcome, "pass");
         }),
     );
   });

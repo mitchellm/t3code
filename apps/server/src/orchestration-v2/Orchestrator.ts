@@ -82,6 +82,7 @@ import {
   decideThreadLoadout,
   loadoutRequiresJudge,
   resolveLoadout,
+  soloJudgeRole,
   withSolo,
 } from "@t3tools/shared/loadouts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
@@ -13477,9 +13478,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const now = yield* DateTime.now;
     // Decided from settings the agent cannot edit, so the creating command cannot opt out of the
-    // judge gate, and stamped only when the judge can run: a gate nothing can satisfy would leave
-    // items closable only by dropping them. A ledger with no judge gets the ask check instead,
-    // except an investigation, whose refuter already judges every approach.
+    // judge gate, and stamped only when the judge can run (a gate nothing can satisfy strands the
+    // items). A ledger no judge gates gets the ask check: always under a solo loadout with a
+    // judge, else when the setting is on. An investigation never does; its refuter judges it.
     const stamps =
       command.type === "ledger.create" || command.type === "ledger.investigation.start"
         ? yield* Effect.gen(function* () {
@@ -13488,16 +13489,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const loadout = resolveLoadout(projectSettings.loadouts, thread.loadout?.id);
             const adapterIds = yield* providerAdapters.list();
             // Fork: configuration only, never live install state (see loadoutRequiresJudge).
-            const requiresJudge = loadoutRequiresJudge(
+            const hasJudge = loadoutRequiresJudge(
               loadout,
               (instanceId) =>
                 adapterIds.some((id) => id === instanceId) &&
                 resolveProjectProviderInstanceEnabled(settings, thread.projectId, instanceId),
             );
+            if (command.type === "ledger.investigation.start") {
+              return { requiresJudge: hasJudge, askCheck: false };
+            }
+            const checksAsks = hasJudge && soloJudgeRole(loadout) !== undefined;
             return {
-              requiresJudge,
-              askCheck:
-                command.type === "ledger.create" && !requiresJudge && projectSettings.askCheck,
+              requiresJudge: hasJudge && !checksAsks,
+              askCheck: checksAsks || (!hasJudge && projectSettings.askCheck),
             };
           })
         : undefined;

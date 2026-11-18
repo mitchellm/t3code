@@ -43,6 +43,14 @@ export const loadoutHasJudge = (loadout: Loadout): boolean => loadout.roles.judg
 export const loadoutStructure = (loadout: Loadout): LoadoutStructure =>
   loadout.structure ?? (Object.keys(loadout.roles).length === 0 ? "solo" : "workers");
 
+/**
+ * Fork: the judge of a loadout that chose the solo structure. One agent builds and delegates
+ * nothing, and this role checks its finished asks, instead of judging each item as under a
+ * structure that delegates.
+ */
+export const soloJudgeRole = (loadout: Loadout): LoadoutRole | undefined =>
+  loadout.structure === "solo" ? loadout.roles.judge : undefined;
+
 export type ThreadLoadoutDecision =
   | { readonly _tag: "set"; readonly loadout: ThreadLoadout | null }
   | { readonly _tag: "unchanged" }

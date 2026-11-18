@@ -76,6 +76,7 @@ import {
   loadoutDelegationTarget,
   ownModelTarget,
   resolveLoadout,
+  soloJudgeRole,
   strongerJudgeTarget,
   withSolo,
 } from "@t3tools/shared/loadouts";
@@ -2161,10 +2162,12 @@ const make = Effect.gen(function* () {
     const expectedJudge = Effect.fn("OrchestratorMcpService.expectedJudge")(function* (
       stronger = false,
     ) {
-      // Fork: an ask check ledger has no judge role. Its checker is a fresh session on the
-      // thread's own model, which has none of the author's context, so a verdict from it is not
+      const { active } = yield* loadLoadouts(parent.thread);
+      // Fork: an ask check is a fresh session on the thread's own model unless a solo loadout names
+      // a judge for it. That session has none of the author's context, so a verdict from it is not
       // the agent marking its own work. There is nothing stronger to switch to either.
-      if (isAskCheckLedger(ledger)) {
+      const askChecking = isAskCheckLedger(ledger);
+      if (askChecking && soloJudgeRole(active) === undefined) {
         const own = parent.thread.modelSelection;
         return { ...ownModelTarget(own), providerInstanceId: own.instanceId, model: own.model };
       }
@@ -2172,9 +2175,8 @@ const make = Effect.gen(function* () {
       // The standard judge is resolved even when a stronger one is used, so a loadout whose judge
       // cannot resolve still refuses rather than judging on an unconfigured model.
       const standard = yield* loadoutRoleTarget(parent.thread, "judge", providers);
-      const { active } = yield* loadLoadouts(parent.thread);
       const expected =
-        stronger && standard !== undefined
+        stronger && !askChecking && standard !== undefined
           ? strongerJudgeTarget(
               active,
               parent.thread.modelSelection,
@@ -2249,7 +2251,7 @@ const make = Effect.gen(function* () {
         const ran = acceptedJudgeModel({
           ledger,
           taskId,
-          judgeRole: active.roles.judge,
+          judgeRole: isAskCheckLedger(ledger) ? soloJudgeRole(active) : active.roles.judge,
           planner: parent.thread.modelSelection,
           ran: { instanceId: result.providerInstanceId, model: result.model },
         });

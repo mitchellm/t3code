@@ -394,6 +394,73 @@ it.effect("a loadout with a judge stamps requiresJudge and never the ask check",
   }),
 );
 
+// One agent builds and its judge model checks the finished asks, instead of judging each item.
+const soloJudgedLoadout: Loadout = {
+  ...judgedLoadout,
+  id: "solo-judged",
+  name: "Solo judged",
+  structure: "solo",
+};
+// The same, with a judge on an instance this server does not run.
+const soloUnrunnableLoadout: Loadout = {
+  ...soloJudgedLoadout,
+  id: "solo-unrunnable",
+  roles: {
+    judge: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus-5-5" },
+  },
+};
+
+it.effect(
+  "a solo-structured loadout with a runnable judge gets the ask check, whatever the setting",
+  () =>
+    Effect.gen(function* () {
+      const loadouts = [...DEFAULT_LOADOUTS, soloJudgedLoadout];
+      const checked = { askCheck: true, requiresJudge: undefined, shown: true } as const;
+      assert.deepEqual(
+        yield* stampedLedger({ settings: { loadouts }, loadoutId: soloJudgedLoadout.id }),
+        checked,
+      );
+      assert.deepEqual(
+        yield* stampedLedger({
+          settings: { loadouts, askCheck: false },
+          loadoutId: soloJudgedLoadout.id,
+        }),
+        checked,
+      );
+    }),
+);
+
+it.effect("a solo-structured loadout whose judge cannot run falls back to the setting", () =>
+  Effect.gen(function* () {
+    const loadouts = [...DEFAULT_LOADOUTS, soloUnrunnableLoadout];
+    const stamped = (askCheck: boolean) =>
+      stampedLedger({ settings: { loadouts, askCheck }, loadoutId: soloUnrunnableLoadout.id });
+    assert.deepEqual(yield* stamped(true), {
+      askCheck: true,
+      requiresJudge: undefined,
+      shown: true,
+    });
+    assert.deepEqual(yield* stamped(false), {
+      askCheck: undefined,
+      requiresJudge: undefined,
+      shown: undefined,
+    });
+  }),
+);
+
+it.effect("an investigation under a solo-structured judge is still judged by its refuter", () =>
+  Effect.gen(function* () {
+    assert.deepEqual(
+      yield* stampedLedger({
+        settings: { loadouts: [...DEFAULT_LOADOUTS, soloJudgedLoadout] },
+        loadoutId: soloJudgedLoadout.id,
+        start: "investigation",
+      }),
+      { askCheck: undefined, requiresJudge: true, shown: undefined },
+    );
+  }),
+);
+
 it.effect("an investigation is judged by its refuter and gets no ask check", () =>
   Effect.gen(function* () {
     const settings = { loadouts: [...DEFAULT_LOADOUTS, judgedLoadout] };
