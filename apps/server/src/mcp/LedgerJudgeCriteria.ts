@@ -173,6 +173,20 @@ const hasProof = (text: string) => {
   return !PLACEHOLDER.test(proof) && proof.replace(/[\s.:\-–—]/gu, "") !== "";
 };
 
+const ANSWER_LINE = /^\s*(?:Tests|VERDICT)\s*:/iu;
+/**
+ * Judges often write the verdict word alone and the proof as the bullets under it. Only the lines
+ * directly below count, up to a blank line or the next answer line, so a remark elsewhere in the
+ * answer never stands in for proof.
+ */
+const proofBelow = (lines: ReadonlyArray<string>, at: number) => {
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() === "" || CRITERION_LINE.test(line) || ANSWER_LINE.test(line)) return false;
+    if (hasProof(line.replace(LIST_MARKER, ""))) return true;
+  }
+  return false;
+};
+
 /**
  * Why a passing verdict does not stand, or undefined when every criterion passed with proof.
  * A FAIL line anywhere counts, even one quoted from the evidence: it can only fail the item.
@@ -180,13 +194,14 @@ const hasProof = (text: string) => {
 export function criteriaProblem(answer: string, count: number): string | undefined {
   const passed = new Set<number>();
   const failed = new Set<number>();
-  for (const line of answer.split(/\r?\n/u)) {
-    const match = CRITERION_LINE.exec(normalizeAnswerLine(line));
+  const lines = answer.split(/\r?\n/u).map(normalizeAnswerLine);
+  for (const [at, line] of lines.entries()) {
+    const match = CRITERION_LINE.exec(line);
     if (match === null) continue;
     const index = Number(match[1]);
     if (index < 1 || index > count) continue;
     if (match[2]?.toUpperCase() === "FAIL") failed.add(index);
-    else if (hasProof(match[3] ?? "")) passed.add(index);
+    else if (hasProof(match[3] ?? "") || proofBelow(lines, at)) passed.add(index);
   }
   const ids = (indexes: ReadonlyArray<number>) => indexes.map((index) => `C${index}`).join(", ");
   const all = Array.from({ length: count }, (_, index) => index + 1);
