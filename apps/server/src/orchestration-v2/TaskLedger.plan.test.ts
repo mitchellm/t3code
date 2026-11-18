@@ -333,6 +333,219 @@ describe("planLedgerCommand ledger-level judge requirement", () => {
   });
 });
 
+describe("planLedgerCommand ask check", () => {
+  const idOf = (name: string) => LedgerItemId.make(`item:${name}`);
+  const named = (name: string, overrides: Partial<LedgerItem> = {}) =>
+    item({ id: idOf(name), title: name, ...overrides });
+  const ask = (name: string, overrides: Partial<LedgerItem> = {}) =>
+    named(name, { quote: `quote of ${name}`, ...overrides });
+  const checked = (items: ReadonlyArray<LedgerItem>, flags: Partial<Ledger> = {}): Ledger => ({
+    ...ledgerWith(),
+    askCheck: true,
+    items,
+    ...flags,
+  });
+  const closeOf = (name: string, evidence?: string): LedgerCommand => ({
+    type: "ledger.item.update",
+    commandId: CommandId.make(`command:plan:close:${name}`),
+    threadId,
+    ledgerId,
+    itemId: idOf(name),
+    status: "closed",
+    createdBy: "agent",
+    ...(evidence === undefined ? {} : { evidence }),
+  });
+  const closeUserOf = (name: string): LedgerCommand => ({
+    type: "ledger.item.update",
+    commandId: CommandId.make(`command:plan:user-close:${name}`),
+    threadId,
+    ledgerId,
+    itemId: idOf(name),
+    status: "closed",
+  });
+  const planned = (command: LedgerCommand, ledger: Ledger) => {
+    const result = planLedgerCommand({ command, ledger, now });
+    return Result.isSuccess(result) && result.success[0]?.type === "ledger.item.updated"
+      ? result.success[0].payload.item
+      : undefined;
+  };
+
+  it("holds the agent's close of the last unfinished ask as a judgement", () => {
+    const next = planned(closeOf("b"), checked([ask("a", { status: "closed" }), ask("b")]));
+    assert.equal(next?.status, "in_progress");
+    assert.isTrue(next?.judging);
+    assert.isNull(next?.verdict);
+  });
+
+  it("closes an earlier ask at once while another ask is unfinished", () => {
+    const next = planned(closeOf("a"), checked([ask("a"), ask("b")]));
+    assert.equal(next?.status, "closed");
+    assert.isUndefined(next?.judging);
+    // An ask being judged is unfinished too, so the one closing beside it is not the last.
+    const beside = planned(
+      closeOf("b"),
+      checked([ask("a", { status: "in_progress", judging: true }), ask("b")]),
+    );
+    assert.equal(beside?.status, "closed");
+  });
+
+  it("closes a sub-item at once, even when it is the only unfinished item", () => {
+    const ledger = checked([
+      ask("a", { status: "in_progress" }),
+      named("step", { parentItemId: idOf("a") }),
+    ]);
+    const next = planned(closeOf("step"), ledger);
+    assert.equal(next?.status, "closed");
+    // The step is not an ask, so closing the ask afterwards is what gets checked.
+    const after = planned(
+      closeOf("a"),
+      checked([ask("a", { status: "in_progress" }), named("step", { status: "closed" })]),
+    );
+    assert.isTrue(after?.judging);
+  });
+
+  it("holds the last top-level item when the ledger has no ask, and only that one", () => {
+    const first = planned(closeOf("one"), checked([named("one"), named("two")]));
+    assert.equal(first?.status, "closed");
+    const last = planned(
+      closeOf("two"),
+      checked([named("one", { status: "closed" }), named("two")]),
+    );
+    assert.equal(last?.status, "in_progress");
+    assert.isTrue(last?.judging);
+    const sub = planned(
+      closeOf("sub"),
+      checked([
+        named("one", { status: "in_progress" }),
+        named("sub", { parentItemId: idOf("one") }),
+      ]),
+    );
+    assert.equal(sub?.status, "closed");
+  });
+
+  it("leaves a ledger with neither flag, and a judged ledger, as before", () => {
+    const items = [ask("a", { status: "closed" }), ask("b")];
+    const plain = planned(closeOf("b"), checked(items, { askCheck: false }));
+    assert.equal(plain?.status, "closed");
+    // A judged ledger gates every close, not only the last ask; the ask check adds nothing to it.
+    const judged = planned(
+      closeOf("a"),
+      checked([ask("a"), ask("b")], { askCheck: false, requiresJudge: true }),
+    );
+    assert.isTrue(judged?.judging);
+    const both = planned(closeOf("a"), checked([ask("a"), ask("b")], { requiresJudge: true }));
+    assert.isTrue(both?.judging);
+  });
+
+  it("leaves every other change of an ask check ledger as it was", () => {
+    const ledger = checked([ask("a"), named("plan", { status: "in_progress" })]);
+    const update = (itemName: string, status: LedgerItem["status"], extra = {}): LedgerCommand => ({
+      type: "ledger.item.update",
+      commandId: CommandId.make(`command:plan:${itemName}:${status}`),
+      threadId,
+      ledgerId,
+      itemId: idOf(itemName),
+      status,
+      createdBy: "agent",
+      ...extra,
+    });
+    // Started work goes back to open, and a plan step is dropped or deferred, with no judge.
+    assert.equal(planned(update("plan", "open"), ledger)?.status, "open");
+    assert.equal(
+      planned(update("plan", "dropped", { dropReason: "not needed" }), ledger)?.status,
+      "dropped",
+    );
+    assert.equal(
+      planned(update("plan", "deferred", { deferReason: "later" }), ledger)?.status,
+      "deferred",
+    );
+    // An ask still cannot be dropped by the agent.
+    const refused = planLedgerCommand({
+      command: update("a", "dropped", { dropReason: "no" }),
+      ledger,
+      now,
+    });
+    assert.isTrue(Result.isFailure(refused));
+  });
+
+  it("keeps the user's own close final", () => {
+    const next = planned(closeUserOf("b"), checked([ask("a", { status: "closed" }), ask("b")]));
+    assert.equal(next?.status, "closed");
+    assert.isUndefined(next?.judging);
+  });
+
+  it("lets a close through on a pass for unchanged evidence, and holds it again on new evidence", () => {
+    const passing = checked([
+      ask("a", { status: "closed" }),
+      ask("b", { verdict: verdict("pass") }),
+    ]);
+    assert.equal(planned(closeOf("b"), passing)?.status, "closed");
+    const changed = planned(closeOf("b", "something new"), passing);
+    assert.isTrue(changed?.judging);
+    assert.isNull(changed?.verdict);
+  });
+
+  it("checks the next last ask again when a new ask is added after a pass", () => {
+    const afterPass = checked([ask("a", { status: "closed", verdict: verdict("pass") })]);
+    const add: LedgerCommand = {
+      type: "ledger.item.add",
+      commandId: CommandId.make("command:plan:add-ask"),
+      threadId,
+      ledgerId,
+      items: [{ id: idOf("late"), title: "late", acceptance: "works", quote: "a later ask" }],
+    };
+    const added = planLedgerCommand({ command: add, ledger: afterPass, now });
+    assert.isTrue(Result.isSuccess(added));
+    const grown = {
+      ...afterPass,
+      items: [
+        ...afterPass.items,
+        ask("late", { status: "in_progress", createdAt: now, updatedAt: now }),
+      ],
+    };
+    const next = planned(closeOf("late"), grown);
+    assert.isTrue(next?.judging);
+  });
+
+  it("stamps the new ledger only from the value the server decided, and never beside a judge", () => {
+    const create: LedgerCommand = {
+      type: "ledger.create",
+      commandId: CommandId.make("command:plan:create-checked"),
+      threadId,
+      ledgerId,
+      title: "Checked",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: [],
+    };
+    const stamp = (flags: { requiresJudge?: boolean; askCheck?: boolean }) => {
+      const result = planLedgerCommand({ command: create, ledger: undefined, now, ...flags });
+      const created =
+        Result.isSuccess(result) && result.success[0]?.type === "ledger.created"
+          ? result.success[0].payload
+          : undefined;
+      return [created?.askCheck === true, created?.requiresJudge === true];
+    };
+    assert.deepEqual(stamp({ askCheck: true }), [true, false]);
+    assert.deepEqual(stamp({ askCheck: false }), [false, false]);
+    assert.deepEqual(stamp({}), [false, false]);
+    assert.deepEqual(stamp({ askCheck: true, requiresJudge: true }), [false, true]);
+
+    // A replacement ledger never inherits the closed one's flag.
+    const replaced = planLedgerCommand({
+      command: { ...create, ledgerId: LedgerId.make("ledger:next") },
+      ledger: { ...ledgerWith(), askCheck: true, closedAt: earlier },
+      now,
+    });
+    assert.isTrue(
+      Result.isSuccess(replaced) &&
+        replaced.success[0]?.type === "ledger.created" &&
+        replaced.success[0].payload.askCheck !== true,
+    );
+  });
+});
+
 describe("planLedgerCommand no-ops", () => {
   it("plans nothing for a checkpoint already in the requested state or an unchanged item", () => {
     const ledger: Ledger = {

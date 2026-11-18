@@ -10,7 +10,7 @@ import type {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { isRefutedApproach } from "@t3tools/shared/investigation";
-import { isFinishedOpenLedger, judgedClaim } from "@t3tools/shared/taskLedger";
+import { askCheckedItems, isFinishedOpenLedger, judgedClaim } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
@@ -280,12 +280,14 @@ const describeItems = (items: ReadonlyArray<LedgerItem>) =>
  * `requiresJudge` defaults to the ledger's own field so no caller can forget the gate; a close
  * without a passing verdict becomes a judgement in progress. For `ledger.create` it is the value
  * to stamp. A command that changes nothing plans no events, so a retry does not bump `updatedAt`.
+ * `askCheck` is only ever a value to stamp at `ledger.create`; later commands read the ledger's.
  */
 export function planLedgerCommand(input: {
   readonly command: LedgerCommand;
   readonly ledger: Ledger | undefined;
   readonly now: DateTime.Utc;
   readonly requiresJudge?: boolean;
+  readonly askCheck?: boolean;
 }): Result.Result<ReadonlyArray<PlannedLedgerEvent>, LedgerRejection> {
   // Fork: Investigate mode rides the ledger; its own commands and the solve it decides.
   const { command } = input;
@@ -351,6 +353,7 @@ function planCoreLedgerCommand(input: {
   readonly ledger: Ledger | undefined;
   readonly now: DateTime.Utc;
   readonly requiresJudge?: boolean;
+  readonly askCheck?: boolean;
 }): Result.Result<ReadonlyArray<PlannedLedgerEvent>, LedgerRejection> {
   const { command, ledger, now } = input;
   const requiresJudge = input.requiresJudge ?? ledger?.requiresJudge ?? false;
@@ -396,6 +399,8 @@ function planCoreLedgerCommand(input: {
     if (createProblem !== undefined) return reject(createProblem);
     // A closed ledger's flag must not leak into its replacement, so only the input counts here.
     const stampedRequiresJudge = input.requiresJudge === true;
+    // A judged ledger already gates every close, so the two never go together.
+    const stampedAskCheck = input.askCheck === true && !stampedRequiresJudge;
     return Result.succeed([
       ...closePrevious,
       {
@@ -414,6 +419,7 @@ function planCoreLedgerCommand(input: {
           winConditions: command.winConditions,
           items: createdItems,
           ...(stampedRequiresJudge ? { requiresJudge: true } : {}),
+          ...(stampedAskCheck ? { askCheck: true } : {}),
           createdAt: now,
           updatedAt: now,
           closedAt: null,
@@ -842,7 +848,14 @@ function planCoreLedgerCommand(input: {
       // A verdict judged the evidence as it stood, so changed evidence needs a fresh one;
       // otherwise pass, edit the evidence, close would sidestep the judge gate.
       const verdict = evidence === item.evidence ? item.verdict : null;
-      if (target === "closed" && byAgent && requiresJudge && verdict?.outcome !== "pass") {
+      // Fork: an ask check ledger holds only the close that would finish its asks.
+      const heldForAskCheck = ledger.askCheck === true && closesLastCheckedAsk(ledger, item);
+      if (
+        target === "closed" &&
+        byAgent &&
+        (requiresJudge || heldForAskCheck) &&
+        verdict?.outcome !== "pass"
+      ) {
         // The agent's close becomes a request: the server's judge runs and its verdict settles
         // it, so the agent never has to ask, and cannot close past it.
         return itemUpdated(
@@ -896,6 +909,18 @@ function planCoreLedgerCommand(input: {
       return itemUpdated(ledger.id, next, now);
     }
   }
+}
+
+/**
+ * Fork: whether closing `item` would leave none of the ledger's checked items unfinished (one
+ * being judged is unfinished until its verdict lands), so the close is the one an ask check holds.
+ */
+function closesLastCheckedAsk(ledger: Ledger, item: LedgerItem): boolean {
+  const checked = askCheckedItems(ledger);
+  return (
+    checked.some(({ id }) => id === item.id) &&
+    !checked.some((other) => other.id !== item.id && isUnfinished(other))
+  );
 }
 
 const endJudging = (item: LedgerItem): LedgerItem =>

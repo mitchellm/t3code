@@ -4,6 +4,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
   ContextTransferId,
+  DEFAULT_LOADOUTS,
   EnvironmentId,
   GitCommandError,
   type Ledger,
@@ -35,6 +36,7 @@ import {
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Digest from "effect/crypto/Digest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -1966,6 +1968,275 @@ describe("OrchestratorMcpService provider resolution", () => {
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );
+
+  describe("the ledger's ask check", () => {
+    const checkedLedgerId = LedgerId.make("ledger:mcp-ask-check");
+    const altInstanceId = ProviderInstanceId.make("codex-alt");
+    const madeAt = DateTime.makeUnsafe("2026-10-27T00:00:00.000Z");
+    const closeRequestedAt = DateTime.makeUnsafe("2026-10-27T01:00:00.000Z");
+    const askedAt = DateTime.makeUnsafe("2026-10-26T23:00:00.000Z");
+    const lastAsk = LedgerItemId.make("L1");
+    const prose = (text: string) => ({
+      id: MessageId.make("message:mcp-ask-check"),
+      threadId: parentThreadId,
+      runId: null,
+      nodeId: null,
+      role: "user" as const,
+      text,
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+      attachments: [],
+      streaming: false,
+      createdAt: askedAt,
+      updatedAt: askedAt,
+    });
+    const ask = (name: string, quote: string, overrides: Partial<LedgerItem> = {}): LedgerItem => ({
+      id: LedgerItemId.make(name),
+      title: `Ask ${name}`,
+      quote,
+      acceptance: `${name} works`,
+      status: "closed",
+      evidence: `${name} proof`,
+      dropReason: null,
+      verdict: null,
+      createdAt: madeAt,
+      updatedAt: madeAt,
+      closedAt: madeAt,
+      ...overrides,
+    });
+    /** The ledger as the planner leaves it once the agent's close of the last ask is held. */
+    const heldLedger = (
+      flags: Partial<Ledger>,
+      started?: { readonly taskId: NodeId; readonly promptDigest: string },
+    ): Ledger => ({
+      id: checkedLedgerId,
+      threadId: parentThreadId,
+      title: "Checked",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: [
+        ask("A0", "first thing"),
+        ask("L1", "make the sync work", {
+          status: "in_progress",
+          closedAt: null,
+          judging: true,
+          updatedAt: closeRequestedAt,
+          ...(started === undefined
+            ? {}
+            : { judgeTaskId: started.taskId, judgePromptDigest: started.promptDigest }),
+        }),
+      ],
+      createdAt: madeAt,
+      updatedAt: closeRequestedAt,
+      closedAt: null,
+      ...flags,
+    });
+    const passes = (count: number) =>
+      [
+        ...Array.from(
+          { length: count },
+          (_, index) => `C${index + 1}: PASS - looked in src, ran it`,
+        ),
+        "Tests: vp test run -> passed",
+        "VERDICT: PASS",
+      ].join("\n");
+
+    /** Starts the check, lets it finish with `summary`, and returns what the server dispatched. */
+    const checked = (input: {
+      readonly flags: Partial<Ledger>;
+      readonly summary: string;
+      readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+      readonly loadoutId?: string;
+    }) =>
+      Effect.gen(function* () {
+        const dispatched = yield* Ref.make<ReadonlyArray<Record<string, unknown>>>([]);
+        const ownModel = { instanceId: codexInstanceId, model: "gpt-5.4" };
+        let ledger = heldLedger(input.flags);
+        let delegatedPrompt = "";
+        let finishedWith: string | null = null;
+        const task = () => ({
+          id: taskId,
+          threadId: parentThreadId,
+          runId: parentRunId,
+          parentNodeId,
+          origin: "app_owned",
+          createdBy: "agent",
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          providerThreadId: null,
+          childThreadId,
+          nativeTaskRef: null,
+          prompt: delegatedPrompt,
+          title: null,
+          model: "gpt-5.4",
+          status: finishedWith === null ? "running" : "completed",
+          result: finishedWith,
+          startedAt: null,
+          completedAt: finishedWith === null ? null : closeRequestedAt,
+        });
+        const parent = () => {
+          const projection = parentProjection(delegatedPrompt === "" ? [] : [task()], ownModel);
+          return {
+            ...projection,
+            thread: {
+              ...projection.thread,
+              ...(input.loadoutId === undefined
+                ? {}
+                : { loadout: { id: input.loadoutId, reason: null, setBy: "user" } }),
+            },
+            messages: [prose("Do the first thing and make the sync work please")],
+            checkpoints: [],
+            checkpointScopes: [],
+          };
+        };
+        const layerDependencies = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Effect.succeed(false),
+            delegatedTaskResultPending: () => Effect.succeed(false),
+            getThreadRecords: (threadId) =>
+              Effect.sync(
+                () =>
+                  (threadId === parentThreadId
+                    ? parent()
+                    : {
+                        ...childProjection,
+                        messages:
+                          delegatedPrompt === ""
+                            ? []
+                            : [{ ...prose(delegatedPrompt), creationSource: "mcp" as const }],
+                      }) as never,
+              ),
+            getProjectThreadRecords: () => Effect.succeed({ ledger } as never),
+            isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+            assertProviderInstanceEnabled: () => Effect.void,
+            dispatch: (command) =>
+              Ref.update(dispatched, (commands) => [
+                ...commands,
+                command as unknown as Record<string, unknown>,
+              ]).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    if (command.type === "delegated_task.request") delegatedPrompt = command.task;
+                    return {
+                      sequence: 1,
+                      storedEvents:
+                        command.type === "delegated_task.request"
+                          ? [
+                              {
+                                sequence: 1,
+                                commandId: null,
+                                event: { type: "subagent.updated", payload: task() },
+                              },
+                            ]
+                          : [],
+                    } as never;
+                  }),
+                ),
+              ),
+          }),
+          providerRegistryLayer([
+            providerSnapshot({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: "gpt-5.4",
+            }),
+            providerSnapshot({
+              instanceId: altInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: "gpt-5.4",
+            }),
+          ]),
+          adapterRegistryLayer([codexInstanceId, altInstanceId]),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          ServerSettings.layerTest(input.settings),
+        );
+        return yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          yield* service.startLedgerJudgement({
+            threadId: parentThreadId,
+            ledgerId: checkedLedgerId,
+            itemId: lastAsk,
+            requestedAt: DateTime.formatIso(closeRequestedAt),
+          });
+          // The server records the task and its prompt's digest, then the task ends.
+          const promptDigest = yield* Digest.Digest.use((digests) =>
+            digests.digestHex(Digest.sha256, new TextEncoder().encode(delegatedPrompt)),
+          ).pipe(Effect.provide(NodeCrypto.layer), Effect.orDie);
+          ledger = heldLedger(input.flags, { taskId, promptDigest });
+          finishedWith = input.summary;
+          yield* service.settleLedgerJudgement({ threadId: parentThreadId, taskId });
+          return yield* Ref.get(dispatched);
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      });
+
+    const verdictOf = (commands: ReadonlyArray<Record<string, unknown>>) =>
+      commands.find((command) => command.type === "ledger.item.verdict.record")?.verdict as
+        | { readonly outcome: string; readonly notes: string }
+        | undefined;
+
+    it.effect(
+      "starts on the thread's own model and records its pass or fail, where a judged ledger refuses that model",
+      () =>
+        Effect.gen(function* () {
+          const passing = yield* checked({
+            flags: { askCheck: true },
+            summary: passes(3),
+          });
+          const request = passing.find((command) => command.type === "delegated_task.request") as {
+            readonly modelSelection: { readonly instanceId: string; readonly model: string };
+            readonly role: string;
+            readonly serverJudge: boolean;
+            readonly task: string;
+          };
+          // A fresh session on the thread's own model, started as the server's judge.
+          assert.equal(request.modelSelection.instanceId, codexInstanceId);
+          assert.equal(request.modelSelection.model, "gpt-5.4");
+          assert.equal(request.role, "judge");
+          assert.isTrue(request.serverJudge);
+          assert.isTrue(request.task.startsWith("You are an independent checker."));
+          assert.include(request.task, "Do the first thing and make the sync work please");
+          assert.equal(verdictOf(passing)?.outcome, "pass");
+
+          const failing = yield* checked({
+            flags: { askCheck: true },
+            summary: "C1: FAIL - src/export.ts still writes the old names\nVERDICT: FAIL",
+          });
+          assert.equal(verdictOf(failing)?.outcome, "fail");
+          assert.include(
+            verdictOf(failing)?.notes ?? "",
+            "src/export.ts still writes the old names",
+          );
+
+          // The same answer from the same model on a judged ledger whose loadout names another
+          // judge is not accepted: that model would be marking its own work.
+          const judged = yield* checked({
+            flags: { requiresJudge: true },
+            summary: passes(3),
+            loadoutId: "judged-alt",
+            settings: {
+              providerInstances: { [altInstanceId]: { driver: "codex", enabled: true } },
+              loadouts: [
+                ...DEFAULT_LOADOUTS,
+                {
+                  id: "judged-alt",
+                  name: "Judged by another",
+                  description: "",
+                  roles: { judge: { instanceId: altInstanceId, model: "gpt-5.4" } },
+                },
+              ],
+            },
+          });
+          assert.equal(verdictOf(judged)?.outcome, "fail");
+          assert.include(verdictOf(judged)?.notes ?? "", "not the one the server started");
+        }),
+    );
+  });
 
   describe("delegating work on a ledger item", () => {
     const ledgerId = LedgerId.make("ledger:mcp-providers");

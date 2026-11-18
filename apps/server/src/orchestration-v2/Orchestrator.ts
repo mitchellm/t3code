@@ -13477,31 +13477,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const now = yield* DateTime.now;
     // Decided from settings the agent cannot edit, so the creating command cannot opt out of the
-    // judge gate. Stamped only when the judge can run (a V2 adapter, enabled for the project):
-    // a gate nothing can satisfy would leave items closable only by dropping them.
-    const requiresJudge =
+    // judge gate, and stamped only when the judge can run: a gate nothing can satisfy would leave
+    // items closable only by dropping them. A ledger with no judge gets the ask check instead,
+    // except an investigation, whose refuter already judges every approach.
+    const stamps =
       command.type === "ledger.create" || command.type === "ledger.investigation.start"
         ? yield* Effect.gen(function* () {
             const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
-            const loadout = resolveLoadout(
-              resolveProjectSettings(settings, thread.projectId).settings.loadouts,
-              thread.loadout?.id,
-            );
+            const projectSettings = resolveProjectSettings(settings, thread.projectId).settings;
+            const loadout = resolveLoadout(projectSettings.loadouts, thread.loadout?.id);
             const adapterIds = yield* providerAdapters.list();
             // Fork: configuration only, never live install state (see loadoutRequiresJudge).
-            return loadoutRequiresJudge(
+            const requiresJudge = loadoutRequiresJudge(
               loadout,
               (instanceId) =>
                 adapterIds.some((id) => id === instanceId) &&
                 resolveProjectProviderInstanceEnabled(settings, thread.projectId, instanceId),
             );
+            return {
+              requiresJudge,
+              askCheck:
+                command.type === "ledger.create" && !requiresJudge && projectSettings.askCheck,
+            };
           })
         : undefined;
     const planned = planLedgerCommand({
       command,
       ledger,
       now,
-      ...(requiresJudge === undefined ? {} : { requiresJudge }),
+      ...(stamps === undefined ? {} : stamps),
     });
     if (Result.isFailure(planned)) {
       return yield* new OrchestratorDispatchError({
