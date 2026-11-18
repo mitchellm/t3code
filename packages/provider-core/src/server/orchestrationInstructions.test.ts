@@ -4,10 +4,26 @@ import {
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS,
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  T3_CODE_ORCHESTRATION_SECTIONS,
   t3AcpPromptWithInstructions,
   t3OrchestrationPrompt,
   t3OrchestrationSystemPrompt,
 } from "./orchestrationInstructions.ts";
+
+describe("T3 ledger instructions", () => {
+  it("tell the agent its last ask is checked against the user's message when ledger_read shows askCheck", () => {
+    assert.include(
+      T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n"),
+      "When ledger_read shows askCheck, the last ask to close is first checked against the user's message by a fresh session: it closes on a pass, or comes back with what is still missing.",
+    );
+  });
+
+  it("keep every section under the 4,000 bytes Codex keeps of an entry", () => {
+    for (const section of T3_CODE_ORCHESTRATION_SECTIONS) {
+      assert.isBelow(Buffer.byteLength(section, "utf8"), 4_000);
+    }
+  });
+});
 
 describe("T3 device instructions", () => {
   it("route device work through device_open and give Claude the line that loads the tools", () => {
