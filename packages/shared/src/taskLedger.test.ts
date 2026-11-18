@@ -12,11 +12,35 @@ import * as DateTime from "effect/DateTime";
 
 import {
   applyLedgerEvent,
+  asksTheUser,
   decideLedgerAutoContinue,
   LEDGER_AUTO_CONTINUE_CAP,
   type LedgerDomainEvent,
   unquotedAsk,
 } from "./taskLedger.ts";
+
+describe("asksTheUser", () => {
+  it("counts a `Needs you:` line above the fold as an ask, with or without a question mark", () => {
+    expect(asksTheUser("Needs you: approve the merchant UI so #3303 can merge.")).toBe(true);
+    expect(
+      asksTheUser("**Needs you:** pick an action for each group below.\n\n| Group | Pick |"),
+    ).toBe(true);
+    expect(
+      asksTheUser(
+        "Mostly by design: two PRs weakened event pets on purpose.\n\n**Needs you:** pick a fix for the large pets.\n- A (recommended): own base damage.\n\n<details><summary>Details</summary>\n\nPR list.\n</details>",
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores `Needs you` folded into details or used mid-sentence", () => {
+    expect(
+      asksTheUser(
+        "Merged #57.\n\n<details><summary>Details</summary>\n\nNeeds you: was the old ask, now settled.\n</details>",
+      ),
+    ).toBe(false);
+    expect(asksTheUser("Merged #57. Nothing here needs you: CI is green.")).toBe(false);
+  });
+});
 
 describe("unquotedAsk", () => {
   const said = [

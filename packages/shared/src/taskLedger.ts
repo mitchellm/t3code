@@ -10,7 +10,8 @@ export const LEDGER_AUTO_CONTINUE_CAP = 5;
 
 /**
  * Fork: a reply that asks the user something ends on their answer, not on more ledger work.
- * Agents lead with the question (or end on it), so the first and last lines are what count.
+ * The harness tells agents to open an ask with a `Needs you:` line above any `<details>` fold;
+ * a reply that leads or ends with a question counts too.
  */
 export function asksTheUser(message: string | undefined): boolean {
   const lines = (message ?? "")
@@ -19,7 +20,13 @@ export function asksTheUser(message: string | undefined): boolean {
     .filter((line) => line !== "");
   const isQuestion = (line: string | undefined) =>
     line !== undefined && /\?[\s*_`"')\]]*$/u.test(line);
-  return isQuestion(lines[0]) || isQuestion(lines.at(-1));
+  const fold = lines.findIndex((line) => /^<details[\s>]/iu.test(line));
+  const visible = fold === -1 ? lines : lines.slice(0, fold);
+  return (
+    visible.some((line) => /^[#>*_\s-]*needs you[*_]*:/iu.test(line)) ||
+    isQuestion(lines[0]) ||
+    isQuestion(lines.at(-1))
+  );
 }
 
 // Quotes are compared on words alone, so smart quotes, markdown and line breaks the agent tidied
