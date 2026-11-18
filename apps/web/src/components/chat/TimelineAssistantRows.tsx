@@ -1,4 +1,5 @@
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
+import { foldLongReply } from "@t3tools/shared/replyFold";
 import { type RunId } from "@t3tools/contracts";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
 import { memo, use, useState } from "react";
@@ -33,7 +34,12 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
     row.projectedItem?.item.id,
   );
   const text = liveText ?? row.message.text;
-  const messageText = text || (row.message.streaming ? "" : "(empty response)");
+  // Fold once the run is over. Not only its last message: a reply followed by a thread card is
+  // still the reply. One watched while it streamed stays open, so the text being read stays put.
+  const [mountedStreaming] = useState(Boolean(row.message.streaming));
+  const fold = !row.assistantCopyStreaming && !mountedStreaming;
+  const messageText =
+    (fold ? foldLongReply(text) : text) || (row.message.streaming ? "" : "(empty response)");
 
   return (
     <>

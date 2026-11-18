@@ -499,6 +499,10 @@
       "types": "./src/markdownPipeline.ts",
       "import": "./src/markdownPipeline.ts"
     },
+    "./replyFold": {
+      "types": "./src/replyFold.ts",
+      "import": "./src/replyFold.ts"
+    },
     "./threadFindText": {
       "types": "./src/threadFindText.ts",
       "import": "./src/threadFindText.ts"

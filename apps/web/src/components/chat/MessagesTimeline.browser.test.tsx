@@ -339,7 +339,12 @@ describe("MessagesTimeline work rows", () => {
 describe("MessagesTimeline messages", () => {
   it("settles when equally long messages have very different rendered heights", async () => {
     const props = baseProps();
-    const tall = message("a\n\n".repeat(6000), { role: "assistant" }, "tall");
+    // A reply that already folds is left whole by the client, so this one keeps its full height.
+    const tall = message(
+      `<details><summary>Notes</summary>x</details>\n\n${"a\n\n".repeat(6000)}`,
+      { role: "assistant" },
+      "tall",
+    );
     const earlier = Array.from({ length: 80 }, (_, index) =>
       message(
         `<details><summary>Reply ${index}</summary>${"compact ".repeat(2250)}</details>`,
