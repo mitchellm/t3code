@@ -230,7 +230,12 @@ describe("MessagesTimeline work rows", () => {
           ...Array.from({ length: 12 }, (_, index) =>
             message(`Earlier context ${index}`, {}, `context-${index}`),
           ),
-          message("Progress details\n\n".repeat(50), { role: "assistant", runId }, "progress"),
+          // A message that already folds is left whole by the client, so this one stays tall.
+          message(
+            `<details><summary>Log</summary>x</details>\n\n${"Progress details\n\n".repeat(50)}`,
+            { role: "assistant", runId },
+            "progress",
+          ),
           message("Done", { role: "assistant", runId }, "final"),
         ]}
       />,
