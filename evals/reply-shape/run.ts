@@ -6,8 +6,8 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
-import { foldLongReply } from "@t3tools/shared/replyFold";
 import { cases, type ReplyCase } from "./cases.ts";
 import { gradeReply, shape, type Check } from "./grade.ts";
 
@@ -23,6 +23,11 @@ const { values } = NodeUtil.parseArgs({
     effort: { type: "string" },
     "judge-model": { type: "string", default: "claude-sonnet-5-5" },
     baseline: { type: "string" },
+    // The client fold that decides the first screen: a replyFold.ts file, or "none". Defaults to
+    // the one in --root, or none when that checkout has no fold.
+    fold: { type: "string" },
+    // Grade the replies in an earlier results.jsonl again, without sampling the model.
+    regrade: { type: "string" },
   },
 });
 if (!values.out) throw new Error("Use --out <directory> [--model <id>] [--root <checkout>].");
@@ -30,6 +35,21 @@ const outDirectory = values.out;
 const model = values.model;
 const codex = model.startsWith("gpt-");
 const root = NodePath.resolve(values.root ?? NodePath.join(import.meta.dirname, "../.."));
+const foldFile =
+  values.fold ??
+  (NodeFS.existsSync(NodePath.join(root, "packages/shared/src/replyFold.ts"))
+    ? NodePath.join(root, "packages/shared/src/replyFold.ts")
+    : "none");
+const clientFold: (reply: string) => string =
+  foldFile === "none"
+    ? (reply) => reply
+    : (
+        (await import(NodeURL.pathToFileURL(NodePath.resolve(foldFile)).href)) as {
+          foldLongReply: (reply: string) => string;
+        }
+      ).foldLongReply;
+/** What the user sees before tapping anything: the reply as the client shows it, up to a fold. */
+const screenOf = (reply: string) => shape(clientFold(reply)).head;
 const wanted = values.case?.flatMap((ids) => ids.split(","));
 const selected = cases.filter((entry) => wanted === undefined || wanted.includes(entry.id));
 if (selected.length === 0) throw new Error("No case matches --case.");
@@ -209,7 +229,7 @@ const sampleCodex = async (body: Record<string, unknown>) => {
 
 const JUDGE_SYSTEM = [
   "You grade one reply an AI coding agent wrote to a busy user who runs many agent threads at once and often reads on a phone.",
-  "On first look the user sees only the part of the reply before any <details> block; a <details> block stays folded until tapped.",
+  "On first look the user sees only the first screen you are given; everything else is folded until tapped.",
   "Grade where the needed content sits and whether it is there, not the agent's judgment calls, dates or wording. Answer with one JSON object and nothing else.",
 ].join("\n");
 
@@ -217,17 +237,16 @@ const lastUserText = (entry: ReplyCase) =>
   [...entry.setup.priorTurns].reverse().find((turn) => turn.role === "user" && turn.text)?.text ??
   "";
 
-const judge = async (entry: ReplyCase, reply: string) => {
-  const s = shape(reply);
+const judge = async (entry: ReplyCase, reply: string, screen: string) => {
   const prompt = [
     `The user's last message: ${lastUserText(entry)}`,
     "",
     `What the user needs from this reply: ${entry.rubric}`,
     entry.kind === "control"
-      ? "The user asked for this detail, so the answer to it must be readable without opening a fold."
+      ? 'The user asked for this detail. The first line must give the bottom line, and the full reply must still carry the detail; it may sit behind a fold. For "enoughToAct", judge whether the full reply answers what they asked.'
       : "The user wants the outcome or the ask first, then only what they need to act; the rest may be folded.",
     "",
-    `<first_screen>\n${s.head}\n</first_screen>`,
+    `<first_screen>\n${screen}\n</first_screen>`,
     "",
     `<full_reply>\n${reply}\n</full_reply>`,
     "",
@@ -280,6 +299,33 @@ type Row = {
   readonly error?: string;
 };
 
+const grade = async (
+  entry: ReplyCase,
+  identity: Pick<Row, "id" | "kind" | "reply" | "model" | "sample">,
+  reply: string,
+  extra: Pick<Row, "usedCard" | "stop">,
+): Promise<Row> => {
+  const screen = screenOf(reply);
+  const checks = gradeReply(entry.expect, reply, screen);
+  const mechanical = checks.every((check) => check.pass);
+  const verdict = await judge(entry, reply, screen);
+  const s = shape(reply);
+  return {
+    ...identity,
+    pass: mechanical && verdict.pass,
+    mechanical,
+    judged: verdict.pass,
+    checks,
+    verdict,
+    headWords: s.headWords,
+    shownWords: shape(screen).headWords,
+    words: s.words,
+    hasDetails: s.hasDetails,
+    ...extra,
+    text: reply,
+  };
+};
+
 const runSample = async (
   entry: ReplyCase,
   body: Record<string, unknown>,
@@ -291,25 +337,28 @@ const runSample = async (
       ? await sampleCodex(body)
       : await sampleClaude(body, entry);
     if (reply === "") throw new Error(`empty reply (${stop})`);
-    const checks = gradeReply(entry.expect, reply);
-    const mechanical = checks.every((check) => check.pass);
-    const verdict = await judge(entry, reply);
-    const s = shape(reply);
-    return {
-      ...identity,
-      pass: mechanical && verdict.pass,
-      mechanical,
-      judged: verdict.pass,
-      checks,
-      verdict,
-      headWords: s.headWords,
-      shownWords: shape(foldLongReply(reply)).headWords,
-      words: s.words,
-      hasDetails: s.hasDetails,
-      usedCard,
-      stop,
-      text: reply,
-    };
+    return await grade(entry, identity, reply, { usedCard, stop });
+  } catch (error) {
+    return { ...identity, error: String(error instanceof Error ? error.message : error) };
+  }
+};
+
+/** Grades a stored reply again: new checks or a different client fold, same model output. */
+const regradeRow = async (row: Row): Promise<Row> => {
+  const entry = cases.find((candidate) => candidate.id === row.id);
+  if (entry === undefined || row.text === undefined) return row;
+  const identity = {
+    id: row.id,
+    kind: row.kind,
+    reply: row.reply,
+    model: row.model,
+    sample: row.sample,
+  };
+  try {
+    return await grade(entry, identity, row.text, {
+      ...(row.usedCard === undefined ? {} : { usedCard: row.usedCard }),
+      ...(row.stop === undefined ? {} : { stop: row.stop }),
+    });
   } catch (error) {
     return { ...identity, error: String(error instanceof Error ? error.message : error) };
   }
@@ -345,22 +394,29 @@ const casePasses = (rows: ReadonlyArray<Row>) => {
   return graded.length > 0 && graded.filter((row) => row.pass).length > graded.length / 2;
 };
 
-const bodies = requestBodies();
+const readRows = (file: string) =>
+  NodeFS.readFileSync(file, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Row);
+
 const samples = Number(values.samples);
-const tasks = selected.flatMap((entry, index) =>
-  Array.from({ length: samples }, (_, sample) => () => {
-    process.stderr.write(`${entry.id} #${sample}\n`);
-    return runSample(entry, bodies[index]!, sample);
-  }),
-);
+const tasks = values.regrade
+  ? readRows(values.regrade)
+      .filter((row) => wanted === undefined || wanted.includes(row.id))
+      .map((row) => () => regradeRow(row))
+  : (() => {
+      const bodies = requestBodies();
+      return selected.flatMap((entry, index) =>
+        Array.from({ length: samples }, (_, sample) => () => {
+          process.stderr.write(`${entry.id} #${sample}\n`);
+          return runSample(entry, bodies[index]!, sample);
+        }),
+      );
+    })();
 const rows = await pool(tasks, Number(values.concurrency));
 
-const baseline = values.baseline
-  ? NodeFS.readFileSync(values.baseline, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as Row)
-  : undefined;
+const baseline = values.baseline ? readRows(values.baseline) : undefined;
 
 const commit = NodeChildProcess.spawnSync("git", ["describe", "--always", "--dirty"], {
   cwd: root,
@@ -369,10 +425,12 @@ const commit = NodeChildProcess.spawnSync("git", ["describe", "--always", "--dir
 const lines = [
   "# Reply shape eval",
   "",
-  `- ${model}, T3 text from \`${root}\` at \`${commit}\`, ${samples} samples per case, judge ${values["judge-model"]}.`,
+  values.regrade
+    ? `- Regraded \`${values.regrade}\`, client fold \`${foldFile}\`, judge ${values["judge-model"]}.`
+    : `- ${model}, T3 text from \`${root}\` at \`${commit}\`, client fold \`${foldFile}\`, ${samples} samples per case, judge ${values["judge-model"]}.`,
   `- Samples: ${rows.length}, errored ${rows.filter((row) => row.error !== undefined).length}.`,
   "",
-  "| Group | Cases passing | Samples passing | Mechanical | Judge | Median head words | Shown with client fold | Median words | Uses details |",
+  "| Group | Cases passing | Samples passing | Mechanical | Judge | Median head words | First screen words | Median words | Uses details |",
   "|---|---|---|---|---|---|---|---|---|",
 ];
 const groupLine = (name: string, members: ReadonlyArray<Row>) => {

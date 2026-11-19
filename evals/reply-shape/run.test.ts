@@ -38,13 +38,17 @@ describe("gradeReply", () => {
     expect(passes(reply)).toBe(false);
   });
 
-  it("fails a control whose requested detail is folded away", () => {
-    const control = { lead: "because|cause", bodyMust: ["checkpoint"], detailVisible: true };
-    const folded =
-      "It stalls because of the WAL gate.\n\n<details><summary>Why</summary>\n\nThe checkpoint waits on readers.\n</details>";
-    const open =
-      "It stalls because of the WAL gate.\n\nThe checkpoint waits on readers, so every write queues.";
-    expect(passes(folded, control)).toBe(false);
-    expect(passes(open, control)).toBe(true);
+  it("grades the first screen the client shows, not the raw head", () => {
+    const reply = `Merged: ${PR}\n\n${"The change touches the session layer. ".repeat(20)}12 tests pass.`;
+    const screen = `Merged: ${PR}`;
+    expect(gradeReply(expectMerged, reply, screen).every((check) => check.pass)).toBe(true);
+  });
+
+  it("fails a control that answered in one line and dropped the detail it was asked for", () => {
+    const control = { lead: "because|cause", bodyMust: ["checkpoint"], minWords: 20 };
+    const short = "It stalls because of the WAL gate; the checkpoint waits.";
+    const full = `It stalls because of the WAL gate.\n\n<details><summary>Why</summary>\n\nThe checkpoint waits on readers, so every write queues behind the one that holds the WAL open.\n</details>`;
+    expect(passes(short, control)).toBe(false);
+    expect(passes(full, control)).toBe(true);
   });
 });

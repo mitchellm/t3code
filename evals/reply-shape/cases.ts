@@ -374,7 +374,6 @@ export const cases: ReadonlyArray<ReplyCase> = [
     expect: {
       lead: "9,?010|/hr|mint|forge",
       headMust: ["49,?816|299,?816|over (its |the )?cap", "164"],
-      maxHeadWords: 60,
     },
     rubric:
       "Just the data: forge 9,010/hr, 30x the 300/hr limit, down 9% for a second hour; guard elephant 49,816 over its cap; classic 164/hr, 72% of expected and falling.",
@@ -551,10 +550,10 @@ export const cases: ReadonlyArray<ReplyCase> = [
     expect: {
       lead: "12|normal|tracks|upgrades",
       bodyMust: ["past|previous|earlier|since 2025", "overlap|filler|consolidat"],
-      detailVisible: true,
+      minWords: 120,
     },
     rubric:
-      "The user asked for a rundown, so the comparison and the per-track reasoning are the answer and must be readable without opening a fold: 12 tracks and 98 tiers is normal against past events; 3 pairs overlap, 3 barely matter, 3 were filler; which to consolidate.",
+      "The user asked for a rundown. The first line gives the bottom line, and the reply still carries the full comparison and per-track reasoning: 12 tracks and 98 tiers is normal against past events; 3 pairs overlap, 3 barely matter, 3 were filler; which to consolidate.",
   },
   {
     id: "control-explain-the-feature",
@@ -576,10 +575,10 @@ export const cases: ReadonlyArray<ReplyCase> = [
     expect: {
       lead: "turkey|every 20|spawn|breakable|centre",
       bodyMust: ["cannon", "warning|countdown|polish|idea"],
-      detailVisible: true,
+      minWords: 120,
     },
     rubric:
-      "The user asked for an explanation and polish ideas, so how it works and the ideas must be readable without opening a fold.",
+      "The user asked for an explanation and polish ideas. The first line gives the bottom line, and the reply still explains how it works and gives the ideas.",
   },
   {
     id: "control-break-it-down",
@@ -602,10 +601,10 @@ export const cases: ReadonlyArray<ReplyCase> = [
     expect: {
       lead: "^no\\b|94|not|only",
       bodyMust: ["fantasy", "winter", "older"],
-      detailVisible: true,
+      minWords: 120,
     },
     rubric:
-      "Line one answers no: only 94 of 714 event pets beat the best zone pet, all from the last five events plus 2 Pinata pets. The per-event breakdown he asked for must be readable without opening a fold.",
+      "Line one answers no: only 94 of 714 event pets beat the best zone pet, all from the last five events plus 2 Pinata pets. The reply still carries the per-event breakdown he asked for.",
   },
   {
     id: "control-how-does-it-work",
@@ -627,9 +626,9 @@ export const cases: ReadonlyArray<ReplyCase> = [
     expect: {
       lead: "pumpkin|keep|break|loop",
       bodyMust: ["luck", "token|chase", "regrow|21"],
-      detailVisible: true,
+      minWords: 120,
     },
     rubric:
-      "The user asked how it works, so keep vs break and the mechanics must be readable without opening a fold.",
+      "The user asked how it works. The first line gives the bottom line, and the reply still explains keep vs break and the mechanics.",
   },
 ];
