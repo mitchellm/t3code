@@ -56,6 +56,7 @@ export function snapshotLedger(
     winConditions: ledger.winConditions,
     closed: ledger.closedAt !== null,
     requiresJudge: ledger.requiresJudge === true,
+    ...(ledger.askCheck === true ? { askCheck: true as const } : {}),
     counts,
     unfinished: counts.open + counts.in_progress,
     checkpoints: ledger.checkpoints.map(({ id, title, reached }) => ({ id, title, reached })),

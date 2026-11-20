@@ -12,11 +12,14 @@ import * as DateTime from "effect/DateTime";
 
 import {
   applyLedgerEvent,
+  askCheckedItems,
   asksTheUser,
   decideLedgerAutoContinue,
   LEDGER_AUTO_CONTINUE_CAP,
   type LedgerDomainEvent,
+  mentionsAnyQuote,
   unquotedAsk,
+  wasAsked,
 } from "./taskLedger.ts";
 
 describe("asksTheUser", () => {
@@ -397,5 +400,62 @@ describe("decideLedgerAutoContinue", () => {
         messages: [followUp(1, [["a", "open"]]), userMessage],
       }),
     ).toEqual({ type: "idle" });
+  });
+});
+
+describe("askCheckedItems", () => {
+  it("is the user's asks, whatever sits beside or under them", () => {
+    const ledger = {
+      items: [
+        item("ask-1", { quote: "fix the sync" }),
+        item("step", { parentItemId: LedgerItemId.make("item:ask-1") }),
+        item("plan"),
+        item("ask-2", { quote: "and the export" }),
+      ],
+    };
+    expect(askCheckedItems(ledger).map(({ title }) => title)).toEqual(["ask-1", "ask-2"]);
+  });
+
+  it("is the top-level items when no item quotes the user", () => {
+    const ledger = {
+      items: [
+        item("one"),
+        item("sub", { parentItemId: LedgerItemId.make("item:one") }),
+        item("two"),
+      ],
+    };
+    expect(askCheckedItems(ledger).map(({ title }) => title)).toEqual(["one", "two"]);
+  });
+});
+
+describe("wasAsked", () => {
+  it("counts what the user wrote or another agent sent, never the server's own wakes", () => {
+    expect(wasAsked({ createdBy: "user", creationSource: "web" })).toBe(true);
+    expect(wasAsked({ createdBy: "agent", creationSource: "mcp" })).toBe(true);
+    expect(wasAsked({ createdBy: "agent", creationSource: "server" })).toBe(false);
+    expect(
+      wasAsked({
+        createdBy: "agent",
+        creationSource: "mcp",
+        notification: { source: { kind: "ledger_continue" } } as never,
+      }),
+    ).toBe(false);
+    expect(wasAsked({ createdBy: "user", creationSource: "server" })).toBe(true);
+  });
+});
+
+describe("mentionsAnyQuote", () => {
+  const text = "Fix the sync.\nIt needs to be **completely functional**, in every client.";
+
+  it("compares on words alone, as unquotedAsk does", () => {
+    expect(mentionsAnyQuote(text, ["unrelated", "It needs to be “completely functional”"])).toBe(
+      true,
+    );
+    expect(mentionsAnyQuote(text, ["make it fast"])).toBe(false);
+  });
+
+  it("never counts a quote with no words", () => {
+    expect(mentionsAnyQuote(text, ["..."])).toBe(false);
+    expect(mentionsAnyQuote(text, [])).toBe(false);
   });
 });

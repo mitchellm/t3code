@@ -41,8 +41,21 @@ describe("loadout settings", () => {
       "napalm",
       "haiku-workers",
       "cross-check",
+      "checked-solo",
     ]);
     expect(DEFAULT_LOADOUTS[1]?.roles.judge?.model).toBe("claude-opus-5-5");
+  });
+
+  it("ships Checked solo as one agent with only an Opus judge, which checks the finished asks", () => {
+    const checked = DEFAULT_LOADOUTS.find(({ id }) => id === "checked-solo");
+    expect(checked).toEqual({
+      id: "checked-solo",
+      name: "Checked solo",
+      description:
+        "One agent builds on the thread's model; Opus checks the finished work against your message.",
+      structure: "solo",
+      roles: { judge: { instanceId: "claudeAgent", model: "claude-opus-5-5", effort: "high" } },
+    });
   });
 
   it("judges Cross-check on Codex with an Opus fallback that survives a round trip", () => {

@@ -2,9 +2,11 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  DEFAULT_LOADOUTS,
   EnvironmentId,
   LedgerId,
   LedgerItemId,
+  type Loadout,
   NodeId,
   type OrchestrationV2Subagent,
   ProjectId,
@@ -24,6 +26,7 @@ import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenanc
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import type * as ServerSettings from "../serverSettings.ts";
 import { runOrchestratorV2Scenario } from "../orchestration-v2/testkit/OrchestratorScenario.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -39,25 +42,31 @@ const adapter = {
   openSession: () => Effect.die("Ledger commands never reach a provider"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
-const layerOrchestrator = Layer.mergeAll(
-  layerDatabase,
-  ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
-  EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
-  ProjectionMaintenance.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        layerDatabase,
-        EventStore.layer.pipe(Layer.provide(layerDatabase)),
-        ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+const makeLayerOrchestrator = (serverSettings?: Parameters<typeof ServerSettings.layerTest>[0]) =>
+  Layer.mergeAll(
+    layerDatabase,
+    ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+    EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
+    ProjectionMaintenance.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          layerDatabase,
+          EventStore.layer.pipe(Layer.provide(layerDatabase)),
+          ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+        ),
       ),
     ),
-  ),
-  ProviderReplayHarness.layerWithRegistry(
-    { name: "ledger-mcp" },
-    ProviderAdapterRegistry.layerFromAdapters([adapter]),
-    { databaseLayer: layerDatabase, runEffectWorker: false },
-  ),
-);
+    ProviderReplayHarness.layerWithRegistry(
+      { name: "ledger-mcp" },
+      ProviderAdapterRegistry.layerFromAdapters([adapter]),
+      {
+        databaseLayer: layerDatabase,
+        runEffectWorker: false,
+        ...(serverSettings === undefined ? {} : { serverSettings }),
+      },
+    ),
+  );
+const layerOrchestrator = makeLayerOrchestrator();
 
 // The MCP service only needs dispatch and thread reads, so the real orchestrator sits behind them.
 const layerThreads = Layer.unwrap(
@@ -259,4 +268,205 @@ it.effect(
       ),
     );
   },
+);
+
+const stampProjectId = ProjectId.make("project:ledger-mcp-stamp");
+const judgedLoadout: Loadout = {
+  id: "judged-codex",
+  name: "Judged",
+  description: "A judge on an instance this server runs",
+  roles: { judge: { instanceId, model: "gpt-5.1-codex" } },
+};
+
+/** What the orchestrator stamps on a ledger made on a fresh thread, under these settings. */
+const stampedLedger = (input: {
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+  readonly loadoutId?: string;
+  readonly start?: "create" | "investigation";
+}) => {
+  const stampThreadId = ThreadId.make("thread:ledger-mcp-stamp");
+  const stampScope: McpInvocationContext.McpInvocationScope = {
+    ...scope,
+    thread: {
+      threadId: stampThreadId,
+      providerSessionId: "ledger-mcp-session",
+      providerInstanceId: instanceId,
+    },
+  };
+  return Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:ledger-mcp-stamp:thread"),
+      threadId: stampThreadId,
+      projectId: stampProjectId,
+      title: "ledger stamp",
+      modelSelection: { instanceId, model: "gpt-5.1-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    if (input.loadoutId !== undefined) {
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("command:ledger-mcp-stamp:loadout"),
+        threadId: stampThreadId,
+        loadout: { id: input.loadoutId, reason: null, setBy: "user" },
+      });
+    }
+    const service = yield* LedgerMcpService.LedgerMcpService;
+    let shown: boolean | undefined;
+    if (input.start === "investigation") {
+      yield* orchestrator.dispatch({
+        type: "ledger.investigation.start",
+        commandId: CommandId.make("command:ledger-mcp-stamp:investigation"),
+        threadId: stampThreadId,
+        ledgerId: LedgerId.make("ledger:ledger-mcp-stamp"),
+        goal: "Why does the parser drop rows",
+        solvedWhen: "A failing test passes with the fix.",
+        budget: { minutes: 30 },
+        parallelApproaches: 2,
+      });
+      shown = (yield* service.read(stampScope)).ledger?.askCheck;
+    } else {
+      const created = yield* service.create(stampScope, {
+        title: "Ship the parser",
+        items: [{ id: LedgerItemId.make("L1"), title: "Parse", acceptance: "tests pass" }],
+      });
+      shown = created.ledger?.askCheck;
+    }
+    const ledger = (yield* orchestrator.getThreadProjection(stampThreadId)).ledger;
+    return { askCheck: ledger?.askCheck, requiresJudge: ledger?.requiresJudge, shown };
+  }).pipe(
+    Effect.provide(
+      LedgerMcpService.layer.pipe(
+        Layer.provideMerge(layerThreads),
+        Layer.provideMerge(makeLayerOrchestrator(input.settings)),
+        Layer.provideMerge(NodeCrypto.layer),
+      ),
+    ),
+  );
+};
+
+it.effect("a solo thread's new ledger is stamped for the ask check, and ledger_read shows it", () =>
+  Effect.gen(function* () {
+    assert.deepEqual(yield* stampedLedger({}), {
+      askCheck: true,
+      requiresJudge: undefined,
+      shown: true,
+    });
+  }),
+);
+
+it.effect("the ask check setting off, for the server or for the project, stamps neither flag", () =>
+  Effect.gen(function* () {
+    const none = { askCheck: undefined, requiresJudge: undefined, shown: undefined };
+    assert.deepEqual(yield* stampedLedger({ settings: { askCheck: false } }), none);
+    assert.deepEqual(
+      yield* stampedLedger({
+        settings: { projectSettingsOverrides: { [stampProjectId]: { askCheck: false } } },
+      }),
+      none,
+    );
+    // Another project's override leaves this one on.
+    assert.isTrue(
+      (yield* stampedLedger({
+        settings: {
+          askCheck: false,
+          projectSettingsOverrides: { [stampProjectId]: { askCheck: true } },
+        },
+      })).askCheck,
+    );
+  }),
+);
+
+it.effect("a loadout with a judge stamps requiresJudge and never the ask check", () =>
+  Effect.gen(function* () {
+    const settings = { loadouts: [...DEFAULT_LOADOUTS, judgedLoadout] };
+    assert.deepEqual(yield* stampedLedger({ settings, loadoutId: judgedLoadout.id }), {
+      askCheck: undefined,
+      requiresJudge: true,
+      shown: undefined,
+    });
+  }),
+);
+
+// One agent builds and its judge model checks the finished asks, instead of judging each item.
+const soloJudgedLoadout: Loadout = {
+  ...judgedLoadout,
+  id: "solo-judged",
+  name: "Solo judged",
+  structure: "solo",
+};
+// The same, with a judge on an instance this server does not run.
+const soloUnrunnableLoadout: Loadout = {
+  ...soloJudgedLoadout,
+  id: "solo-unrunnable",
+  roles: {
+    judge: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus-5-5" },
+  },
+};
+
+it.effect(
+  "a solo-structured loadout with a runnable judge gets the ask check, whatever the setting",
+  () =>
+    Effect.gen(function* () {
+      const loadouts = [...DEFAULT_LOADOUTS, soloJudgedLoadout];
+      const checked = { askCheck: true, requiresJudge: undefined, shown: true } as const;
+      assert.deepEqual(
+        yield* stampedLedger({ settings: { loadouts }, loadoutId: soloJudgedLoadout.id }),
+        checked,
+      );
+      assert.deepEqual(
+        yield* stampedLedger({
+          settings: { loadouts, askCheck: false },
+          loadoutId: soloJudgedLoadout.id,
+        }),
+        checked,
+      );
+    }),
+);
+
+it.effect("a solo-structured loadout whose judge cannot run falls back to the setting", () =>
+  Effect.gen(function* () {
+    const loadouts = [...DEFAULT_LOADOUTS, soloUnrunnableLoadout];
+    const stamped = (askCheck: boolean) =>
+      stampedLedger({ settings: { loadouts, askCheck }, loadoutId: soloUnrunnableLoadout.id });
+    assert.deepEqual(yield* stamped(true), {
+      askCheck: true,
+      requiresJudge: undefined,
+      shown: true,
+    });
+    assert.deepEqual(yield* stamped(false), {
+      askCheck: undefined,
+      requiresJudge: undefined,
+      shown: undefined,
+    });
+  }),
+);
+
+it.effect("an investigation under a solo-structured judge is still judged by its refuter", () =>
+  Effect.gen(function* () {
+    assert.deepEqual(
+      yield* stampedLedger({
+        settings: { loadouts: [...DEFAULT_LOADOUTS, soloJudgedLoadout] },
+        loadoutId: soloJudgedLoadout.id,
+        start: "investigation",
+      }),
+      { askCheck: undefined, requiresJudge: true, shown: undefined },
+    );
+  }),
+);
+
+it.effect("an investigation is judged by its refuter and gets no ask check", () =>
+  Effect.gen(function* () {
+    const settings = { loadouts: [...DEFAULT_LOADOUTS, judgedLoadout] };
+    assert.deepEqual(
+      yield* stampedLedger({ settings, loadoutId: judgedLoadout.id, start: "investigation" }),
+      { askCheck: undefined, requiresJudge: true, shown: undefined },
+    );
+  }),
 );

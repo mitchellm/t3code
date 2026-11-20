@@ -156,6 +156,14 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
       },
     },
   },
+  {
+    id: "checked-solo",
+    name: "Checked solo",
+    description:
+      "One agent builds on the thread's model; Opus checks the finished work against your message.",
+    structure: "solo",
+    roles: { judge: claude("claude-opus-5-5", "high") },
+  },
 ];
 
 /** Presets the fork once shipped, exactly as shipped, so a saved list can be told apart from them. */

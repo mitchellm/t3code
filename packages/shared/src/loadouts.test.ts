@@ -20,8 +20,10 @@ import {
   loadoutRoleTarget,
   loadoutStructure,
   matchRoleCandidate,
+  ownModelTarget,
   parseJudgeVerdict,
   resolveLoadout,
+  soloJudgeRole,
   strongerJudgeTarget,
   withSolo,
 } from "./loadouts.ts";
@@ -136,6 +138,36 @@ describe("loadoutStructure", () => {
     });
     expect(decoded.structure).toBeUndefined();
     expect(loadoutStructure(decoded)).toBe("solo");
+  });
+});
+
+describe("soloJudgeRole", () => {
+  const judge: LoadoutRole = { instanceId: claude, model: "claude-opus-5-5", effort: "high" };
+
+  it("is the judge of a loadout that chose the solo structure, so one agent builds and it checks", () => {
+    expect(soloJudgeRole(resolveLoadout(DEFAULT_LOADOUTS, "checked-solo"))).toEqual(judge);
+    const solo: Loadout = {
+      id: "s",
+      name: "S",
+      description: "",
+      roles: { judge },
+      structure: "solo",
+    };
+    expect(soloJudgeRole(solo)).toEqual(judge);
+  });
+
+  it("is nothing for a loadout that delegates, or that has no judge", () => {
+    expect(soloJudgeRole(resolveLoadout(DEFAULT_LOADOUTS, "solo"))).toBeUndefined();
+    // Judge roles with no structure chosen run workers, which judge item by item as before.
+    expect(soloJudgeRole(resolveLoadout(DEFAULT_LOADOUTS, "haiku-workers"))).toBeUndefined();
+    const managers: Loadout = {
+      id: "m",
+      name: "M",
+      description: "",
+      roles: { judge },
+      structure: "managers",
+    };
+    expect(soloJudgeRole(managers)).toBeUndefined();
   });
 });
 
@@ -342,6 +374,22 @@ describe("strongerJudgeTarget", () => {
     ).toEqual({
       providerInstanceId: claude,
       model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "high" }],
+    });
+  });
+});
+
+describe("ownModelTarget", () => {
+  it("names the thread's own model and the options it runs on", () => {
+    const own = { instanceId: claude, model: "claude-sonnet-5-5" };
+    expect(ownModelTarget(own)).toEqual({ providerInstanceId: claude, model: own.model });
+    expect(ownModelTarget({ ...own, options: [] })).toEqual({
+      providerInstanceId: claude,
+      model: own.model,
+    });
+    expect(ownModelTarget({ ...own, options: [{ id: "effort", value: "high" }] })).toEqual({
+      providerInstanceId: claude,
+      model: own.model,
       options: [{ id: "effort", value: "high" }],
     });
   });

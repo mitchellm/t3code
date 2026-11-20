@@ -86,6 +86,29 @@ describe("plan before editing setting", () => {
   });
 });
 
+describe("ask check setting", () => {
+  it("is on for settings written before it existed", () => {
+    expect(decodeServerSettings({}).askCheck).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.askCheck).toBe(true);
+  });
+
+  it("keeps a project's override and patches it per project", () => {
+    expect(
+      decodeServerSettings({ projectSettingsOverrides: { project: { askCheck: false } } })
+        .projectSettingsOverrides[ProjectId.make("project")]?.askCheck,
+    ).toBe(false);
+    expect(
+      decodeServerSettingsPatch({
+        askCheck: false,
+        projectSettingsOverrides: { project: { askCheck: true } },
+      }),
+    ).toEqual({
+      askCheck: false,
+      projectSettingsOverrides: { project: { askCheck: true } },
+    });
+  });
+});
+
 describe("child MCP servers setting", () => {
   it("lists no user-scoped server for settings written before it existed", () => {
     expect(decodeServerSettings({}).childMcpServers).toEqual([]);

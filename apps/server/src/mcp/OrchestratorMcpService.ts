@@ -74,11 +74,13 @@ import {
 } from "@t3tools/contracts";
 import {
   loadoutDelegationTarget,
-  matchRoleCandidate,
+  ownModelTarget,
   resolveLoadout,
+  soloJudgeRole,
   strongerJudgeTarget,
   withSolo,
 } from "@t3tools/shared/loadouts";
+import { wasAsked } from "@t3tools/shared/taskLedger";
 import { isolationReport, resolveDelegationWorkspace } from "./WorkerIsolation.ts";
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -134,12 +136,13 @@ import {
 } from "./McpInvocationContext.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import {
+  acceptedJudgeModel,
   type BackgroundJudgementPorts,
+  isAskCheckLedger,
   judgeThreadPrompts,
   requestJudgement,
   settleBackgroundJudgement,
   startBackgroundJudgement,
-  strongerJudgeDue,
 } from "./LedgerJudgement.ts";
 import { workspaceCheckpoints } from "./LedgerJudgeCriteria.ts";
 import { linkDelegatedTask, resolveLedgerLink } from "./LedgerTaskLink.ts";
@@ -1297,7 +1300,8 @@ const make = Effect.gen(function* () {
       role,
       yield* projectEnabledProviders(thread, providers),
     );
-    // A judge that quietly ran on the thread's own model would be marking its own work.
+    // A judge that quietly ran on the thread's own model would be marking its own work. (The ask
+    // check is the one exception, by design: see `expectedJudge`.)
     if (role === "judge" && target === undefined) {
       return yield* failure(
         "provider_unavailable",
@@ -2158,13 +2162,21 @@ const make = Effect.gen(function* () {
     const expectedJudge = Effect.fn("OrchestratorMcpService.expectedJudge")(function* (
       stronger = false,
     ) {
+      const { active } = yield* loadLoadouts(parent.thread);
+      // Fork: an ask check is a fresh session on the thread's own model unless a solo loadout names
+      // a judge for it. That session has none of the author's context, so a verdict from it is not
+      // the agent marking its own work. There is nothing stronger to switch to either.
+      const askChecking = isAskCheckLedger(ledger);
+      if (askChecking && soloJudgeRole(active) === undefined) {
+        const own = parent.thread.modelSelection;
+        return { ...ownModelTarget(own), providerInstanceId: own.instanceId, model: own.model };
+      }
       const providers = yield* loadProviders;
       // The standard judge is resolved even when a stronger one is used, so a loadout whose judge
       // cannot resolve still refuses rather than judging on an unconfigured model.
       const standard = yield* loadoutRoleTarget(parent.thread, "judge", providers);
-      const { active } = yield* loadLoadouts(parent.thread);
       const expected =
-        stronger && standard !== undefined
+        stronger && !askChecking && standard !== undefined
           ? strongerJudgeTarget(
               active,
               parent.thread.modelSelection,
@@ -2236,25 +2248,13 @@ const make = Effect.gen(function* () {
         // probe made the primary resolvable. Only a configured candidate is accepted; anything
         // else is compared with the current resolution and reported as the mismatch it is.
         const { active } = yield* loadLoadouts(parent.thread);
-        const ran =
-          active.roles.judge === undefined ||
-          result.model === null ||
-          result.providerInstanceId === null
-            ? undefined
-            : (matchRoleCandidate(active.roles.judge, {
-                instanceId: result.providerInstanceId,
-                model: result.model,
-              }) ??
-              // A third verdict on runs on the planner's model when the role has no fallback
-              // (strongerJudgeTarget). Accepted only for an item that has earned it, so an agent
-              // cannot pass off its own delegation on that model as the first verdict.
-              (result.providerInstanceId === parent.thread.modelSelection.instanceId &&
-              result.model === parent.thread.modelSelection.model &&
-              ledger?.items.some(
-                (item) => item.judgeTaskId === taskId && strongerJudgeDue(item),
-              ) === true
-                ? { providerInstanceId: result.providerInstanceId, model: result.model }
-                : undefined));
+        const ran = acceptedJudgeModel({
+          ledger,
+          taskId,
+          judgeRole: isAskCheckLedger(ledger) ? soloJudgeRole(active) : active.roles.judge,
+          planner: parent.thread.modelSelection,
+          ran: { instanceId: result.providerInstanceId, model: result.model },
+        });
         return yield* judgeRun(result, ran ?? (yield* expectedJudge()));
       }),
       archiveJudge: (threadId) =>
@@ -2282,6 +2282,13 @@ const make = Effect.gen(function* () {
           Effect.map(({ messages }) => judgeThreadPrompts(messages)),
           Effect.mapError(threadManagementFailure),
         ),
+      askedMessages: () =>
+        threadManagement
+          .getThreadRecords(scope.thread.threadId, ["messages"], { messageRoles: ["user"] })
+          .pipe(
+            Effect.map(({ messages }) => messages.filter(wasAsked)),
+            Effect.mapError(threadManagementFailure),
+          ),
       checkpoints: () =>
         threadManagement
           .getThreadRecords(scope.thread.threadId, ["checkpoints", "checkpointScopes"])

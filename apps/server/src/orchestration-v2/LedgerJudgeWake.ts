@@ -30,8 +30,9 @@ export function judgeVerdictWakesPlanner(input: {
     return true;
   }
   const others = ledger.items.filter((item) => item.id !== judged.id && isOpen(item));
-  // The pass finishes the ledger: the planner owes the solve and report.
-  if (others.length === 0) return true;
+  // The pass finishes the ledger: the planner owes the solve and report. Under an ask check the
+  // agent is told to report when it closes its last ask, so a pass leaves it nothing to say.
+  if (others.length === 0) return ledger.askCheck !== true;
   // The pass unblocks an item, or lets its parent close.
   if (others.some((item) => item.blockedBy?.includes(judged.id) === true)) return true;
   if (others.some((item) => item.id === judged.parentItemId)) return true;

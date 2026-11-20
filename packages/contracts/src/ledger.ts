@@ -164,6 +164,12 @@ export const Ledger = Schema.Struct({
    * loadout with a judge role; absent on older records, which means false.
    */
   requiresJudge: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Fork: the last ask to close is first checked against the user's message by a fresh session on
+   * the thread's own model. Fixed when the ledger is created, on a thread with no judge; a ledger
+   * has at most one of this and `requiresJudge`. Absent on older records, which means false.
+   */
+  askCheck: Schema.optionalKey(Schema.Boolean),
   /** Fork: present when the ledger runs an investigation (Investigate mode). */
   investigation: Schema.optionalKey(LedgerInvestigation),
   createdAt: Schema.DateTimeUtc,
@@ -246,8 +252,8 @@ export const LedgerCommands = [
     startState: Schema.String,
     checkpoints: Schema.Array(LedgerCheckpointDraft),
     winConditions: Schema.Array(Schema.String),
-    // No requiresJudge: the orchestrator derives it from the thread's loadout, so neither a
-    // client nor the agent being judged can opt a ledger out of the gate.
+    // No requiresJudge or askCheck: the orchestrator derives them from the thread's loadout and
+    // settings, so neither a client nor the agent being judged can opt a ledger out of the gate.
     items: Schema.Array(LedgerItemDraft),
     /** As on `ledger.item.update`: the ledger tools stamp "agent", which only narrows. */
     createdBy: Schema.optional(LedgerActor),

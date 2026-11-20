@@ -11,7 +11,6 @@ import {
   type LedgerMcpUpdateItemInput,
   type LedgerMcpWriteResult,
   OrchestratorMcpFailure,
-  type OrchestrationV2ConversationMessage,
   type OrchestrationV2ServerCommand,
   type ProjectId,
   type ThreadId,
@@ -23,7 +22,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { unquotedAsk } from "@t3tools/shared/taskLedger";
+import { unquotedAsk, wasAsked } from "@t3tools/shared/taskLedger";
 
 import {
   investigationSpawnGuard,
@@ -272,14 +271,6 @@ const make = Effect.gen(function* () {
       (ledger) => ledger !== undefined && applied(ledger),
       changedItemIds,
     );
-
-  // Fork: an ask must quote what this thread was asked. A task that another agent or the CLI sent
-  // (a launched thread, `t3 thread start`) is stored as agent-authored though nobody typed it
-  // here, so authorship cannot be the test. What never counts is what the server wrote itself:
-  // wakes carry a notification, and its follow-ups come from the server.
-  const wasAsked = (message: OrchestrationV2ConversationMessage) =>
-    message.createdBy === "user" ||
-    (message.notification === undefined && message.creationSource !== "server");
 
   const checkQuotes = Effect.fn("LedgerMcpService.checkQuotes")(function* (
     scope: McpInvocationScope,

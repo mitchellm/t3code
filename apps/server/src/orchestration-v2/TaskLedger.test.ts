@@ -586,13 +586,23 @@ it.effect("closes the ledger itself when the last item is closed, dropped or def
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("closes the ledger when the last item is closed by the agent or the user alike", () =>
-  Effect.gen(function* () {
-    const threadId = yield* createThread("auto-close-one");
-    yield* createLedger(threadId, { items: ["a"] });
-    yield* updateItem(threadId, "a", { status: "closed", evidence: "done", createdBy: "agent" });
-    assert.ok((yield* ledgerOf(threadId))?.closedAt);
-  }).pipe(Effect.provide(layerTest)),
+it.effect(
+  "closes the ledger when the user closes its last item, and holds the agent's for a check",
+  () =>
+    Effect.gen(function* () {
+      const byUser = yield* createThread("auto-close-one");
+      yield* createLedger(byUser, { items: ["a"] });
+      yield* updateItem(byUser, "a", { status: "closed", evidence: "done" });
+      assert.ok((yield* ledgerOf(byUser))?.closedAt);
+
+      // A thread with no judge has its last close checked first, so the ledger stays open.
+      const byAgent = yield* createThread("auto-close-checked");
+      yield* createLedger(byAgent, { items: ["a"] });
+      assert.equal((yield* ledgerOf(byAgent))?.askCheck, true);
+      yield* updateItem(byAgent, "a", { status: "closed", evidence: "done", createdBy: "agent" });
+      assert.equal(itemOf(yield* ledgerOf(byAgent), "a")?.judging, true);
+      assert.isNull((yield* ledgerOf(byAgent))?.closedAt);
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("does not close a ledger that has no items or whose item is still being judged", () =>

@@ -61,6 +61,7 @@ import { scopedIdleCompaction } from "./scopedSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { PinnedRulesSettings } from "./PinnedRulesSettings";
 import { LoadoutSettings } from "./LoadoutSettings";
+import { AskCheckSettings } from "./AskCheckSettings";
 import { PlanBeforeEditingSettings } from "./PlanBeforeEditingSettings";
 import { ThreadTitleInstructionsSettings } from "./ThreadTitleInstructionsSettings";
 import { SnoozePresetsRow } from "./SnoozePresetsSettings";
@@ -597,6 +598,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.planBeforeEditing !== DEFAULT_UNIFIED_SETTINGS.planBeforeEditing
       ? ["Plan before editing"]
       : []),
+    ...(settings.askCheck !== DEFAULT_UNIFIED_SETTINGS.askCheck
+      ? ["Check finished work against your message"]
+      : []),
     ...getChangedBrowserSettingLabels(settings),
     ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
       ? ["Agent browser access"]
@@ -712,6 +716,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       pinnedRules: DEFAULT_UNIFIED_SETTINGS.pinnedRules,
       loadouts: [...DEFAULT_UNIFIED_SETTINGS.loadouts],
       planBeforeEditing: DEFAULT_UNIFIED_SETTINGS.planBeforeEditing,
+      askCheck: DEFAULT_UNIFIED_SETTINGS.askCheck,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
@@ -1930,6 +1935,7 @@ export function ThreadsSettingsPanel() {
           />
         </AdvancedSettings>
         <PlanBeforeEditingSettings />
+        <AskCheckSettings />
         <LoadoutSettings />
       </SettingsSection>
 

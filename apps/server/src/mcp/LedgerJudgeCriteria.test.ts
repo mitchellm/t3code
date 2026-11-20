@@ -2,7 +2,11 @@ import { describe, expect, it } from "@effect/vitest";
 import { CheckpointRef, CheckpointScopeId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { acceptanceCriteria, workspaceCheckpoints } from "./LedgerJudgeCriteria.ts";
+import {
+  acceptanceCriteria,
+  criteriaProblem,
+  workspaceCheckpoints,
+} from "./LedgerJudgeCriteria.ts";
 
 describe("acceptanceCriteria", () => {
   it("does not split after common abbreviations", () => {
@@ -33,6 +37,34 @@ describe("acceptanceCriteria", () => {
     expect(acceptanceCriteria("```ts\n`vp test run` passes\n```\n##\n~~~\nExit code is 0")).toEqual(
       ["`vp test run` passes", "Exit code is 0"],
     );
+  });
+});
+
+describe("criteriaProblem", () => {
+  it("reads proof written on the lines directly under a bare PASS line", () => {
+    // Field shape (Opus judges, 23 of 77 FAILs in one window): the verdict word alone, then bullets.
+    const answer = [
+      "C1: PASS - the file lists 11 modes, each with a count.",
+      "C2: PASS.",
+      "- **File:** it exists at 99 lines.",
+      "- **Snapshot:** snapshot.log says quick_check: ok.",
+      "",
+      "Tests: node mode-examples.mjs -> ids match",
+      "VERDICT: PASS",
+    ].join("\n");
+    expect(criteriaProblem(answer, 2)).toBeUndefined();
+  });
+
+  it("still refuses a bare PASS line with nothing under it", () => {
+    for (const answer of [
+      "C1: PASS - 3 passed\nC2: PASS\nVERDICT: PASS",
+      "C1: PASS - 3 passed\nC2: PASS\nTests: vp test run -> 3 passed\nVERDICT: PASS",
+      "C1: PASS\nC2: PASS - 3 passed\nVERDICT: PASS",
+      "C1: PASS - 3 passed\nC2: PASS\n\nI also noticed an unrelated typo in the readme.\nVERDICT: PASS",
+      "C1: PASS - 3 passed\nC2: PASS\n- <proof you checked>\nVERDICT: PASS",
+    ]) {
+      expect(criteriaProblem(answer, 2)).toContain("no PASS line with proof");
+    }
   });
 });
 

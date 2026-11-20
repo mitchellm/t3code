@@ -43,6 +43,14 @@ export const loadoutHasJudge = (loadout: Loadout): boolean => loadout.roles.judg
 export const loadoutStructure = (loadout: Loadout): LoadoutStructure =>
   loadout.structure ?? (Object.keys(loadout.roles).length === 0 ? "solo" : "workers");
 
+/**
+ * Fork: the judge of a loadout that chose the solo structure. One agent builds and delegates
+ * nothing, and this role checks its finished asks, instead of judging each item as under a
+ * structure that delegates.
+ */
+export const soloJudgeRole = (loadout: Loadout): LoadoutRole | undefined =>
+  loadout.structure === "solo" ? loadout.roles.judge : undefined;
+
 export type ThreadLoadoutDecision =
   | { readonly _tag: "set"; readonly loadout: ThreadLoadout | null }
   | { readonly _tag: "unchanged" }
@@ -142,6 +150,21 @@ export function loadoutRoleCandidates(role: LoadoutRole): ReadonlyArray<{
   }));
 }
 
+/** A thread's own model, with the options it runs on, as a delegation target. */
+export function ownModelTarget(selection: {
+  readonly instanceId: LoadoutRole["instanceId"];
+  readonly model: string;
+  readonly options?: ReadonlyArray<ProviderOptionSelection> | undefined;
+}): OrchestratorMcpTarget {
+  return {
+    providerInstanceId: selection.instanceId,
+    model: selection.model,
+    ...(selection.options === undefined || selection.options.length === 0
+      ? {}
+      : { options: selection.options }),
+  };
+}
+
 /**
  * The judge for an item already failed twice: the role's fallback when it can run (configured as
  * the second opinion), else the planner's own model. A planner-model judge is accepted here
@@ -158,13 +181,8 @@ export function strongerJudgeTarget(
 ): OrchestratorMcpTarget {
   const fallback = loadout.roles.judge?.fallback;
   return (
-    (fallback === undefined ? undefined : loadoutRoleTarget(fallback, providers)) ?? {
-      providerInstanceId: planner.instanceId,
-      model: planner.model,
-      ...(planner.options === undefined || planner.options.length === 0
-        ? {}
-        : { options: planner.options }),
-    }
+    (fallback === undefined ? undefined : loadoutRoleTarget(fallback, providers)) ??
+    ownModelTarget(planner)
   );
 }
 
