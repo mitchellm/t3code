@@ -139,6 +139,25 @@ describe("Stop hook", () => {
     expect(output.reason).toContain("close with evidence, or drop with a reason");
   });
 
+  it("lets the turn end with the held item open once a third failed check stopped the ledger", async () => {
+    const stopped = ledgerOf([item("L1", "in_progress")], {
+      askCheck: true,
+      askCheckPolicy: "v2",
+      askCheckFails: 3,
+      askCheckStopped: { at, fails: 3 },
+    });
+    const current = { value: state(stopped) };
+    const { fire } = make(ledgerReader(current));
+    // Neither the first block, nor the replan at the no-progress limit, nor any later one.
+    for (let round = 0; round <= HARNESS_STOP_BLOCK_LIMIT + 1; round += 1) {
+      expect(await fire("Stop", stop(round > 0))).toEqual({});
+    }
+    // The user writing lifts the stop, and the hook blocks again as for any open item.
+    const { askCheckStopped: _lifted, ...resumed } = stopped;
+    current.value = state(resumed);
+    expect((await fire("Stop", stop(false))).decision).toBe("block");
+  });
+
   it("lets a turn that asks the user a question end, with the question first or last", async () => {
     const current = { value: state(ledgerOf([item("L1", "in_progress")])) };
     const { fire } = make(ledgerReader(current));

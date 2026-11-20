@@ -39,6 +39,7 @@ import { continueLedgerAfterRun, continueLedgerAfterRunSafely } from "./LedgerAu
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import type * as ServerSettings from "../serverSettings.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
@@ -51,17 +52,25 @@ const adapter = {
   openSession: () => Effect.die("Auto-continue decisions never reach a provider"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
-const layerTest = Layer.mergeAll(
-  layerDatabase,
-  ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
-  IdAllocator.layer,
-  EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
-  ProviderReplayHarness.layerWithRegistry(
-    { name: "ledger-auto-continue" },
-    ProviderAdapterRegistry.layerFromAdapters([adapter]),
-    { databaseLayer: layerDatabase, runEffectWorker: false },
-  ),
-);
+const makeLayerTest = (serverSettings?: Parameters<typeof ServerSettings.layerTest>[0]) =>
+  Layer.mergeAll(
+    layerDatabase,
+    ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+    IdAllocator.layer,
+    EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
+    ProviderReplayHarness.layerWithRegistry(
+      { name: "ledger-auto-continue" },
+      ProviderAdapterRegistry.layerFromAdapters([adapter]),
+      {
+        databaseLayer: layerDatabase,
+        runEffectWorker: false,
+        ...(serverSettings === undefined ? {} : { serverSettings }),
+      },
+    ),
+  );
+const layerTest = makeLayerTest();
+// Ledgers made here are stamped for the ask check, with the v2 policy.
+const layerTestV2 = makeLayerTest({ askCheck: true, askCheckPolicy: "v2" });
 
 // What OrchestratorMcpService records when an agent stops a run (`t3_thread_interrupt`).
 const AGENT_STOP_REASON = "Stopped by an agent: the subtask is done";
@@ -1216,6 +1225,90 @@ it.effect("truncates a long item title in the stop notice", () =>
     const [notice] = yield* stopNotices(threadId);
     assert.include(notice, `${longTitle.slice(0, 47)}…`);
     assert.notInclude(notice, longTitle);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+const failChecks = (threadId: ThreadId, name: string, times: number) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const at = yield* DateTime.now;
+    for (let attempt = 0; attempt < times; attempt += 1) {
+      yield* orchestrator.dispatch({
+        type: "ledger.item.verdict.record",
+        commandId: CommandId.make(nextId("verdict")),
+        threadId,
+        ledgerId,
+        itemId: itemId(name),
+        verdict: {
+          outcome: "fail",
+          judge: { instanceId, model: "gpt-5.1-codex" },
+          notes: "no",
+          at,
+        },
+      });
+    }
+  });
+
+const askCheckStopNotices = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const { turnItems } = yield* projections.getThreadRecords(threadId, ["turnItems"], {
+      turnItemTypes: ["system_notice"],
+    });
+    return turnItems.flatMap((item) =>
+      item.type === "system_notice" && item.message.startsWith("The check failed three times")
+        ? [item.message]
+        : [],
+    );
+  });
+
+it.effect(
+  "a run that ends on a ledger the check stopped says so once, and follows up on nothing",
+  () =>
+    Effect.gen(function* () {
+      const threadId = yield* setup("check-stopped", ["a"]);
+      yield* updateItem(threadId, "a", "in_progress");
+      yield* sendUserMessage(threadId);
+      // The check finishes while the agent's run is still going: it stops the ledger.
+      yield* failChecks(threadId, "a", 3);
+      yield* completeLatest(threadId);
+
+      assert.deepEqual(yield* autoContinues(threadId), []);
+      assert.deepEqual(yield* stopNotices(threadId), []);
+      assert.deepEqual(yield* askCheckStopNotices(threadId), [
+        "The check failed three times; the agent stopped with 1 item open.",
+      ]);
+      assert.isTrue(yield* isMarkedStuck(threadId));
+
+      // Another run on the same stop, started by the server and not by the user, adds no second notice.
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const wakeId = nextId("server-message");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(wakeId),
+        threadId,
+        messageId: MessageId.make(wakeId),
+        text: "The check failed.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "agent",
+        creationSource: "server",
+      });
+      yield* completeLatest(threadId);
+      assert.equal((yield* askCheckStopNotices(threadId)).length, 1);
+      assert.deepEqual(yield* autoContinues(threadId), []);
+    }).pipe(Effect.provide(layerTestV2)),
+);
+
+it.effect("a v1 ledger's run end is untouched by the check's stop", () =>
+  Effect.gen(function* () {
+    const threadId = yield* setup("check-not-stopped", ["a"]);
+    yield* updateItem(threadId, "a", "in_progress");
+    yield* sendUserMessage(threadId);
+    yield* failChecks(threadId, "a", 3);
+    yield* completeLatest(threadId);
+    assert.deepEqual(yield* askCheckStopNotices(threadId), []);
+    assert.equal((yield* autoContinues(threadId)).length, 1);
   }).pipe(Effect.provide(layerTest)),
 );
 

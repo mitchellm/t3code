@@ -111,7 +111,7 @@ export const isAskCheckPolicyV2 = (
  * Fork: a v2 ledger that a third failed check stopped. The agent may end its turn with the held
  * item open, so no follow-up, Stop hook block or replan nudge applies until the user writes.
  */
-const askCheckStopped = (ledger: Pick<Ledger, "askCheckStopped"> | undefined): boolean =>
+export const askCheckStopped = (ledger: Pick<Ledger, "askCheckStopped"> | undefined): boolean =>
   ledger?.askCheckStopped !== undefined;
 
 export type LedgerAutoContinueDecision =

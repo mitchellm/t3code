@@ -29,6 +29,7 @@ import * as Layer from "effect/Layer";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
+import { askCheckStopNoticeText } from "./AskCheckPolicy.ts";
 import * as EventSink from "./EventSink.ts";
 import {
   decideLedgerFollowUp,
@@ -205,6 +206,13 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
   });
   if (asksTheUser(replies.at(-1)?.text)) return;
 
+  // Fork: a v2 ledger a third failed check stopped is not followed up; the user is told once that
+  // the agent stopped with work open, and their next message lifts the stop.
+  if (ledger.askCheckStopped !== undefined) {
+    yield* postAskCheckStopNotice(deps, input.threadId, run, ledger, ledger.askCheckStopped);
+    return;
+  }
+
   const ordinalByRun = new Map(runs.map((candidate) => [candidate.id, candidate.ordinal]));
   const newestFirst = runs.toSorted((a, b) => b.ordinal - a.ordinal);
   const messages: Array<OrchestrationV2ConversationMessage> = [];
@@ -344,6 +352,35 @@ export const continueLedgerAfterRun = Effect.fn("LedgerAutoContinue.continueAfte
     createdBy: "agent",
     creationSource: "server",
   });
+});
+
+/**
+ * The v2 stop's notice, through the same notice and unread mark as a stopped streak. One per stop:
+ * every later run that ends on the same stopped ledger finds it already there.
+ */
+const postAskCheckStopNotice = Effect.fn("LedgerAutoContinue.postAskCheckStopNotice")(function* (
+  deps: LedgerAutoContinueDeps,
+  threadId: ThreadId,
+  run: OrchestrationV2Run,
+  ledger: Ledger,
+  stopped: NonNullable<Ledger["askCheckStopped"]>,
+) {
+  const open = ledger.items.filter(
+    (item) => item.status === "open" || item.status === "in_progress",
+  );
+  const text = askCheckStopNoticeText(open.length);
+  const { turnItems } = yield* deps.orchestrator.getThreadRecords(threadId, ["turnItems"], {
+    turnItemTypes: ["system_notice"],
+  });
+  const stoppedAt = DateTime.toEpochMillis(stopped.at);
+  const posted = turnItems.some(
+    (item) =>
+      item.type === "system_notice" &&
+      item.message === text &&
+      item.startedAt !== null &&
+      DateTime.toEpochMillis(item.startedAt) >= stoppedAt,
+  );
+  if (!posted) yield* postStopNotice(deps, threadId, run, text);
 });
 
 /** The timeline notice says why; the unread mark is the existing "look at me" signal. */

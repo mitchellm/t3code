@@ -6,6 +6,7 @@
  */
 import type { Ledger, LedgerItem } from "@t3tools/contracts";
 import {
+  askCheckStopped,
   decideLedgerAutoContinue,
   finishedSince,
   isLedgerFollowUpRound,
@@ -320,6 +321,9 @@ export function decideStopHookNudge(input: {
   readonly limit: number;
   readonly judgeReplanned: ReadonlySet<string>;
 }): StopHookNudge {
+  // Fork: a v2 ledger a third failed check stopped is meant to end its turn with the item open, so
+  // neither a block nor a replan applies until the user writes.
+  if (askCheckStopped(input.ledger)) return { type: "allow" };
   if (input.unchangedBlocks > input.limit) return { type: "allow" };
   // A judge replan block counts toward the limit, so with no progress it shortens the run of
   // plain blocks before the stall replan rather than adding one.

@@ -355,6 +355,49 @@ describe("decideStopHookNudge", () => {
       decideStopHookNudge({ ledger, open, unchangedBlocks: 0, limit, judgeReplanned: new Set() }),
     ).toMatchObject({ type: "replan", reason: "judge", items: [open[1]] });
   });
+
+  it("allows the stop for a ledger a third failed check stopped, with no block or replan", () => {
+    const stopped: Ledger = {
+      ...ledger,
+      askCheck: true,
+      askCheckPolicy: "v2",
+      askCheckFails: 3,
+      askCheckStopped: { at, fails: 3 },
+    };
+    for (const unchangedBlocks of [0, limit]) {
+      expect(
+        decideStopHookNudge({
+          ledger: stopped,
+          open,
+          unchangedBlocks,
+          limit,
+          judgeReplanned: new Set(),
+        }),
+      ).toEqual({ type: "allow" });
+    }
+  });
+});
+
+describe("a ledger a third failed check stopped", () => {
+  const stopped: Ledger = {
+    ...ledgerOf(failedJudge("a", 3)),
+    askCheck: true,
+    askCheckPolicy: "v2",
+    askCheckFails: 3,
+    askCheckStopped: { at, fails: 3 },
+  };
+
+  it("gets neither a follow-up nor a replan, however long the judge's failures run", () => {
+    expect(decideLedgerFollowUp({ ledger: stopped, messages: [userMessage] })).toEqual({
+      type: "idle",
+    });
+    expect(
+      decideLedgerFollowUp({
+        ledger: stopped,
+        messages: [userMessage, followUp(1, stopped), followUp(2, stopped)],
+      }),
+    ).toEqual({ type: "idle" });
+  });
 });
 
 describe("the set-aside hint on an idle judged ledger", () => {
