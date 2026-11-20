@@ -26,6 +26,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as LedgerJudgeService from "../mcp/LedgerJudgeService.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
@@ -55,7 +56,10 @@ const claudeAdapter = {
   driver: ProviderDriverKind.make("claudeAgent"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
-const layerWith = (adapters: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>) =>
+const layerWith = (
+  adapters: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>,
+  serverSettings?: Parameters<typeof ServerSettings.layerTest>[0],
+) =>
   Layer.mergeAll(
     layerDatabase,
     ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
@@ -72,10 +76,16 @@ const layerWith = (adapters: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Se
     ProviderReplayHarness.layerWithRegistry(
       { name: "task-ledger" },
       ProviderAdapterRegistry.layerFromAdapters(adapters),
-      { databaseLayer: layerDatabase, runEffectWorker: false },
+      {
+        databaseLayer: layerDatabase,
+        runEffectWorker: false,
+        ...(serverSettings === undefined ? {} : { serverSettings }),
+      },
     ),
   );
 const layerTest = layerWith([adapter, claudeAdapter]);
+// The ask check is off by default; a thread with no judge is checked only under this layer.
+const layerAskCheck = layerWith([adapter, claudeAdapter], { askCheck: true });
 const layerWithoutJudgeInstance = layerWith([adapter]);
 
 const ledgerId = LedgerId.make("ledger:main");
@@ -595,13 +605,26 @@ it.effect(
       yield* updateItem(byUser, "a", { status: "closed", evidence: "done" });
       assert.ok((yield* ledgerOf(byUser))?.closedAt);
 
-      // A thread with no judge has its last close checked first, so the ledger stays open.
+      // With the setting on, a thread with no judge has its last close checked first, so the
+      // ledger stays open.
       const byAgent = yield* createThread("auto-close-checked");
       yield* createLedger(byAgent, { items: ["a"] });
       assert.equal((yield* ledgerOf(byAgent))?.askCheck, true);
       yield* updateItem(byAgent, "a", { status: "closed", evidence: "done", createdBy: "agent" });
       assert.equal(itemOf(yield* ledgerOf(byAgent), "a")?.judging, true);
       assert.isNull((yield* ledgerOf(byAgent))?.closedAt);
+    }).pipe(Effect.provide(layerAskCheck)),
+);
+
+it.effect(
+  "closes the agent's last item at once while the ask check is off, as it is by default",
+  () =>
+    Effect.gen(function* () {
+      const threadId = yield* createThread("auto-close-unchecked");
+      yield* createLedger(threadId, { items: ["a"] });
+      assert.isUndefined((yield* ledgerOf(threadId))?.askCheck);
+      yield* updateItem(threadId, "a", { status: "closed", evidence: "done", createdBy: "agent" });
+      assert.ok((yield* ledgerOf(threadId))?.closedAt);
     }).pipe(Effect.provide(layerTest)),
 );
 

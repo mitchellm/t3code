@@ -353,36 +353,40 @@ const stampedLedger = (input: {
   );
 };
 
-it.effect("a solo thread's new ledger is stamped for the ask check, and ledger_read shows it", () =>
-  Effect.gen(function* () {
-    assert.deepEqual(yield* stampedLedger({}), {
-      askCheck: true,
-      requiresJudge: undefined,
-      shown: true,
-    });
-  }),
+it.effect(
+  "a plain thread's new ledger is stamped for the ask check only once the setting is on",
+  () =>
+    Effect.gen(function* () {
+      assert.deepEqual(yield* stampedLedger({ settings: { askCheck: true } }), {
+        askCheck: true,
+        requiresJudge: undefined,
+        shown: true,
+      });
+      assert.isTrue(
+        (yield* stampedLedger({
+          settings: { projectSettingsOverrides: { [stampProjectId]: { askCheck: true } } },
+        })).askCheck,
+      );
+    }),
 );
 
-it.effect("the ask check setting off, for the server or for the project, stamps neither flag", () =>
-  Effect.gen(function* () {
-    const none = { askCheck: undefined, requiresJudge: undefined, shown: undefined };
-    assert.deepEqual(yield* stampedLedger({ settings: { askCheck: false } }), none);
-    assert.deepEqual(
-      yield* stampedLedger({
-        settings: { projectSettingsOverrides: { [stampProjectId]: { askCheck: false } } },
-      }),
-      none,
-    );
-    // Another project's override leaves this one on.
-    assert.isTrue(
-      (yield* stampedLedger({
-        settings: {
-          askCheck: false,
-          projectSettingsOverrides: { [stampProjectId]: { askCheck: true } },
-        },
-      })).askCheck,
-    );
-  }),
+it.effect(
+  "with the setting off, by default or set off for the server or the project, a plain thread stamps neither flag",
+  () =>
+    Effect.gen(function* () {
+      const none = { askCheck: undefined, requiresJudge: undefined, shown: undefined };
+      assert.deepEqual(yield* stampedLedger({}), none);
+      assert.deepEqual(yield* stampedLedger({ settings: { askCheck: false } }), none);
+      assert.deepEqual(
+        yield* stampedLedger({
+          settings: {
+            askCheck: true,
+            projectSettingsOverrides: { [stampProjectId]: { askCheck: false } },
+          },
+        }),
+        none,
+      );
+    }),
 );
 
 it.effect("a loadout with a judge stamps requiresJudge and never the ask check", () =>

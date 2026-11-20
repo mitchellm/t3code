@@ -1394,9 +1394,11 @@ export const ServerSettings = Schema.Struct({
   planBeforeEditing: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /**
    * A ledger created on a thread with no judge holds its last ask until a fresh session on the
-   * thread's own model has checked the result against the user's message.
+   * thread's own model has checked the result against the user's message. Off by default because a
+   * check on the thread's own model did not pay for itself when measured. A loadout that keeps
+   * the solo structure but names a judge runs it on that stronger model whatever this says.
    */
-  askCheck: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  askCheck: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
    * Claude only: delegated children start T3's server and the project's .mcp.json servers, not the
    * servers in the user's Claude config, because each child is a full extra session. Names listed

@@ -87,9 +87,9 @@ describe("plan before editing setting", () => {
 });
 
 describe("ask check setting", () => {
-  it("is on for settings written before it existed", () => {
-    expect(decodeServerSettings({}).askCheck).toBe(true);
-    expect(DEFAULT_SERVER_SETTINGS.askCheck).toBe(true);
+  it("is off by default, and for settings written before it existed", () => {
+    expect(decodeServerSettings({}).askCheck).toBe(false);
+    expect(DEFAULT_SERVER_SETTINGS.askCheck).toBe(false);
   });
 
   it("keeps a project's override and patches it per project", () => {

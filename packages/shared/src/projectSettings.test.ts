@@ -70,15 +70,15 @@ describe("resolveProjectSettings", () => {
     expect(resolveProjectSettings(settings, otherProjectId).settings.defaultAutoPull).toBe(true);
   });
 
-  it("resolves the ask check per project, on unless a project turns it off", () => {
+  it("resolves the ask check per project, off unless a project turns it on", () => {
     const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      projectSettingsOverrides: { [projectId]: { askCheck: false } },
+      projectSettingsOverrides: { [projectId]: { askCheck: true } },
     });
-    const off = resolveProjectSettings(settings, projectId);
-    expect(off.settings.askCheck).toBe(false);
-    expect(off.sources.askCheck).toBe("project");
+    const on = resolveProjectSettings(settings, projectId);
+    expect(on.settings.askCheck).toBe(true);
+    expect(on.sources.askCheck).toBe("project");
     const other = resolveProjectSettings(settings, otherProjectId);
-    expect(other.settings.askCheck).toBe(true);
+    expect(other.settings.askCheck).toBe(false);
     expect(other.sources.askCheck).toBe("environment");
   });
 

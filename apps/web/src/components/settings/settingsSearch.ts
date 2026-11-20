@@ -763,7 +763,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/threads",
     scope: "project-defaults",
     searchTerms: [
-      "task ledger ask check verify finished work last ask fresh session judge missing",
+      "task ledger ask check verify finished work last ask fresh session judge missing off by default checked solo loadout stronger model",
     ],
   },
   {

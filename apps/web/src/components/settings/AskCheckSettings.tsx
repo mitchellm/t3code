@@ -14,7 +14,7 @@ export function AskCheckSettings() {
       serverScoped
       settingKeys={["askCheck"]}
       {...searchableSetting("ask-check")}
-      description="Before a thread without a judge closes its last ask, a fresh session on the same model checks the result against what you wrote and sends back anything still missing."
+      description="Before a thread without a judge closes its last ask, a fresh session on the same model checks the result against what you wrote. It is off by default because that check did not pay for itself when measured; the Checked solo loadout runs it on a stronger model."
       resetAction={
         settings.askCheck !== DEFAULT_UNIFIED_SETTINGS.askCheck ? (
           <SettingResetButton
