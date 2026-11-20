@@ -1402,12 +1402,11 @@ export const ServerSettings = Schema.Struct({
    */
   askCheck: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
-   * Off, a thread that runs under no loadout or Solo is not asked to write a task ledger: its
-   * instructions leave the ledger out, its ledger tools refuse, and the plan-before-editing gate
-   * and ledger reminders stand down. A thread that already has a ledger, and any thread under a
-   * loadout with roles or a judge, keeps the ledger whatever this says.
+   * Off (the default), a thread under no loadout or Solo is not asked to write a task ledger: its
+   * instructions leave it out, its ledger tools refuse, and the plan gate and reminders stand
+   * down. A thread with a ledger, or under a loadout with roles or a judge, keeps it either way.
    */
-  taskLedger: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  taskLedger: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
    * Claude only: delegated children start T3's server and the project's .mcp.json servers, not the
    * servers in the user's Claude config, because each child is a full extra session. Names listed

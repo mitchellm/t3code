@@ -6,7 +6,7 @@ import {
   type ScopedThreadRef,
   type ThreadLoadout,
 } from "@t3tools/contracts";
-import { resolveLoadout, withSolo } from "@t3tools/shared/loadouts";
+import { loadoutRunsOnLedger, resolveLoadout, withSolo } from "@t3tools/shared/loadouts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
 import { type DraftId, useComposerDraftStore } from "../../composerDraftStore";
@@ -49,6 +49,11 @@ export interface ComposerLoadout {
   readonly activeAsRun: Loadout;
   /** Why the composer is not on the active loadout's planner; null when it is or there is none. */
   readonly plannerNotRunning: string | null;
+  /**
+   * Whether a thread here runs on the task ledger: the active loadout has roles or a judge, or the
+   * project turned the setting on. A thread that already has a ledger keeps it either way.
+   */
+  readonly runsOnLedger: boolean;
   readonly choice: ThreadLoadout | null;
   /** Which settings scope defines the list: the project's own override, else the environment's. */
   readonly settingsScope: {
@@ -64,10 +69,10 @@ function useProjectLoadouts(environmentId: EnvironmentId, projectId: ProjectId |
   const project = useProject(projectId === null ? null : scopeProjectRef(environmentId, projectId));
   const settings = useEnvironmentSettings(environmentId);
   if (projectId === null) return null;
+  const resolved = resolveProjectSettings(settings, projectId, project ?? undefined).settings;
   return {
-    loadouts: withSolo(
-      resolveProjectSettings(settings, projectId, project ?? undefined).settings.loadouts,
-    ),
+    loadouts: withSolo(resolved.loadouts),
+    taskLedger: resolved.taskLedger,
     projectOverridden: settings.projectSettingsOverrides?.[projectId]?.loadouts !== undefined,
   };
 }
@@ -117,6 +122,7 @@ export function useComposerLoadout(
     active,
     activeAsRun: loadoutAsRun(active, run),
     plannerNotRunning: run._tag === "notRunning" ? run.reason : null,
+    runsOnLedger: scope.taskLedger || loadoutRunsOnLedger(active),
     choice,
     settingsScope: { environmentId, projectId, projectOverridden: scope.projectOverridden },
     // Hands the slot back so the agent may propose again; a user pick otherwise stands for good.

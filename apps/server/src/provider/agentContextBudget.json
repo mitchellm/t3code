@@ -1,5 +1,8 @@
 {
-  "claudeSystemAppendBytes": 9404,
-  "codexAdditionalContextBytes": 10953,
-  "mcpToolListJsonBytes": 64454
+  "claudeSystemAppendBytes": 6855,
+  "codexAdditionalContextBytes": 8406,
+  "mcpToolListJsonBytes": 53478,
+  "claudeSystemAppendWithLedgerBytes": 9404,
+  "codexAdditionalContextWithLedgerBytes": 10953,
+  "mcpToolListJsonWithLedgerBytes": 64454
 }

@@ -32,6 +32,8 @@ const MODE_ICONS = {
 export interface ComposerModeControl {
   readonly options: ReadonlyArray<ComposerModeOption>;
   readonly active: ComposerMode;
+  /** Whether the thread runs on the task ledger, which is what Build's description says. */
+  readonly runsOnLedger: boolean;
   readonly onSelect: (mode: ComposerMode) => void;
 }
 
@@ -43,9 +45,11 @@ export function useComposerMode(input: {
   readonly planAvailable: boolean;
   /** The selected provider can run the research workflow. */
   readonly researchAvailable: boolean;
+  /** The thread's loadout has roles or a judge, or its project turned the task ledger on. */
+  readonly runsOnLedger: boolean;
   readonly toggleInteractionMode: () => void;
 }): ComposerModeControl | null {
-  const { environmentId, threadId, interactionMode, toggleInteractionMode } = input;
+  const { environmentId, threadId, interactionMode, runsOnLedger, toggleInteractionMode } = input;
   const investigating = useInvestigating(environmentId, threadId);
   const investigateAvailable = useCanInvestigate(environmentId);
   const researching = useResearching(environmentId, threadId);
@@ -55,12 +59,14 @@ export function useComposerMode(input: {
     investigateAvailable,
     // A thread already in Research keeps the option that names its mode.
     researchAvailable: input.researchAvailable || researching,
+    runsOnLedger,
   });
   if (options === null) return null;
   const state = { interactionMode, investigating, researching };
   return {
     options,
     active: resolveComposerMode(state),
+    runsOnLedger,
     onSelect: (mode) => {
       const change = composerModeChange(state, mode);
       if (change === null) return;
@@ -79,7 +85,7 @@ export function ComposerModePicker(props: {
   const { mode, size } = props;
   const composerFloatingLayerProps = useComposerMenuProps();
   const [open, setOpen] = useComposerMenuState(props.hidden);
-  const active = composerModeOption(mode.active);
+  const active = composerModeOption(mode.active, mode.runsOnLedger);
   return (
     <Tooltip>
       <Select

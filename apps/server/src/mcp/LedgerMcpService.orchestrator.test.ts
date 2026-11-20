@@ -164,7 +164,7 @@ it.effect("creates and reads a ledger through the real orchestrator and projecti
         Layer.provideMerge(layerThreads),
         Layer.provideMerge(layerOrchestrator),
         Layer.provideMerge(NodeCrypto.layer),
-        Layer.provideMerge(ServerSettings.layerTest()),
+        Layer.provideMerge(ServerSettings.layerTest({ taskLedger: true })),
       ),
     ),
   ),
@@ -269,7 +269,7 @@ it.effect(
           Layer.provideMerge(layerThreadsWithTasks(taskRecords)),
           Layer.provideMerge(layerOrchestrator),
           Layer.provideMerge(NodeCrypto.layer),
-          Layer.provideMerge(ServerSettings.layerTest()),
+          Layer.provideMerge(ServerSettings.layerTest({ taskLedger: true })),
         ),
       ),
     );
@@ -284,12 +284,16 @@ const judgedLoadout: Loadout = {
   roles: { judge: { instanceId, model: "gpt-5.1-codex" } },
 };
 
-/** What the orchestrator stamps on a ledger made on a fresh thread, under these settings. */
+/**
+ * What the orchestrator stamps on a ledger made on a fresh thread, under these settings. These
+ * tests are about the stamps, so the task ledger is on unless a test turns it off.
+ */
 const stampedLedger = (input: {
   readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly loadoutId?: string;
   readonly start?: "create" | "investigation";
 }) => {
+  const settings = { taskLedger: true, ...input.settings };
   const stampThreadId = ThreadId.make("thread:ledger-mcp-stamp");
   const stampScope: McpInvocationContext.McpInvocationScope = {
     ...scope,
@@ -350,9 +354,9 @@ const stampedLedger = (input: {
     Effect.provide(
       LedgerMcpService.layer.pipe(
         Layer.provideMerge(layerThreads),
-        Layer.provideMerge(makeLayerOrchestrator(input.settings)),
+        Layer.provideMerge(makeLayerOrchestrator(settings)),
         Layer.provideMerge(NodeCrypto.layer),
-        Layer.provideMerge(ServerSettings.layerTest(input.settings)),
+        Layer.provideMerge(ServerSettings.layerTest(settings)),
       ),
     ),
   );

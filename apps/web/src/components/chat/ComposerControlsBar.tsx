@@ -173,6 +173,7 @@ export function ComposerControlsBar(props: {
     interactionMode,
     planAvailable: planModeUiEnabled,
     researchAvailable,
+    runsOnLedger: loadout?.runsOnLedger ?? false,
     toggleInteractionMode,
   });
   const accessMatchesDefault = compatibleRuntimeMode === defaultRuntimeMode;

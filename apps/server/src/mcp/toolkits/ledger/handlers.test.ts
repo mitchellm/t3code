@@ -227,8 +227,8 @@ const withServer = <A, E>(
     ) => Effect.Effect<McpSchema.CallToolResult>,
     server: McpServer.McpServer["Service"],
   ) => Effect.Effect<A, E>,
-  /** The environment's settings; every test but the task ledger switch's keeps the defaults. */
-  settings: Parameters<typeof ServerSettings.layerTest>[0] = {},
+  /** The environment's settings; every test but the task ledger switch's runs with the ledger on. */
+  settings: Parameters<typeof ServerSettings.layerTest>[0] = { taskLedger: true },
 ) =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
@@ -621,14 +621,34 @@ describe("with the task ledger turned off for the project", () => {
     },
   );
 
-  it.effect("changes nothing for a project that keeps the ledger on", () => {
+  it.effect("changes nothing for a project that turned the ledger on", () => {
     const fake = makeFakeThreads();
-    return withServer(fake, (call) =>
-      Effect.gen(function* () {
-        expect(failureOf(yield* call("ledger_read", {}))).toBeUndefined();
-        expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))).toBeUndefined();
-        expect(fake.ledgers.get(ownThread)?.items).toHaveLength(2);
-      }),
+    return withServer(
+      fake,
+      (call) =>
+        Effect.gen(function* () {
+          expect(failureOf(yield* call("ledger_read", {}))).toBeUndefined();
+          expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))).toBeUndefined();
+          expect(fake.ledgers.get(ownThread)?.items).toHaveLength(2);
+        }),
+      { taskLedger: true },
+    );
+  });
+
+  it.effect("refuses a plain thread's ledger tools when nothing is configured", () => {
+    const fake = makeFakeThreads();
+    return withServer(
+      fake,
+      (call) =>
+        Effect.gen(function* () {
+          expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))?.code).toBe(
+            "capability_denied",
+          );
+          expect(fake.ledgers.size).toBe(0);
+          fake.loadouts.set(ownThread, loadoutOf("blitz"));
+          expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))).toBeUndefined();
+        }),
+      {},
     );
   });
 });
@@ -769,12 +789,28 @@ describe("the ledger tools in the tool list with the task ledger turned off", ()
       ).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("lists the same tools to a plain thread when the project keeps the ledger on", () =>
+  it.effect("lists the same tools to a plain thread when the project turned the ledger on", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(
+          ledgerServer(withThreads(), { taskLedger: true }),
+          serveOptions,
+        ).pipe(Layer.build);
+        const { listed } = yield* sessions;
+        for (const token of ["plain", "roles", "ledger", "asked", "child", "client"]) {
+          expect(yield* listed(token), token).toEqual(ledgerToolNames);
+        }
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("leaves the ledger tools out of a plain thread's list when nothing is configured", () =>
     Effect.scoped(
       Effect.gen(function* () {
         yield* HttpRouter.serve(ledgerServer(withThreads(), {}), serveOptions).pipe(Layer.build);
         const { listed } = yield* sessions;
-        for (const token of ["plain", "roles", "ledger", "asked", "child", "client"]) {
+        expect(yield* listed("plain")).toEqual([]);
+        for (const token of ["roles", "ledger", "asked", "child", "client"]) {
           expect(yield* listed(token), token).toEqual(ledgerToolNames);
         }
       }),

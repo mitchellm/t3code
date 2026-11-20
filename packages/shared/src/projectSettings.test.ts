@@ -82,16 +82,25 @@ describe("resolveProjectSettings", () => {
     expect(other.sources.askCheck).toBe("environment");
   });
 
-  it("resolves the task ledger per project, on unless a project turns it off", () => {
+  it("resolves the task ledger per project, off unless a project turns it on", () => {
     const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectSettingsOverrides: { [projectId]: { taskLedger: true } },
+    });
+    const on = resolveProjectSettings(settings, projectId);
+    expect(on.settings.taskLedger).toBe(true);
+    expect(on.sources.taskLedger).toBe("project");
+    const other = resolveProjectSettings(settings, otherProjectId);
+    expect(other.settings.taskLedger).toBe(false);
+    expect(other.sources.taskLedger).toBe("environment");
+  });
+
+  it("lets a project turn the task ledger off when the environment turned it on", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      taskLedger: true,
       projectSettingsOverrides: { [projectId]: { taskLedger: false } },
     });
-    const off = resolveProjectSettings(settings, projectId);
-    expect(off.settings.taskLedger).toBe(false);
-    expect(off.sources.taskLedger).toBe("project");
-    const other = resolveProjectSettings(settings, otherProjectId);
-    expect(other.settings.taskLedger).toBe(true);
-    expect(other.sources.taskLedger).toBe("environment");
+    expect(resolveProjectSettings(settings, projectId).settings.taskLedger).toBe(false);
+    expect(resolveProjectSettings(settings, otherProjectId).settings.taskLedger).toBe(true);
   });
 
   it("honours the aggregate's own fields only until the server has folded them", () => {

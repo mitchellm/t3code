@@ -1,6 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import {
   DEFAULT_LOADOUTS,
+  DEFAULT_SERVER_SETTINGS,
   type Loadout,
   type LoadoutSetBy,
   ProjectId,
@@ -322,6 +323,26 @@ it.effect(
         chain: [{ ...plainLink, hasLedger: true }],
       });
       expect((yield* hasLedger.port.readThreadPolicy)?.taskLedger).toBeUndefined();
+    }),
+);
+
+it.effect(
+  "runs a plain thread without the ledger and a roles thread on it with nothing configured",
+  () =>
+    Effect.gen(function* () {
+      const unconfigured = Effect.succeed(DEFAULT_SERVER_SETTINGS);
+      const plain = ledgerSwitchPort({ taskLedger: true, loadoutId: null });
+      expect(yield* readTaskLedgerOff(plain.threadReads, unconfigured)).toBe(true);
+      expect(
+        (yield* makeHarnessPort(plain.threadReads, () => unconfigured).readThreadPolicy)
+          ?.taskLedger,
+      ).toBe(false);
+      const roles = ledgerSwitchPort({ taskLedger: true, loadoutId: "blitz" });
+      expect(yield* readTaskLedgerOff(roles.threadReads, unconfigured)).toBe(false);
+      expect(
+        (yield* makeHarnessPort(roles.threadReads, () => unconfigured).readThreadPolicy)
+          ?.taskLedger,
+      ).toBeUndefined();
     }),
 );
 

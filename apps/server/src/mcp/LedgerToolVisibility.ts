@@ -10,7 +10,7 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { LedgerToolkit } from "./toolkits/ledger/tools.ts";
 
 // The judgement tool belongs to the orchestrator toolkit, so the toolkit alone does not name it.
-const LEDGER_TOOLS: ReadonlySet<string> = new Set([
+export const LEDGER_TOOLS: ReadonlySet<string> = new Set([
   ...Object.keys(LedgerToolkit.tools),
   "ledger_request_judgement",
 ]);

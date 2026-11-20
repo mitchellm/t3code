@@ -110,9 +110,13 @@ describe("ask check setting", () => {
 });
 
 describe("task ledger setting", () => {
-  it("is on for settings written before it existed", () => {
-    expect(decodeServerSettings({}).taskLedger).toBe(true);
-    expect(DEFAULT_SERVER_SETTINGS.taskLedger).toBe(true);
+  it("is off for settings written before it existed", () => {
+    expect(decodeServerSettings({}).taskLedger).toBe(false);
+    expect(DEFAULT_SERVER_SETTINGS.taskLedger).toBe(false);
+  });
+
+  it("keeps an explicit on", () => {
+    expect(decodeServerSettings({ taskLedger: true }).taskLedger).toBe(true);
   });
 
   it("keeps a project's override and patches it per project", () => {

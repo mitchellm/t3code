@@ -57,11 +57,12 @@ export const readLedgerChain = Effect.fn("TaskLedgerSwitch.readLedgerChain")(fun
 
 type LedgerSwitchSettings = Pick<ServerSettings, "taskLedger" | "loadouts">;
 
+/** A setting that was never written reads as off: only an explicit `true` keeps a plain thread on the ledger. */
 export const taskLedgerOff = (
   settings: LedgerSwitchSettings,
   chain: ReadonlyArray<LedgerLink>,
 ): boolean => {
-  if (settings.taskLedger !== false) return false;
+  if (settings.taskLedger === true) return false;
   const runsOnLedger = chain.some(
     (link) =>
       link.hasLedger || loadoutRunsOnLedger(resolveLoadout(settings.loadouts, link.loadoutId)),
@@ -75,6 +76,6 @@ export const taskLedgerOffFor = <E>(input: {
   readonly settings: LedgerSwitchSettings;
   readonly readChain: Effect.Effect<ReadonlyArray<LedgerLink>, E>;
 }): Effect.Effect<boolean, E> =>
-  input.settings.taskLedger !== false
+  input.settings.taskLedger === true
     ? Effect.succeed(false)
     : Effect.map(input.readChain, (chain) => taskLedgerOff(input.settings, chain));

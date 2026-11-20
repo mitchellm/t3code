@@ -14,7 +14,11 @@ export interface ComposerModeOption {
 }
 
 const OPTIONS: Record<ComposerMode, ComposerModeOption> = {
-  build: { id: "build", label: "Build", description: "Plans as a ledger, then does the work." },
+  build: {
+    id: "build",
+    label: "Build",
+    description: "Does the work. Start a ledger with /ledger.",
+  },
   plan: { id: "plan", label: "Plan", description: "Plans only. Changes nothing." },
   investigate: {
     id: "investigate",
@@ -52,23 +56,36 @@ export function settleComposerMode(state: ComposerModeState): ComposerModeState 
     : state;
 }
 
+/**
+ * Build plans as a ledger only for a thread that runs on the task ledger (a loadout with roles or a
+ * judge, or a project that turned the setting on); a plain thread starts one on request.
+ */
+const buildOption = (runsOnLedger: boolean): ComposerModeOption =>
+  runsOnLedger
+    ? { ...OPTIONS.build, description: "Plans as a ledger, then does the work." }
+    : OPTIONS.build;
+
 /** Null when only Build is left, so the composer shows no picker. */
 export function composerModeOptions(input: {
   readonly planAvailable: boolean;
   readonly investigateAvailable: boolean;
   readonly researchAvailable?: boolean;
+  readonly runsOnLedger: boolean;
 }): ReadonlyArray<ComposerModeOption> | null {
   const researchAvailable = input.researchAvailable === true;
   if (!input.planAvailable && !input.investigateAvailable && !researchAvailable) return null;
   return [
-    OPTIONS.build,
+    buildOption(input.runsOnLedger),
     ...(input.planAvailable ? [OPTIONS.plan] : []),
     ...(input.investigateAvailable ? [OPTIONS.investigate] : []),
     ...(researchAvailable ? [OPTIONS.research] : []),
   ];
 }
 
-export const composerModeOption = (mode: ComposerMode): ComposerModeOption => OPTIONS[mode];
+export const composerModeOption = (
+  mode: ComposerMode,
+  runsOnLedger: boolean,
+): ComposerModeOption => (mode === "build" ? buildOption(runsOnLedger) : OPTIONS[mode]);
 
 /**
  * Moving to a mode through upstream's own plan toggle, so its shortcut, slash command and plan

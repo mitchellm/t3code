@@ -14,7 +14,7 @@ export function TaskLedgerSettings() {
       serverScoped
       settingKeys={["taskLedger"]}
       {...searchableSetting("task-ledger")}
-      description="Agents write their plan as a ledger of your asks before they change files, and are kept going while items are open. Measured on single fixes of up to 40 minutes it cost about a fifth more without changing how often the work was right, so a project of small changes can turn it off; loadouts with roles or a judge always use it."
+      description="Off by default; turn it on and agents in this project plan as a ledger of your asks and keep going while items are open. Measured on single fixes of up to 40 minutes it cost about a fifth more and did not change how often the work was right, and loadouts with roles or a judge always use it."
       resetAction={
         settings.taskLedger !== DEFAULT_UNIFIED_SETTINGS.taskLedger ? (
           <SettingResetButton

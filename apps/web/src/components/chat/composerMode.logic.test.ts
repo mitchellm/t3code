@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   composerModeChange,
+  composerModeOption,
   composerModeOptions,
   resolveComposerMode,
   settleComposerMode,
@@ -56,16 +57,39 @@ describe("composer mode", () => {
 
   it("offers only the modes this composer can use, and no picker for Build alone", () => {
     expect(
-      composerModeOptions({ planAvailable: true, investigateAvailable: true })?.map(
-        (option) => option.id,
-      ),
+      composerModeOptions({
+        planAvailable: true,
+        investigateAvailable: true,
+        runsOnLedger: false,
+      })?.map((option) => option.id),
     ).toEqual(["build", "plan", "investigate"]);
     expect(
-      composerModeOptions({ planAvailable: false, investigateAvailable: true })?.map(
-        (option) => option.id,
-      ),
+      composerModeOptions({
+        planAvailable: false,
+        investigateAvailable: true,
+        runsOnLedger: false,
+      })?.map((option) => option.id),
     ).toEqual(["build", "investigate"]);
-    expect(composerModeOptions({ planAvailable: false, investigateAvailable: false })).toBeNull();
+    expect(
+      composerModeOptions({
+        planAvailable: false,
+        investigateAvailable: false,
+        runsOnLedger: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("says Build plans as a ledger only for a thread that runs on the task ledger", () => {
+    const buildDescription = (runsOnLedger: boolean) =>
+      composerModeOptions({ planAvailable: true, investigateAvailable: false, runsOnLedger })?.find(
+        (option) => option.id === "build",
+      )?.description;
+    expect(buildDescription(true)).toBe("Plans as a ledger, then does the work.");
+    expect(buildDescription(false)).toBe("Does the work. Start a ledger with /ledger.");
+    expect(composerModeOption("build", true).description).toBe(buildDescription(true));
+    expect(composerModeOption("build", false).description).toBe(buildDescription(false));
+    // The other modes read the same either way.
+    expect(composerModeOption("plan", true)).toEqual(composerModeOption("plan", false));
   });
 
   it("picks Research in the picker, hidden by Plan and back when Plan ends", () => {
@@ -91,6 +115,7 @@ describe("composer mode", () => {
         planAvailable: false,
         investigateAvailable: false,
         researchAvailable: true,
+        runsOnLedger: false,
       })?.map((option) => option.id),
     ).toEqual(["build", "research"]);
   });

@@ -54,7 +54,7 @@ export const make = Effect.gen(function* () {
   }): Effect.fn.Return<boolean, OrchestratorMcpFailure> {
     const settings = yield* serverSettings.getSettings.pipe(Effect.mapError(unavailable));
     const resolved = resolveProjectSettings(settings, own.projectId).settings;
-    if (resolved.taskLedger !== false) return false;
+    if (resolved.taskLedger === true) return false;
     const chain = yield* readLedgerChain(own.threadId, (id) =>
       id === own.threadId
         ? Effect.succeed(own.link)
@@ -69,10 +69,11 @@ export const make = Effect.gen(function* () {
   const withholdsLedgerFromThread = Effect.fn("LedgerOffRule.withholdsLedgerFromThread")(function* (
     threadId: ThreadId,
   ): Effect.fn.Return<boolean, OrchestratorMcpFailure> {
-    // Most installs never turn it off anywhere, and the tool list asks once per ledger tool.
+    // An install that turned the ledger on and no project off skips the thread reads; the tool
+    // list asks once per ledger tool.
     const settings = yield* serverSettings.getSettings.pipe(Effect.mapError(unavailable));
     const offAnywhere =
-      settings.taskLedger === false ||
+      settings.taskLedger !== true ||
       Object.values(settings.projectSettingsOverrides ?? {}).some(
         (override) => override.taskLedger === false,
       );

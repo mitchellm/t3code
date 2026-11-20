@@ -12,6 +12,7 @@ import { ServerConfig } from "../config.ts";
 import { DeviceService } from "../device/DeviceService.ts";
 import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import { GitWorkflowService } from "../git/GitWorkflowService.ts";
+import { LEDGER_TOOLS } from "../mcp/LedgerToolVisibility.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import { PreviewAutomationBroker } from "../mcp/PreviewAutomationBroker.ts";
 import {
@@ -86,7 +87,7 @@ const toolHandlerServices = Layer.mergeAll(
 
 const utf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
-const claudeSystemAppend = () => {
+const claudeSystemAppend = (options: { readonly taskLedger?: false } = {}) => {
   const { systemPrompt } = makeClaudeQueryOptions({
     modelSelection: {
       instanceId: ProviderInstanceId.make(CLAUDE_PROVIDER),
@@ -96,15 +97,17 @@ const claudeSystemAppend = () => {
     resume: false,
     cwd: null,
     mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1/mcp" } },
+    ...options,
   });
   return typeof systemPrompt === "object" && "append" in systemPrompt ? systemPrompt.append : "";
 };
 
-const codexAdditionalContext = () =>
+const codexAdditionalContext = (options: { readonly taskLedger?: boolean } = {}) =>
   Object.values(
     buildCodexAdditionalContext(
       { model: "gpt-6.1-sol", modelName: "GPT-6.1 Sol", reasoningEffort: "high" },
       { browser: true, device: true },
+      options,
     ),
   )
     .map((entry) => entry.value)
@@ -112,22 +115,30 @@ const codexAdditionalContext = () =>
 
 // CI rejects a PR that raises any value above main's agentContextBudget.json, so growth
 // needs the agent-context-increase label. Lower the values when the text shrinks.
+// WithLedger keys: a thread on the task ledger. The others: a plain thread with it off.
 it.effect("agent context matches the committed budget", () =>
   Effect.gen(function* () {
     const mcp = yield* McpServer.McpServer;
-    const measured = {
-      claudeSystemAppendBytes: utf8Bytes(claudeSystemAppend()),
-      codexAdditionalContextBytes: utf8Bytes(codexAdditionalContext()),
-      // The model sees these fields. outputSchema and annotations are protocol metadata.
-      mcpToolListJsonBytes: utf8Bytes(
+    // The model sees these fields. outputSchema and annotations are protocol metadata.
+    const toolListBytes = (keep: (name: string) => boolean) =>
+      utf8Bytes(
         JSON.stringify(
-          mcp.tools.map(({ tool }) => ({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-          })),
+          mcp.tools
+            .filter(({ tool }) => keep(tool.name))
+            .map(({ tool }) => ({
+              name: tool.name,
+              description: tool.description,
+              inputSchema: tool.inputSchema,
+            })),
         ),
-      ),
+      );
+    const measured = {
+      claudeSystemAppendBytes: utf8Bytes(claudeSystemAppend({ taskLedger: false })),
+      codexAdditionalContextBytes: utf8Bytes(codexAdditionalContext({ taskLedger: false })),
+      mcpToolListJsonBytes: toolListBytes((name) => !LEDGER_TOOLS.has(name)),
+      claudeSystemAppendWithLedgerBytes: utf8Bytes(claudeSystemAppend()),
+      codexAdditionalContextWithLedgerBytes: utf8Bytes(codexAdditionalContext()),
+      mcpToolListJsonWithLedgerBytes: toolListBytes(() => true),
     };
 
     expect(

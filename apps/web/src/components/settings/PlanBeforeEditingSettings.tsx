@@ -14,7 +14,7 @@ export function PlanBeforeEditingSettings() {
       serverScoped
       settingKeys={["planBeforeEditing"]}
       {...searchableSetting("plan-before-editing")}
-      description="Claude threads refuse a file edit until the agent has written its plan as a ledger. Turning this off removes that check; every agent is still asked to plan before editing."
+      description="Claude threads on the task ledger refuse a file edit until the agent has written its plan as a ledger. Turning this off removes that check; the agent is still asked to plan before editing."
       resetAction={
         settings.planBeforeEditing !== DEFAULT_UNIFIED_SETTINGS.planBeforeEditing ? (
           <SettingResetButton

@@ -1,5 +1,5 @@
 import { expect, it } from "@effect/vitest";
-import { DEFAULT_LOADOUTS, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_LOADOUTS, DEFAULT_SERVER_SETTINGS, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import {
@@ -17,6 +17,17 @@ const link = (extra: Partial<LedgerLink> = {}): LedgerLink => ({
 });
 
 const settings = (taskLedger: boolean) => ({ taskLedger, loadouts: DEFAULT_LOADOUTS });
+
+it("runs a plain thread without the ledger and a roles-loadout thread on it when nothing is configured", () => {
+  const unconfigured = DEFAULT_SERVER_SETTINGS;
+  expect(taskLedgerOff(unconfigured, [link()])).toBe(true);
+  expect(taskLedgerOff(unconfigured, [link({ loadoutId: "solo" })])).toBe(true);
+  expect(taskLedgerOff(unconfigured, [link({ loadoutId: "blitz" })])).toBe(false);
+  // A value that was never written reads as off, not on.
+  const unset = { loadouts: DEFAULT_LOADOUTS } as Parameters<typeof taskLedgerOff>[0];
+  expect(taskLedgerOff(unset, [link()])).toBe(true);
+  expect(taskLedgerOff(unset, [link({ loadoutId: "blitz" })])).toBe(false);
+});
 
 it("runs on the ledger while the project's setting is on, whatever the thread is", () => {
   expect(taskLedgerOff(settings(true), [link()])).toBe(false);

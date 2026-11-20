@@ -756,7 +756,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/threads",
     scope: "project-defaults",
     searchTerms: [
-      "task ledger plan first checklist asks off turn off small changes harness overhead cost auto continue loadout roles judge",
+      "task ledger plan first checklist asks off by default turn on opt in harness overhead cost auto continue loadout roles judge",
     ],
   },
   {
