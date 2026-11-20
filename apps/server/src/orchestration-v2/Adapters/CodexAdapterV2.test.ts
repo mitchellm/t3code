@@ -2229,6 +2229,33 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect(
+    "leaves the task ledger out of the turn's T3 context for a thread that runs without it",
+    () =>
+      Effect.gen(function* () {
+        const contextOf = (taskLedger?: false) =>
+          CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId: "ledger-off-thread",
+            codexInput: [{ type: "text", text: "work" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            hasT3Mcp: true,
+            ...(taskLedger === undefined ? {} : { taskLedger }),
+          }).pipe(
+            Effect.map((params) =>
+              Object.entries(params.additionalContext ?? {})
+                .filter(([key]) => key.startsWith("t3_code_orchestration_"))
+                .map(([, entry]) => entry.value)
+                .join("\n"),
+            ),
+          );
+        assert.include(yield* contextOf(), "ledger_create");
+        const without = yield* contextOf(false);
+        assert.notInclude(without, "ledger_create");
+        assert.include(without, "delegate_task");
+      }),
+  );
+
   it.effect("preserves T3 context on the wire and restores it after compaction", () =>
     Effect.scoped(
       Effect.gen(function* () {

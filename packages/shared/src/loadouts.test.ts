@@ -18,6 +18,7 @@ import {
   loadoutRequiresJudge,
   loadoutRoleCandidates,
   loadoutRoleTarget,
+  loadoutRunsOnLedger,
   loadoutStructure,
   matchRoleCandidate,
   ownModelTarget,
@@ -138,6 +139,38 @@ describe("loadoutStructure", () => {
     });
     expect(decoded.structure).toBeUndefined();
     expect(loadoutStructure(decoded)).toBe("solo");
+  });
+});
+
+describe("loadoutRunsOnLedger", () => {
+  it("is false only for a loadout with no roles and the solo structure: none, Solo or a deleted one", () => {
+    expect(loadoutRunsOnLedger(resolveLoadout(DEFAULT_LOADOUTS, "solo"))).toBe(false);
+    expect(loadoutRunsOnLedger(resolveLoadout(DEFAULT_LOADOUTS, undefined))).toBe(false);
+    expect(loadoutRunsOnLedger(resolveLoadout(DEFAULT_LOADOUTS, "deleted"))).toBe(false);
+  });
+
+  it("is true for roles, a judge, and a delegating structure, however the roles are named", () => {
+    // Workers, and the solo-structured Checked solo whose judge checks the last ask.
+    for (const id of ["blitz", "haiku-workers", "cross-check", "checked-solo"]) {
+      expect(loadoutRunsOnLedger(resolveLoadout(DEFAULT_LOADOUTS, id)), id).toBe(true);
+    }
+    const managersWithoutRoles: Loadout = {
+      id: "m",
+      name: "M",
+      description: "",
+      roles: {},
+      structure: "managers",
+    };
+    expect(loadoutRunsOnLedger(managersWithoutRoles)).toBe(true);
+    // The user chose solo for a loadout that still names an explorer: it has a role, so it stays.
+    const soloWithExplorer: Loadout = {
+      id: "s",
+      name: "S",
+      description: "",
+      roles: { explorer: sonnet },
+      structure: "solo",
+    };
+    expect(loadoutRunsOnLedger(soloWithExplorer)).toBe(true);
   });
 });
 

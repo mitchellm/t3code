@@ -124,6 +124,28 @@ describe("Codex orchestration context", () => {
   });
 });
 
+describe("Codex orchestration context without the task ledger", () => {
+  const orchestrationKeys = (context: ReturnType<typeof buildCodexAdditionalContext>) =>
+    Object.keys(context).filter((key) => key.startsWith("t3_code_orchestration_"));
+
+  it("leaves out the task ledger section when the thread runs without it, and nothing else", () => {
+    const runtime = { model: "gpt-6.1-sol" };
+    const on = buildCodexAdditionalContext(runtime);
+    const off = buildCodexAdditionalContext(runtime, true, { taskLedger: false });
+
+    NodeAssert.equal(orchestrationKeys(off).length, orchestrationKeys(on).length - 1);
+    NodeAssert.ok(
+      !orchestrationKeys(off).some((key) => off[key]?.value.includes("ledger_create") === true),
+    );
+    NodeAssert.ok(
+      orchestrationKeys(on).some((key) => on[key]?.value.includes("ledger_create") === true),
+    );
+    NodeAssert.deepEqual(buildCodexAdditionalContext(runtime, true, { taskLedger: true }), on);
+    NodeAssert.deepEqual(off.t3_code_runtime, on.t3_code_runtime);
+    NodeAssert.deepEqual(off.t3_code_tools, on.t3_code_tools);
+  });
+});
+
 describe("Codex device context", () => {
   it("adds the shared device block only when the session holds device access", () => {
     const tools = (device: boolean) =>

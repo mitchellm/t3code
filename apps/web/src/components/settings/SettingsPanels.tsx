@@ -63,6 +63,7 @@ import { PinnedRulesSettings } from "./PinnedRulesSettings";
 import { LoadoutSettings } from "./LoadoutSettings";
 import { AskCheckSettings } from "./AskCheckSettings";
 import { PlanBeforeEditingSettings } from "./PlanBeforeEditingSettings";
+import { TaskLedgerSettings } from "./TaskLedgerSettings";
 import { ThreadTitleInstructionsSettings } from "./ThreadTitleInstructionsSettings";
 import { SnoozePresetsRow } from "./SnoozePresetsSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
@@ -601,6 +602,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.askCheck !== DEFAULT_UNIFIED_SETTINGS.askCheck
       ? ["Check finished work against your message"]
       : []),
+    ...(settings.taskLedger !== DEFAULT_UNIFIED_SETTINGS.taskLedger ? ["Task ledger"] : []),
     ...getChangedBrowserSettingLabels(settings),
     ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
       ? ["Agent browser access"]
@@ -717,6 +719,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       loadouts: [...DEFAULT_UNIFIED_SETTINGS.loadouts],
       planBeforeEditing: DEFAULT_UNIFIED_SETTINGS.planBeforeEditing,
       askCheck: DEFAULT_UNIFIED_SETTINGS.askCheck,
+      taskLedger: DEFAULT_UNIFIED_SETTINGS.taskLedger,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
@@ -1934,6 +1937,7 @@ export function ThreadsSettingsPanel() {
             }
           />
         </AdvancedSettings>
+        <TaskLedgerSettings />
         <PlanBeforeEditingSettings />
         <AskCheckSettings />
         <LoadoutSettings />

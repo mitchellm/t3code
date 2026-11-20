@@ -109,6 +109,29 @@ describe("ask check setting", () => {
   });
 });
 
+describe("task ledger setting", () => {
+  it("is on for settings written before it existed", () => {
+    expect(decodeServerSettings({}).taskLedger).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.taskLedger).toBe(true);
+  });
+
+  it("keeps a project's override and patches it per project", () => {
+    expect(
+      decodeServerSettings({ projectSettingsOverrides: { project: { taskLedger: false } } })
+        .projectSettingsOverrides[ProjectId.make("project")]?.taskLedger,
+    ).toBe(false);
+    expect(
+      decodeServerSettingsPatch({
+        taskLedger: false,
+        projectSettingsOverrides: { project: { taskLedger: true } },
+      }),
+    ).toEqual({
+      taskLedger: false,
+      projectSettingsOverrides: { project: { taskLedger: true } },
+    });
+  });
+});
+
 describe("child MCP servers setting", () => {
   it("lists no user-scoped server for settings written before it existed", () => {
     expect(decodeServerSettings({}).childMcpServers).toEqual([]);

@@ -23,13 +23,21 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { unquotedAsk, wasAsked } from "@t3tools/shared/taskLedger";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { isLedgerRequest, unquotedAsk, wasAsked } from "@t3tools/shared/taskLedger";
 
 import {
   investigationSpawnGuard,
   investigationSpawnRefusal,
 } from "../orchestration-v2/Investigation.ts";
 import * as LedgerJudgeRunner from "../orchestration-v2/LedgerJudgeRunner.ts";
+import {
+  type LedgerLink,
+  ledgerLinkOf,
+  readLedgerChain,
+  taskLedgerOff,
+} from "../orchestration-v2/TaskLedgerSwitch.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { latestUserMessageAt } from "./InvestigationSpawnGuard.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
@@ -130,6 +138,54 @@ const make = Effect.gen(function* () {
     );
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const judgeRunner = yield* LedgerJudgeRunner.LedgerJudgeRunner;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+
+  /** Whether the user's latest message is the one a `/ledger` command sends. */
+  const latestAskIsLedgerRequest = Effect.fn("LedgerMcpService.latestAskIsLedgerRequest")(
+    function* (threadId: ThreadId) {
+      const { messages } = yield* threads
+        .getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] })
+        .pipe(Effect.mapError(unavailable));
+      const latest = messages
+        .filter(wasAsked)
+        .reduce<(typeof messages)[number] | undefined>(
+          (last, message) =>
+            last === undefined ||
+            DateTime.toEpochMillis(message.createdAt) >= DateTime.toEpochMillis(last.createdAt)
+              ? message
+              : last,
+          undefined,
+        );
+      return latest !== undefined && isLedgerRequest(latest.text);
+    },
+  );
+
+  /**
+   * Fork: the `taskLedger` project setting. A thread that runs without the ledger gets this one
+   * refusal from every ledger tool instead of a ledger. The tool list is built once for every
+   * session, so it cannot omit the tools for one thread; the instructions leave them out.
+   */
+  const refuseWhileLedgerOff = Effect.fn("LedgerMcpService.refuseWhileLedgerOff")(function* (own: {
+    readonly threadId: ThreadId;
+    readonly projectId: ProjectId;
+    readonly link: LedgerLink;
+  }) {
+    const settings = yield* serverSettings.getSettings.pipe(Effect.mapError(unavailable));
+    const resolved = resolveProjectSettings(settings, own.projectId).settings;
+    if (resolved.taskLedger !== false) return;
+    const chain = yield* readLedgerChain(own.threadId, (id) =>
+      id === own.threadId
+        ? Effect.succeed(own.link)
+        : threads
+            .getProjectThreadRecords({ projectId: own.projectId, threadId: id }, ["ledger"])
+            .pipe(Effect.map(ledgerLinkOf), Effect.mapError(unavailable)),
+    );
+    if (!taskLedgerOff(resolved, chain) || (yield* latestAskIsLedgerRequest(own.threadId))) return;
+    return yield* failure(
+      "capability_denied",
+      "The task ledger is off for this project, so this thread has no ledger. Work without one.",
+    );
+  });
 
   const loadOwnLedger = Effect.fn("LedgerMcpService.loadOwnLedger")(function* (
     scope: McpInvocationScope,
@@ -147,6 +203,14 @@ const make = Effect.gen(function* () {
         "ledger",
       ])
       .pipe(Effect.mapError(unavailable));
+    // A thread that already has a ledger, open or closed, keeps working with it.
+    if (records.ledger === undefined) {
+      yield* refuseWhileLedgerOff({
+        threadId: thread.threadId,
+        projectId: shell.projectId,
+        link: ledgerLinkOf(records),
+      });
+    }
     return { threadId: thread.threadId, projectId: shell.projectId, ledger: records.ledger };
   });
 
@@ -510,5 +574,8 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   LedgerMcpService,
   never,
-  SecureRandom.SecureRandom | Digest.Digest | ThreadManagementService.ThreadManagementService
+  | SecureRandom.SecureRandom
+  | Digest.Digest
+  | ThreadManagementService.ThreadManagementService
+  | ServerSettings.ServerSettingsService
 > = Layer.effect(LedgerMcpService, make);

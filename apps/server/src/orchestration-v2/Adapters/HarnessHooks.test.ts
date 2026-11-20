@@ -749,6 +749,57 @@ describe("plan before editing", () => {
     expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
   });
 
+  describe("for a thread that runs without the task ledger", () => {
+    const off: ProviderAdapterV2HarnessThreadPolicy = {
+      structure: "solo",
+      planBeforeEditing: true,
+      runtimeMode: "full-access",
+      taskLedger: false,
+    };
+
+    it("lets every file edit through while the thread has no ledger", async () => {
+      const { fire } = gated({ value: state(null) }, { policy: off });
+      for (const tool of FILE_EDIT_TOOLS) {
+        expect(await fire("PreToolUse", preToolUse(tool))).toEqual({});
+      }
+    });
+
+    it("gates again the moment the thread has a ledger, since an existing ledger keeps its behaviour", async () => {
+      const current: Current = { value: state(null) };
+      const { fire } = gated(current, { policy: off });
+      expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+      current.value = state(ledgerOf([item("L1", "closed")], { closedAt: at }));
+      expect(decisionOf(await fire("PreToolUse", preToolUse("Edit")))?.permissionDecision).toBe(
+        "deny",
+      );
+      current.value = state(ledgerOf([item("L1", "open")]));
+      expect(await fire("PreToolUse", preToolUse("Edit"))).toEqual({});
+    });
+
+    it("still denies the same edit when the policy does not say the ledger is off", async () => {
+      const { taskLedger: _on, ...ledgerOn } = off;
+      const { fire } = gated({ value: state(null) }, { policy: ledgerOn });
+      expect(decisionOf(await fire("PreToolUse", preToolUse("Edit")))?.permissionDecision).toBe(
+        "deny",
+      );
+    });
+
+    it("blocks no stop and sends no reminder without a ledger, and keeps both for one that exists", async () => {
+      const current: Current = { value: state(null) };
+      const { fire } = make({
+        ...ledgerReader(current),
+        readThreadPolicy: async () => off,
+        ledgerTools: true,
+      });
+      expect(await fire("Stop", stop(false))).toEqual({});
+      for (let call = 0; call < HARNESS_REMINDER_EVERY; call += 1) {
+        expect(await fire("PostToolUse", toolUse("Read"))).toEqual({});
+      }
+      current.value = state(ledgerOf([item("L1", "open")]));
+      expect((await fire("Stop", stop(false))).decision).toBe("block");
+    });
+  });
+
   it("in plan mode, lets the plan file into the plans directory with no ledger", async () => {
     for (const [plansDirectory, planFile] of PLAN_FILES) {
       const { fire } = gated({ value: state(null) }, { plansDirectory });

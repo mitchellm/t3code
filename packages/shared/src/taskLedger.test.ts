@@ -15,12 +15,24 @@ import {
   askCheckedItems,
   asksTheUser,
   decideLedgerAutoContinue,
+  isLedgerRequest,
   LEDGER_AUTO_CONTINUE_CAP,
+  LEDGER_REQUEST_PREAMBLE,
   type LedgerDomainEvent,
   mentionsAnyQuote,
   unquotedAsk,
   wasAsked,
 } from "./taskLedger.ts";
+
+describe("isLedgerRequest", () => {
+  it("recognizes the message a /ledger command sends, and nothing a person would type by chance", () => {
+    expect(isLedgerRequest(`${LEDGER_REQUEST_PREAMBLE}\n\nTask: move the settings page`)).toBe(
+      true,
+    );
+    expect(isLedgerRequest("move the settings page")).toBe(false);
+    expect(isLedgerRequest("Write a task ledger for this")).toBe(false);
+  });
+});
 
 describe("asksTheUser", () => {
   it("counts a `Needs you:` line above the fold as an ask, with or without a question mark", () => {

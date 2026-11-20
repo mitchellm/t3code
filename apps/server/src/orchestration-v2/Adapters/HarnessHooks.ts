@@ -762,6 +762,9 @@ export function buildClaudeHarnessHooks(port: HarnessHookPort): ClaudeHooks | un
           // next edit.
           const state = await readPlanLedger(signal);
           if (state === undefined || plansCurrentWork(state.ledger)) return {};
+          // The project turned the task ledger off for this thread. A ledger that exists anyway
+          // (one the user asked for, or made before the setting changed) is held to the gate.
+          if (policy.taskLedger === false && state.ledger === null) return {};
           const subagent = input.agent_id !== undefined;
           const pass = finishedLedgerPass(state, (port.now ?? Date.now)());
           if (pass === null || state.ledger === null) {

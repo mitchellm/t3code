@@ -15,7 +15,9 @@ import {
   makeHarnessPort,
   makeHarnessThreadReads,
   makeServerJudgeRead,
+  readTaskLedgerOff,
 } from "./HarnessState.ts";
+import type { LedgerLink } from "./TaskLedgerSwitch.ts";
 
 const pullRequest = (
   number: number,
@@ -174,6 +176,7 @@ const counted = () => {
   const reads = { thread: 0, settings: 0 };
   const threadReads: HarnessThreadReads = {
     readLedgerState: () => Effect.die("not read here"),
+    readLedgerChain: () => Effect.die("not read here"),
     readThreadLoadout: () =>
       Effect.sync(() => {
         reads.thread++;
@@ -194,7 +197,7 @@ it.effect("reads the structure and plan before editing from one thread and setti
     const port = makeHarnessPort(threadReads, () =>
       Effect.sync(() => {
         reads.settings++;
-        return { loadouts: [split], planBeforeEditing: false };
+        return { loadouts: [split], planBeforeEditing: false, taskLedger: true };
       }),
     );
     expect(yield* port.readThreadPolicy).toEqual({
@@ -215,6 +218,7 @@ const loadoutPort = (loadoutId: string | null, setBy: LoadoutSetBy | null) => {
   const port = makeHarnessPort(
     {
       readLedgerState: () => Effect.die("not read here"),
+      readLedgerChain: () => Effect.die("not read here"),
       readThreadLoadout: () =>
         Effect.succeed({
           projectId: ProjectId.make("project"),
@@ -226,7 +230,11 @@ const loadoutPort = (loadoutId: string | null, setBy: LoadoutSetBy | null) => {
     () =>
       Effect.sync(() => {
         reads.settings++;
-        return { loadouts: [...DEFAULT_LOADOUTS, soloWithRoles], planBeforeEditing: true };
+        return {
+          loadouts: [...DEFAULT_LOADOUTS, soloWithRoles],
+          planBeforeEditing: true,
+          taskLedger: true,
+        };
       }),
   );
   return { reads, port };
@@ -254,6 +262,139 @@ it.effect("reads no settings for a thread with no loadout, since every turn read
     const set = loadoutPort("cross-check", "user");
     yield* set.port.readLoadout;
     expect(set.reads.settings).toBe(1);
+  }),
+);
+
+const plainLink = { loadoutId: null, hasLedger: false, parentThreadId: null };
+
+/** A thread under `loadoutId` in a project whose task ledger setting is `taskLedger`. */
+const ledgerSwitchPort = (input: {
+  readonly taskLedger: boolean;
+  readonly loadoutId: string | null;
+  readonly chain?: ReadonlyArray<LedgerLink>;
+}) => {
+  const reads = { chain: 0 };
+  const threadReads: HarnessThreadReads = {
+    readLedgerState: () => Effect.die("not read here"),
+    readLedgerChain: () =>
+      Effect.sync(() => {
+        reads.chain++;
+        return input.chain ?? [{ ...plainLink, loadoutId: input.loadoutId }];
+      }),
+    readThreadLoadout: () =>
+      Effect.succeed({
+        projectId: ProjectId.make("project"),
+        loadoutId: input.loadoutId,
+        setBy: null,
+        runtimeMode: "full-access" as const,
+      }),
+  };
+  const settings = Effect.succeed({
+    loadouts: DEFAULT_LOADOUTS,
+    planBeforeEditing: true,
+    taskLedger: input.taskLedger,
+  });
+  return { reads, threadReads, settings, port: makeHarnessPort(threadReads, () => settings) };
+};
+
+it.effect("tells the hooks a plain thread in a project with the ledger off runs without it", () =>
+  Effect.gen(function* () {
+    const off = ledgerSwitchPort({ taskLedger: false, loadoutId: null });
+    expect(yield* off.port.readThreadPolicy).toEqual({
+      structure: "solo",
+      planBeforeEditing: true,
+      runtimeMode: "full-access",
+      taskLedger: false,
+    });
+    expect(off.reads.chain).toBe(1);
+  }),
+);
+
+it.effect(
+  "leaves the policy alone for a loadout that runs on the ledger or a thread that has one",
+  () =>
+    Effect.gen(function* () {
+      const loadout = ledgerSwitchPort({ taskLedger: false, loadoutId: "cross-check" });
+      expect((yield* loadout.port.readThreadPolicy)?.taskLedger).toBeUndefined();
+      const hasLedger = ledgerSwitchPort({
+        taskLedger: false,
+        loadoutId: null,
+        chain: [{ ...plainLink, hasLedger: true }],
+      });
+      expect((yield* hasLedger.port.readThreadPolicy)?.taskLedger).toBeUndefined();
+    }),
+);
+
+it.effect("reads no ledger or parents while the project keeps the ledger on", () =>
+  Effect.gen(function* () {
+    const on = ledgerSwitchPort({ taskLedger: true, loadoutId: null });
+    expect((yield* on.port.readThreadPolicy)?.taskLedger).toBeUndefined();
+    expect(on.reads.chain).toBe(0);
+    expect(yield* readTaskLedgerOff(on.threadReads, on.settings)).toBe(false);
+    expect(on.reads.chain).toBe(0);
+  }),
+);
+
+it.effect(
+  "tells a turn its thread runs without the ledger, and fails back to the ledger on a bad read",
+  () =>
+    Effect.gen(function* () {
+      const off = ledgerSwitchPort({ taskLedger: false, loadoutId: "solo" });
+      expect(yield* readTaskLedgerOff(off.threadReads, off.settings)).toBe(true);
+      const roles = ledgerSwitchPort({ taskLedger: false, loadoutId: "blitz" });
+      expect(yield* readTaskLedgerOff(roles.threadReads, roles.settings)).toBe(false);
+      expect(yield* readTaskLedgerOff(off.threadReads, Effect.fail("settings unavailable"))).toBe(
+        false,
+      );
+      expect(
+        yield* readTaskLedgerOff(
+          {
+            ...off.threadReads,
+            readLedgerChain: () => Effect.fail("projection unavailable") as never,
+          },
+          off.settings,
+        ),
+      ).toBe(false);
+    }),
+);
+
+it.effect("reads a thread's ledger chain through its parents from the projection", () =>
+  Effect.gen(function* () {
+    const child = ThreadId.make("child");
+    const parent = ThreadId.make("parent");
+    const threads = new Map<string, Record<string, unknown>>([
+      [
+        child,
+        {
+          thread: {
+            loadout: null,
+            lineage: { parentThreadId: parent, relationshipToParent: "subagent" },
+          },
+          ledger: undefined,
+        },
+      ],
+      [
+        parent,
+        {
+          thread: {
+            loadout: { id: "blitz", reason: null, setBy: "user" },
+            lineage: { parentThreadId: null, relationshipToParent: null },
+          },
+          ledger: { id: "ledger" },
+        },
+      ],
+    ]);
+    const chain = yield* makeHarnessThreadReads(
+      {
+        getThreadRecords: (id: ThreadId) => Effect.succeed(threads.get(id)),
+      } as unknown as Parameters<typeof makeHarnessThreadReads>[0],
+      child,
+      "Stopped by the user",
+    ).readLedgerChain();
+    expect(chain).toEqual([
+      { loadoutId: null, hasLedger: false, parentThreadId: parent },
+      { loadoutId: "blitz", hasLedger: true, parentThreadId: null },
+    ]);
   }),
 );
 

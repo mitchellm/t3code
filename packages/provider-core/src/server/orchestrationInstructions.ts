@@ -45,6 +45,20 @@ export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
 ${T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n")}
 `;
 
+/**
+ * Fork: a thread whose project turned the task ledger off (see the `taskLedger` setting) is not
+ * told to write one. The ledger section is the only text that does, so it is the only one left out.
+ */
+export const orchestrationSections = (taskLedger: boolean): ReadonlyArray<string> =>
+  taskLedger
+    ? T3_CODE_ORCHESTRATION_SECTIONS
+    : T3_CODE_ORCHESTRATION_SECTIONS.filter((section) => !section.startsWith("### Task ledger"));
+
+export const t3OrchestrationInstructions = (taskLedger: boolean): string =>
+  taskLedger
+    ? T3_CODE_ORCHESTRATION_INSTRUCTIONS
+    : `\n\n${orchestrationSections(false).join("\n\n")}\n`;
+
 export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
 ## T3 Code browser
@@ -87,6 +101,8 @@ export interface T3AcpInstructionState {
   readonly interactionMode: ProviderInteractionMode;
   readonly hasT3Mcp: boolean;
   readonly hasDeviceTools: boolean;
+  /** Absent means the thread runs on the task ledger. */
+  readonly taskLedger?: boolean;
 }
 
 /** ACP lacks system/developer fields; inject context on first prompt and tool/mode changes. */
@@ -100,7 +116,8 @@ export function t3AcpPromptWithInstructions(input: {
   if (
     input.previousState?.interactionMode === input.state.interactionMode &&
     input.previousState.hasT3Mcp === input.state.hasT3Mcp &&
-    input.previousState.hasDeviceTools === input.state.hasDeviceTools
+    input.previousState.hasDeviceTools === input.state.hasDeviceTools &&
+    (input.previousState.taskLedger ?? true) === (input.state.taskLedger ?? true)
   ) {
     return input.prompt;
   }
@@ -112,7 +129,7 @@ export function t3AcpPromptWithInstructions(input: {
       ? [
           T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(),
           ...(input.state.hasDeviceTools ? [T3_CODE_DEVICE_TOOL_INSTRUCTIONS] : []),
-          T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim(),
+          t3OrchestrationInstructions(input.state.taskLedger ?? true).trim(),
           T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS,
         ]
       : []),
@@ -120,10 +137,10 @@ export function t3AcpPromptWithInstructions(input: {
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;
 }
 
-const orchestrationInstructions = (hasDeviceTools: boolean) =>
-  hasDeviceTools
-    ? `${T3_CODE_ORCHESTRATION_INSTRUCTIONS}\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS}\n`
-    : T3_CODE_ORCHESTRATION_INSTRUCTIONS;
+const orchestrationInstructions = (hasDeviceTools: boolean, taskLedger: boolean) => {
+  const orchestration = t3OrchestrationInstructions(taskLedger);
+  return hasDeviceTools ? `${orchestration}\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS}\n` : orchestration;
+};
 
 function prependT3OrchestrationInstructions(prompt: string, instructions: string): string {
   return `<t3_code_orchestration_instructions>${instructions.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
@@ -136,12 +153,14 @@ export function t3OrchestrationPrompt(input: {
   readonly hasDeviceTools: boolean;
   readonly orchestrationDelivered: boolean;
   readonly deviceInstructionsDelivered: boolean;
+  /** Absent means the thread runs on the task ledger. */
+  readonly taskLedger?: boolean;
 }): string {
   if (!input.hasT3Mcp) return input.prompt;
   if (!input.orchestrationDelivered) {
     return prependT3OrchestrationInstructions(
       input.prompt,
-      orchestrationInstructions(input.hasDeviceTools),
+      orchestrationInstructions(input.hasDeviceTools, input.taskLedger ?? true),
     );
   }
   return input.hasDeviceTools && !input.deviceInstructionsDelivered
@@ -152,6 +171,7 @@ export function t3OrchestrationPrompt(input: {
 export function t3OrchestrationSystemPrompt(
   hasT3Mcp: boolean,
   hasDeviceTools: boolean,
+  taskLedger = true,
 ): string | undefined {
-  return hasT3Mcp ? orchestrationInstructions(hasDeviceTools) : undefined;
+  return hasT3Mcp ? orchestrationInstructions(hasDeviceTools, taskLedger) : undefined;
 }

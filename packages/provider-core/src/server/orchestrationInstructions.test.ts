@@ -5,7 +5,9 @@ import {
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
   T3_CODE_ORCHESTRATION_SECTIONS,
+  orchestrationSections,
   t3AcpPromptWithInstructions,
+  t3OrchestrationInstructions,
   t3OrchestrationPrompt,
   t3OrchestrationSystemPrompt,
 } from "./orchestrationInstructions.ts";
@@ -22,6 +24,75 @@ describe("T3 ledger instructions", () => {
     for (const section of T3_CODE_ORCHESTRATION_SECTIONS) {
       assert.isBelow(Buffer.byteLength(section, "utf8"), 4_000);
     }
+  });
+});
+
+describe("T3 instructions without the task ledger", () => {
+  it("drop only the task ledger section, and nothing else that tells the agent to write one", () => {
+    const withoutLedger = orchestrationSections(false).join("\n\n");
+    const full = orchestrationSections(true);
+    assert.deepEqual(full, T3_CODE_ORCHESTRATION_SECTIONS);
+    const ledgerSections = full.filter((section) => section.startsWith("### Task ledger"));
+    assert.lengthOf(ledgerSections, 1);
+    assert.deepEqual(
+      orchestrationSections(false),
+      full.filter((section) => section !== ledgerSections[0]),
+    );
+    assert.notMatch(withoutLedger, /ledger/i);
+    assert.notInclude(withoutLedger, "t3_loadout_propose");
+    assert.include(withoutLedger, "## T3 Code orchestration");
+    assert.include(withoutLedger, "### Replying to the user");
+  });
+
+  it("leave the instructions as they were while the ledger is on", () => {
+    assert.equal(t3OrchestrationInstructions(true), T3_CODE_ORCHESTRATION_INSTRUCTIONS);
+    assert.include(t3OrchestrationInstructions(true), "ledger_create");
+    assert.notInclude(t3OrchestrationInstructions(false), "ledger_create");
+    assert.include(t3OrchestrationInstructions(false), "## T3 Code orchestration");
+    assert.equal(
+      t3OrchestrationSystemPrompt(true, false),
+      t3OrchestrationSystemPrompt(true, false, true),
+    );
+  });
+
+  it("reach OpenCode, Cursor and ACP agents without the ledger section when the thread runs without it", () => {
+    assert.notInclude(t3OrchestrationSystemPrompt(true, false, false) ?? "", "ledger_create");
+    assert.include(t3OrchestrationSystemPrompt(true, true, false) ?? "", "## T3 Code devices");
+
+    const firstRun = (taskLedger: boolean) =>
+      t3OrchestrationPrompt({
+        prompt: "Fix the typo.",
+        hasT3Mcp: true,
+        hasDeviceTools: false,
+        orchestrationDelivered: false,
+        deviceInstructionsDelivered: false,
+        taskLedger,
+      });
+    assert.include(firstRun(true), "ledger_create");
+    assert.notInclude(firstRun(false), "ledger_create");
+    assert.include(firstRun(false), "## T3 Code orchestration");
+
+    const acp = {
+      interactionMode: "default",
+      hasT3Mcp: true,
+      hasDeviceTools: false,
+    } as const;
+    assert.include(t3AcpPromptWithInstructions({ prompt: "Hi.", state: acp }), "ledger_create");
+    assert.notInclude(
+      t3AcpPromptWithInstructions({ prompt: "Hi.", state: { ...acp, taskLedger: false } }),
+      "ledger_create",
+    );
+  });
+
+  it("send ACP agents the new instructions again when the setting flips mid-thread", () => {
+    const state = { interactionMode: "default", hasT3Mcp: true, hasDeviceTools: false } as const;
+    const flipped = t3AcpPromptWithInstructions({
+      prompt: "Again.",
+      state: { ...state, taskLedger: false },
+      previousState: state,
+    });
+    assert.include(flipped, "## T3 Code orchestration");
+    assert.notInclude(flipped, "ledger_create");
   });
 });
 

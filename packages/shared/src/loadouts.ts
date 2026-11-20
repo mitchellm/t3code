@@ -37,6 +37,15 @@ export const loadoutStructure = (loadout: Loadout): LoadoutStructure =>
   loadout.structure ?? (Object.keys(loadout.roles).length === 0 ? "solo" : "workers");
 
 /**
+ * Fork: whether a loadout runs on the task ledger whatever the project's `taskLedger` setting says:
+ * it delegates (workers, managers), or it names any role, a judge included, which is what makes
+ * the solo-structured Checked solo hold the last ask. Only none, Solo and a loadout that was
+ * deleted after a thread chose it (which resolves to Solo) run without it.
+ */
+export const loadoutRunsOnLedger = (loadout: Loadout): boolean =>
+  loadoutStructure(loadout) !== "solo" || Object.keys(loadout.roles).length > 0;
+
+/**
  * Fork: the judge of a loadout that chose the solo structure. One agent builds and delegates
  * nothing, and this role checks its finished asks, instead of judging each item as under a
  * structure that delegates.

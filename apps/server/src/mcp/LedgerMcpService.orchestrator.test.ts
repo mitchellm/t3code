@@ -9,6 +9,7 @@ import {
   type Loadout,
   NodeId,
   type OrchestrationV2Subagent,
+  OrchestratorMcpFailure,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -26,7 +27,7 @@ import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenanc
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
-import type * as ServerSettings from "../serverSettings.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { runOrchestratorV2Scenario } from "../orchestration-v2/testkit/OrchestratorScenario.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -73,6 +74,7 @@ const layerThreads = Layer.unwrap(
   Effect.map(Orchestrator.OrchestratorV2, (orchestrator) =>
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: orchestrator.getThreadShell,
+      getThreadRecords: orchestrator.getThreadRecords,
       dispatch: orchestrator.dispatch,
       getProjectThreadRecords: ({ threadId }, fields) =>
         orchestrator.getThreadRecords(threadId, fields).pipe(Effect.orDie),
@@ -162,6 +164,7 @@ it.effect("creates and reads a ledger through the real orchestrator and projecti
         Layer.provideMerge(layerThreads),
         Layer.provideMerge(layerOrchestrator),
         Layer.provideMerge(NodeCrypto.layer),
+        Layer.provideMerge(ServerSettings.layerTest()),
       ),
     ),
   ),
@@ -266,6 +269,7 @@ it.effect(
           Layer.provideMerge(layerThreadsWithTasks(taskRecords)),
           Layer.provideMerge(layerOrchestrator),
           Layer.provideMerge(NodeCrypto.layer),
+          Layer.provideMerge(ServerSettings.layerTest()),
         ),
       ),
     );
@@ -348,6 +352,7 @@ const stampedLedger = (input: {
         Layer.provideMerge(layerThreads),
         Layer.provideMerge(makeLayerOrchestrator(input.settings)),
         Layer.provideMerge(NodeCrypto.layer),
+        Layer.provideMerge(ServerSettings.layerTest(input.settings)),
       ),
     ),
   );
@@ -386,6 +391,33 @@ it.effect(
         }),
         none,
       );
+    }),
+);
+
+it.effect(
+  "with the task ledger off for the server or the project, a plain thread cannot create one but a loadout with roles can",
+  () =>
+    Effect.gen(function* () {
+      for (const settings of [
+        { taskLedger: false },
+        { projectSettingsOverrides: { [stampProjectId]: { taskLedger: false } } },
+      ]) {
+        const refused = yield* Effect.flip(stampedLedger({ settings }));
+        assert.instanceOf(refused, OrchestratorMcpFailure);
+        assert.strictEqual(refused.code, "capability_denied");
+        assert.include(refused.message, "The task ledger is off for this project");
+        // Solo is the same as no loadout.
+        const solo = yield* Effect.flip(stampedLedger({ settings, loadoutId: "solo" }));
+        assert.instanceOf(solo, OrchestratorMcpFailure);
+        assert.strictEqual(solo.code, "capability_denied");
+        assert.deepEqual(
+          yield* stampedLedger({
+            settings: { ...settings, loadouts: [...DEFAULT_LOADOUTS, judgedLoadout] },
+            loadoutId: judgedLoadout.id,
+          }),
+          { askCheck: undefined, requiresJudge: true, shown: undefined },
+        );
+      }
     }),
 );
 

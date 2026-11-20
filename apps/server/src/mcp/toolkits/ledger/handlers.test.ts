@@ -1,5 +1,5 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
-import { expect, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   EventId,
@@ -16,15 +16,17 @@ import {
   ProviderInstanceId,
   RunId,
   ThreadId,
+  type ThreadLoadout,
   type CommandId,
 } from "@t3tools/contracts";
-import { applyLedgerEvent } from "@t3tools/shared/taskLedger";
+import { applyLedgerEvent, LEDGER_REQUEST_PREAMBLE } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import { McpSchema, McpServer } from "effect/ai";
 
+import * as ServerSettings from "../../../serverSettings.ts";
 import * as LedgerJudgeRunner from "../../../orchestration-v2/LedgerJudgeRunner.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
@@ -95,6 +97,9 @@ const makeFakeThreads = () => {
   /** The thread's runs and user messages, for the one tool that reads them (create after an end). */
   const runs = new Map<ThreadId, ReadonlyArray<OrchestrationV2Run>>();
   const messages = new Map<ThreadId, ReadonlyArray<OrchestrationV2ConversationMessage>>();
+  /** The loadout a thread runs under, and the parent a delegated child was started by. */
+  const loadouts = new Map<ThreadId, ThreadLoadout>();
+  const parents = new Map<ThreadId, ThreadId>();
   const judgeStarts: Array<LedgerJudgeRunner.LedgerJudgeStartInput> = [];
   // Like the real runner once its judge task exists: the judging item records the task.
   const judgeRunner = Layer.succeed(LedgerJudgeRunner.LedgerJudgeRunner)({
@@ -131,8 +136,24 @@ const makeFakeThreads = () => {
       })) as unknown as ThreadManagement.ThreadManagementService["Service"]["getThreadRecords"],
     getProjectThreadRecords: ({ threadId }) => {
       const ledger = ledgers.get(threadId);
+      const projection = idleThreadProjection(liveThreadShell(threadId));
+      const loadout = loadouts.get(threadId);
+      const parent = parents.get(threadId);
       return Effect.succeed({
-        ...idleThreadProjection(liveThreadShell(threadId)),
+        ...projection,
+        thread: {
+          ...projection.thread,
+          ...(loadout === undefined ? {} : { loadout }),
+          ...(parent === undefined
+            ? {}
+            : {
+                lineage: {
+                  rootThreadId: parent,
+                  parentThreadId: parent,
+                  relationshipToParent: "subagent" as const,
+                },
+              }),
+        },
         ...(ledger === undefined ? {} : { ledger }),
       });
     },
@@ -182,6 +203,8 @@ const makeFakeThreads = () => {
     ledgers,
     runs,
     messages,
+    loadouts,
+    parents,
     judgeStarts,
     planned: () => planned,
   };
@@ -197,6 +220,8 @@ const withServer = <A, E>(
     ) => Effect.Effect<McpSchema.CallToolResult>,
     server: McpServer.McpServer["Service"],
   ) => Effect.Effect<A, E>,
+  /** The environment's settings; every test but the task ledger switch's keeps the defaults. */
+  settings: Parameters<typeof ServerSettings.layerTest>[0] = {},
 ) =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
@@ -216,6 +241,7 @@ const withServer = <A, E>(
       McpHttpServer.layerLedgerToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
+        Layer.provide(ServerSettings.layerTest(settings)),
         Layer.provide(fake.layer),
       ),
     ),
@@ -425,6 +451,180 @@ it.effect("reads a thread with no ledger as null", () =>
     }),
   ),
 );
+
+describe("with the task ledger turned off for the project", () => {
+  const off = { taskLedger: false };
+  const loadoutOf = (id: string): ThreadLoadout => ({ id, reason: null, setBy: "user" });
+  const everyTool: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+    ["ledger_create", { title: "Ship", items: twoItems }],
+    ["ledger_add_items", { items: [{ id: "L3", title: "Docs", acceptance: "README" }] }],
+    ["ledger_update_item", { itemId: "L1", status: "closed", evidence: "ok" }],
+    ["ledger_set_checkpoint", { checkpointId: "C1", reached: true }],
+    ["ledger_close", {}],
+    ["ledger_reopen", {}],
+    ["ledger_read", {}],
+  ];
+
+  it.effect(
+    "refuses every ledger tool for a plain thread, with one line saying why, and writes nothing",
+    () => {
+      const fake = makeFakeThreads();
+      return withServer(
+        fake,
+        (call) =>
+          Effect.gen(function* () {
+            for (const [name, args] of everyTool) {
+              const refused = failureOf(yield* call(name, args));
+              expect(refused?.code, name).toBe("capability_denied");
+              expect(refused?.message, name).toBe(
+                "The task ledger is off for this project, so this thread has no ledger. Work without one.",
+              );
+            }
+            expect(fake.planned()).toBe(0);
+            expect(fake.ledgers.size).toBe(0);
+            // Solo is the same as no loadout.
+            fake.loadouts.set(ownThread, loadoutOf("solo"));
+            expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))?.code).toBe(
+              "capability_denied",
+            );
+          }),
+        off,
+      );
+    },
+  );
+
+  it.effect("offers the tools as before to a thread under a loadout with roles or a judge", () => {
+    const fake = makeFakeThreads();
+    return withServer(
+      fake,
+      (call) =>
+        Effect.gen(function* () {
+          for (const id of ["blitz", "checked-solo"]) {
+            fake.ledgers.delete(ownThread);
+            fake.loadouts.set(ownThread, loadoutOf(id));
+            expect(failureOf(yield* call("ledger_read", {})), id).toBeUndefined();
+            expect(failureOf(yield* call("ledger_create", everyTool[0]![1])), id).toBeUndefined();
+            expect(fake.ledgers.get(ownThread)?.items).toHaveLength(2);
+          }
+        }),
+      off,
+    );
+  });
+
+  it.effect(
+    "keeps a thread's existing ledger working, closed or open, after the setting was turned off",
+    () => {
+      const fake = makeFakeThreads();
+      return withServer(
+        fake,
+        (call) =>
+          Effect.gen(function* () {
+            // Made while the setting was on.
+            fake.ledgers.set(ownThread, {
+              ...fixtureLedger([
+                fixtureItem(1, "open", { evidence: null, verdict: null }),
+                fixtureItem(2, "open", { evidence: null, verdict: null }),
+              ]),
+              requiresJudge: false,
+            });
+            expect(failureOf(yield* call("ledger_read", {}))).toBeUndefined();
+            const closed = yield* call("ledger_update_item", {
+              itemId: "L1",
+              status: "closed",
+              evidence: "parser.test.ts: 12 passed",
+            });
+            expect(failureOf(closed)).toBeUndefined();
+            const dropped = yield* call("ledger_update_item", {
+              itemId: "L2",
+              status: "dropped",
+              dropReason: "Out of scope",
+            });
+            expect(failureOf(dropped)).toBeUndefined();
+            expect(fake.ledgers.get(ownThread)?.closedAt).not.toBeNull();
+            // A finished ledger is still the thread's ledger: it reopens and takes a new one.
+            expect(failureOf(yield* call("ledger_reopen", {}))).toBeUndefined();
+            expect(failureOf(yield* call("ledger_close", {}))).toBeUndefined();
+            expect(
+              failureOf(yield* call("ledger_create", { title: "Next", items: [twoItems[0]] })),
+            ).toBeUndefined();
+          }),
+        off,
+      );
+    },
+  );
+
+  it.effect(
+    "leaves a delegated child working its parent's item as before when the parent runs on the ledger",
+    () => {
+      const fake = makeFakeThreads();
+      const parent = ThreadId.make("thread:ledger-parent");
+      fake.parents.set(ownThread, parent);
+      return withServer(
+        fake,
+        (call) =>
+          Effect.gen(function* () {
+            // Under a plain parent the child is plain too.
+            expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))?.code).toBe(
+              "capability_denied",
+            );
+            fake.loadouts.set(parent, loadoutOf("blitz"));
+            expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))).toBeUndefined();
+            fake.ledgers.delete(ownThread);
+            fake.loadouts.delete(parent);
+            // A parent that already has a ledger is a thread on the ledger.
+            fake.ledgers.set(parent, fixtureLedger([]));
+            expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))).toBeUndefined();
+          }),
+        off,
+      );
+    },
+  );
+
+  it.effect(
+    "still creates the ledger a person asks for with /ledger, and only for that message",
+    () => {
+      const fake = makeFakeThreads();
+      const said = (id: string, text: string) =>
+        ({
+          id: MessageId.make(`message:${id}`),
+          runId: RunId.make(`run:${id}`),
+          role: "user",
+          text,
+          createdAt: NOW,
+          createdBy: "user",
+          creationSource: "web",
+        }) as unknown as OrchestrationV2ConversationMessage;
+      return withServer(
+        fake,
+        (call) =>
+          Effect.gen(function* () {
+            fake.messages.set(ownThread, [said("plain", "Fix the typo in the header.")]);
+            expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))?.code).toBe(
+              "capability_denied",
+            );
+            fake.messages.set(ownThread, [
+              said("plain", "Fix the typo in the header."),
+              said("ledger", `${LEDGER_REQUEST_PREAMBLE}\n\nTask: move the settings page`),
+            ]);
+            expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))).toBeUndefined();
+            expect(fake.ledgers.get(ownThread)?.items).toHaveLength(2);
+          }),
+        off,
+      );
+    },
+  );
+
+  it.effect("changes nothing for a project that keeps the ledger on", () => {
+    const fake = makeFakeThreads();
+    return withServer(fake, (call) =>
+      Effect.gen(function* () {
+        expect(failureOf(yield* call("ledger_read", {}))).toBeUndefined();
+        expect(failureOf(yield* call("ledger_create", everyTool[0]![1]))).toBeUndefined();
+        expect(fake.ledgers.get(ownThread)?.items).toHaveLength(2);
+      }),
+    );
+  });
+});
 
 it.effect("maps orchestrator rejections to clear tool errors and applies valid transitions", () => {
   const fake = makeFakeThreads();

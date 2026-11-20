@@ -751,6 +751,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["agent structure planner worker judge explorer solo model roles delegate"],
   },
   {
+    id: "task-ledger",
+    title: "Task ledger",
+    to: "/settings/threads",
+    scope: "project-defaults",
+    searchTerms: [
+      "task ledger plan first checklist asks off turn off small changes harness overhead cost auto continue loadout roles judge",
+    ],
+  },
+  {
     id: "plan-before-editing",
     title: "Plan before editing",
     to: "/settings/threads",

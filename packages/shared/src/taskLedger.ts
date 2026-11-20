@@ -9,6 +9,18 @@ import type {
 export const LEDGER_AUTO_CONTINUE_CAP = 5;
 
 /**
+ * Fork: what a leading `/ledger <task>` in the composer sends. The server reads it back, because a
+ * ledger a person asked for is not one a project that turned the task ledger off can refuse.
+ */
+export const LEDGER_REQUEST_PREAMBLE =
+  "Before you start, create a task ledger with the ledger_create tool: one top-level ask for each " +
+  "thing the task below asks for, quoting my words, with acceptance criteria that say what done " +
+  "means, and your plan steps under them. Then work the ledger, updating each item with evidence " +
+  "as you finish it.";
+
+export const isLedgerRequest = (text: string): boolean => text.startsWith(LEDGER_REQUEST_PREAMBLE);
+
+/**
  * Fork: a reply that asks the user something ends on their answer, not on more ledger work.
  * The harness tells agents to open an ask with a `Needs you:` line above any `<details>` fold;
  * a reply that leads or ends with a question counts too.

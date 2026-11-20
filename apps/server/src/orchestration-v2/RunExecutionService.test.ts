@@ -46,6 +46,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
+import type { HarnessThreadReads } from "./HarnessState.ts";
+import type { LedgerLink } from "./TaskLedgerSwitch.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -1299,6 +1301,147 @@ describe("MCP scope for judges and delegated children", () => {
         }),
         { kind: "delegated", userServers: ["ask-ps99"] },
       );
+    }),
+  );
+});
+
+describe("the task ledger switch for a turn", () => {
+  const plain: LedgerLink = { loadoutId: null, hasLedger: false, parentThreadId: null };
+
+  const startWithLedgerSetting = (input: {
+    readonly name: string;
+    readonly taskLedger: boolean;
+    readonly readLedgerChain: HarnessThreadReads["readLedgerChain"];
+  }) =>
+    Effect.gen(function* () {
+      const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
+      const started = yield* Deferred.make<ProviderAdapter.ProviderAdapterV2TurnInput>();
+      const threadId = ThreadId.make(`thread:${input.name}`);
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const attemptId = RunAttemptId.make(`attempt:${input.name}`);
+      yield* runExecution.startRootRun({
+        commandId: CommandId.make(`command:${input.name}`),
+        appThread: {
+          id: threadId,
+          projectId: ProjectId.make("project:ledger-switch"),
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        } as OrchestrationV2AppThread,
+        providerSessionId: ProviderSessionId.make(`session:${input.name}`),
+        session: {
+          events: Stream.never,
+          startTurn: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+            Deferred.succeed(started, turn),
+        } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        run: {
+          id: RunId.make(`run:${input.name}`),
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+        } as OrchestrationV2Run,
+        rootNode: { id: NodeId.make(`node:${input.name}`) } as OrchestrationV2ExecutionNode,
+        checkpointScope: {
+          id: CheckpointScopeId.make(`checkpoint-scope:${input.name}`),
+        } as OrchestrationV2CheckpointScope,
+        providerThread: {
+          id: ProviderThreadId.make(`provider-thread:${input.name}`),
+          driver,
+        } as OrchestrationV2ProviderThread,
+        attempt: { id: attemptId, providerTurnId: null } as OrchestrationV2RunAttempt,
+        attemptId,
+        providerTurnOrdinal: 1,
+        harnessReads: {
+          readLedgerState: () => Effect.die("not read for the turn"),
+          readThreadLoadout: () => Effect.die("not read for the turn"),
+          readLedgerChain: input.readLedgerChain,
+        },
+        message: {
+          messageId: MessageId.make(`message:${input.name}`),
+          text: "go",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        },
+      });
+      return yield* Deferred.await(started);
+    }).pipe(
+      Effect.provide(
+        RunExecutionService.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              McpAppModelContext.layerEmpty,
+              PreviewAgentActivity.layer,
+              Layer.mock(CheckpointService.CheckpointServiceV2)({
+                captureBaseline: () => Effect.void,
+              }),
+              layerTurnItemPositionsTest,
+              Layer.mock(EventSink.EventSinkV2)({}),
+              IdAllocator.layer,
+              Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+                ingestNormalized: () => Effect.succeed([]),
+              }),
+              ServerSettings.layerTest({ taskLedger: input.taskLedger }),
+            ),
+          ),
+        ),
+      ),
+    );
+
+  it.effect(
+    "tells the provider a plain thread in a project with the ledger off runs without it",
+    () =>
+      Effect.gen(function* () {
+        const turn = yield* startWithLedgerSetting({
+          name: "ledger-switch-off",
+          taskLedger: false,
+          readLedgerChain: () => Effect.succeed([plain]),
+        });
+        assert.strictEqual(turn.taskLedger, false);
+      }),
+  );
+
+  it.effect(
+    "leaves the turn as it was under a loadout with roles, or when the thread has a ledger",
+    () =>
+      Effect.gen(function* () {
+        for (const [name, link] of [
+          ["ledger-switch-roles", { ...plain, loadoutId: "blitz" }],
+          ["ledger-switch-has-ledger", { ...plain, hasLedger: true }],
+        ] as const) {
+          const turn = yield* startWithLedgerSetting({
+            name,
+            taskLedger: false,
+            readLedgerChain: () => Effect.succeed([link]),
+          });
+          assert.isUndefined(turn.taskLedger);
+        }
+      }),
+  );
+
+  it.effect("reads nothing about the thread while the project keeps the ledger on", () =>
+    Effect.gen(function* () {
+      const turn = yield* startWithLedgerSetting({
+        name: "ledger-switch-on",
+        taskLedger: true,
+        readLedgerChain: () => Effect.die("not read while the ledger is on"),
+      });
+      assert.isUndefined(turn.taskLedger);
+    }),
+  );
+
+  it.effect("starts the turn on the ledger when the thread cannot be read", () =>
+    Effect.gen(function* () {
+      const turn = yield* startWithLedgerSetting({
+        name: "ledger-switch-unreadable",
+        taskLedger: false,
+        readLedgerChain: () => Effect.fail("database unavailable") as never,
+      });
+      assert.isUndefined(turn.taskLedger);
     }),
   );
 });

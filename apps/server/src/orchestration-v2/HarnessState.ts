@@ -23,6 +23,12 @@ import * as Effect from "effect/Effect";
 import { ledgerFinishedAt } from "./Adapters/HarnessHooks.ts";
 import { latestPersonMessageAt } from "./Investigation.ts";
 import type * as ProjectionStore from "./ProjectionStore.ts";
+import {
+  type LedgerLink,
+  ledgerLinkOf,
+  readLedgerChain as walkLedgerChain,
+  taskLedgerOffFor,
+} from "./TaskLedgerSwitch.ts";
 
 const hasOpenItem = (ledger: Ledger) =>
   ledger.closedAt === null &&
@@ -48,10 +54,18 @@ export interface HarnessThreadReads {
     },
     ProjectionStore.ProjectionStoreV2Error
   >;
+  /** The thread, then each parent it was delegated from, for the task ledger switch. */
+  readonly readLedgerChain: () => Effect.Effect<
+    ReadonlyArray<LedgerLink>,
+    ProjectionStore.ProjectionStoreV2Error
+  >;
 }
 
 /** The settings the hooks act on, as resolved for the thread's project. */
-export type HarnessProjectSettings = Pick<ServerSettings, "loadouts" | "planBeforeEditing">;
+export type HarnessProjectSettings = Pick<
+  ServerSettings,
+  "loadouts" | "planBeforeEditing" | "taskLedger"
+>;
 
 export function makeHarnessThreadReads(
   projectionStore: Pick<ProjectionStore.ProjectionStoreV2["Service"], "getThreadRecords">,
@@ -112,8 +126,42 @@ export function makeHarnessThreadReads(
           runtimeMode: thread.runtimeMode,
         })),
       ),
+    readLedgerChain: () =>
+      walkLedgerChain(threadId, (id) =>
+        projectionStore.getThreadRecords(id, ["ledger"]).pipe(Effect.map(ledgerLinkOf)),
+      ),
   };
 }
+
+/**
+ * Whether the thread runs without the task ledger (see TaskLedgerSwitch). A read that fails leaves
+ * the thread on the ledger, which is how it ran before the setting existed, and never fails the
+ * turn or a hook's other answers.
+ */
+const readLedgerOff = (
+  reads: Pick<HarnessThreadReads, "readLedgerChain">,
+  settings: Pick<HarnessProjectSettings, "loadouts" | "taskLedger">,
+): Effect.Effect<boolean> =>
+  taskLedgerOffFor({ settings, readChain: Effect.suspend(reads.readLedgerChain) }).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("Failed to read whether the thread runs without the task ledger.", {
+        cause,
+      }).pipe(Effect.as(false)),
+    ),
+  );
+
+export const readTaskLedgerOff = <E>(
+  reads: Pick<HarnessThreadReads, "readLedgerChain">,
+  readSettings: Effect.Effect<Pick<HarnessProjectSettings, "loadouts" | "taskLedger">, E>,
+): Effect.Effect<boolean> =>
+  readSettings.pipe(
+    Effect.flatMap((settings) => readLedgerOff(reads, settings)),
+    Effect.catch((cause) =>
+      Effect.logWarning("Failed to read the project settings for the task ledger switch.", {
+        cause,
+      }).pipe(Effect.as(false)),
+    ),
+  );
 
 /**
  * Whether the thread is the server's ledger judge. Only the parent's task record says so: a
@@ -165,13 +213,15 @@ export function makeHarnessPort<E>(
       Effect.gen(function* () {
         const { projectId, loadoutId, runtimeMode } = yield* reads.readThreadLoadout();
         const settings = yield* readProjectSettings(projectId);
+        const ledgerOff = yield* readLedgerOff(reads, settings);
         return {
           structure: loadoutStructure(resolveLoadout(settings.loadouts, loadoutId)),
           planBeforeEditing: settings.planBeforeEditing,
           runtimeMode,
+          ...(ledgerOff ? { taskLedger: false as const } : {}),
         };
       }),
-      "loadout and plan before editing setting",
+      "loadout and project settings",
     ),
     readLoadout: orUndefined(
       Effect.gen(function* () {

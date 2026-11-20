@@ -1098,6 +1098,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "loadouts",
   "planBeforeEditing",
   "askCheck",
+  "taskLedger",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1139,6 +1140,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   loadouts: Schema.optionalKey(SavedLoadouts),
   planBeforeEditing: Schema.optionalKey(Schema.Boolean),
   askCheck: Schema.optionalKey(Schema.Boolean),
+  taskLedger: Schema.optionalKey(Schema.Boolean),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1399,6 +1401,13 @@ export const ServerSettings = Schema.Struct({
    * the solo structure but names a judge runs it on that stronger model whatever this says.
    */
   askCheck: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Off, a thread that runs under no loadout or Solo is not asked to write a task ledger: its
+   * instructions leave the ledger out, its ledger tools refuse, and the plan-before-editing gate
+   * and ledger reminders stand down. A thread that already has a ledger, and any thread under a
+   * loadout with roles or a judge, keeps the ledger whatever this says.
+   */
+  taskLedger: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /**
    * Claude only: delegated children start T3's server and the project's .mcp.json servers, not the
    * servers in the user's Claude config, because each child is a full extra session. Names listed
@@ -1770,6 +1779,7 @@ export const ServerSettingsPatch = Schema.Struct({
   loadouts: Schema.optionalKey(Schema.Array(Loadout)),
   planBeforeEditing: Schema.optionalKey(Schema.Boolean),
   askCheck: Schema.optionalKey(Schema.Boolean),
+  taskLedger: Schema.optionalKey(Schema.Boolean),
   childMcpServers: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   branchNamingMode: Schema.optionalKey(BranchNamingMode),
   branchNamePrefix: Schema.optionalKey(TrimmedString),

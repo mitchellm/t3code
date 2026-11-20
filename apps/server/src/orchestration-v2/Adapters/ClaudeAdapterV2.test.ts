@@ -86,7 +86,11 @@ import { WorkflowAgentTranscriptReadObserver } from "../workflowAgentTranscript.
 import { composePinnedRules } from "../threadRulePins.ts";
 import * as ServerConfig from "../../config.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
-import { T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH } from "@t3tools/provider-core/server/orchestrationInstructions";
+import {
+  T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  t3OrchestrationInstructions,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { PreviewControlsToolkit } from "../../mcp/toolkits/previewControls/tools.ts";
 import { HtmlToolkit } from "../../mcp/toolkits/html/tools.ts";
@@ -915,6 +919,40 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
     const logged = ClaudeAdapterV2.loggedClaudeQueryOptions(options);
     assert.deepEqual(logged.settingKeys, ["env", "showThinkingSummaries"]);
     assert.notInclude(JSON.stringify(logged), "secret-settings-key");
+  });
+});
+
+describe("ClaudeAdapterV2 task ledger instructions", () => {
+  const append = (taskLedger?: false) =>
+    (
+      ClaudeAdapterV2.makeClaudeQueryOptions({
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
+        },
+        nativeThreadId: "native-thread-claude-ledger-text",
+        resume: false,
+        cwd: "/workspace",
+        mcpServers: { "t3-code": { type: "http" as const, url: "http://127.0.0.1/mcp" } },
+        deviceToolsAvailable: true,
+        environment: {},
+        ...(taskLedger === undefined ? {} : { taskLedger }),
+      }).systemPrompt as { readonly append?: string }
+    ).append ?? "";
+
+  it("asks for a ledger by default, and leaves the section out for a thread that runs without one", () => {
+    assert.include(append(), "ledger_create");
+    const without = append(false);
+    assert.notInclude(without, "ledger_create");
+    assert.notInclude(without, "### Task ledger");
+    // Everything else the session is told stays.
+    assert.include(without, "## T3 Code orchestration");
+    assert.include(without, "## T3 Code devices");
+    assert.include(without, "Use `delegate_task`");
+    assert.equal(
+      append().replace(T3_CODE_ORCHESTRATION_INSTRUCTIONS, t3OrchestrationInstructions(false)),
+      without,
+    );
   });
 });
 

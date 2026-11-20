@@ -82,6 +82,18 @@ describe("resolveProjectSettings", () => {
     expect(other.sources.askCheck).toBe("environment");
   });
 
+  it("resolves the task ledger per project, on unless a project turns it off", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectSettingsOverrides: { [projectId]: { taskLedger: false } },
+    });
+    const off = resolveProjectSettings(settings, projectId);
+    expect(off.settings.taskLedger).toBe(false);
+    expect(off.sources.taskLedger).toBe("project");
+    const other = resolveProjectSettings(settings, otherProjectId);
+    expect(other.settings.taskLedger).toBe(true);
+    expect(other.sources.taskLedger).toBe("environment");
+  });
+
   it("honours the aggregate's own fields only until the server has folded them", () => {
     const aggregateModel = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.5");
     const project = {

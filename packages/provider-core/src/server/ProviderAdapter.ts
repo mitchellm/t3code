@@ -501,6 +501,12 @@ export interface ProviderAdapterV2TurnInput {
   /** Fork: thread state the harness reads mid-turn (Claude hooks, Codex ledger_state). */
   readonly harness?: ProviderAdapterV2HarnessPort;
   /**
+   * Fork: false when the thread runs without the task ledger (its project turned the `taskLedger`
+   * setting off, it runs under no loadout or Solo, and it has no ledger), so the adapter leaves the
+   * ledger out of the instructions it sends. Absent on every other thread, which is the default.
+   */
+  readonly taskLedger?: false;
+  /**
    * Fork: set for the ledger judge and for delegated children, which each open a whole extra
    * provider session. Absent on a top-level thread, which keeps every server its provider
    * configures. Only the Claude adapter acts on it; see ClaudeScopedMcp.ts.
@@ -535,6 +541,12 @@ export interface ProviderAdapterV2HarnessPort {
 export interface ProviderAdapterV2HarnessThreadPolicy {
   readonly structure: LoadoutStructure;
   readonly planBeforeEditing: boolean;
+  /**
+   * False when the thread runs without the task ledger (see `taskLedger` on the turn input) as of
+   * this read, so the plan-before-editing gate stands down while the thread has no ledger. Absent
+   * otherwise.
+   */
+  readonly taskLedger?: false;
   /** How much the thread may do without asking; read with the policy so one read answers a hook. */
   readonly runtimeMode: RuntimeMode;
 }

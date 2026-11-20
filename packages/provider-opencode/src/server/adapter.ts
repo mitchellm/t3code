@@ -266,6 +266,8 @@ interface ActiveOpenCodeTurn {
   readonly appThread: OrchestrationV2AppThread;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+  /** Fork: false when the thread runs without the task ledger; a native child follows its parent. */
+  readonly taskLedger?: false;
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly providerThreadId: OrchestrationV2ProviderTurn["providerThreadId"];
   readonly runOrdinal: number;
@@ -963,10 +965,14 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
 
         const mcpSession = yield* mcpSessions.read(input.threadId);
         const hasT3Mcp = mcpSession !== undefined && !connection.external;
-        const orchestrationSystemPrompt = t3OrchestrationSystemPrompt(
-          hasT3Mcp,
-          mcpSession?.capabilities?.has("device") === true,
-        );
+        // Fork: per turn, because a thread whose project turned the task ledger off is not told to
+        // write one, and the setting can change between turns.
+        const orchestrationSystemPrompt = (taskLedger: boolean) =>
+          t3OrchestrationSystemPrompt(
+            hasT3Mcp,
+            mcpSession?.capabilities?.has("device") === true,
+            taskLedger,
+          );
         if (hasT3Mcp) {
           yield* OpenCodeRuntime.runOpenCodeSdk("mcp.add", () =>
             client.mcp.add({
@@ -2244,6 +2250,9 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             appThread: state.appThread,
             modelSelection: state.appThread.modelSelection,
             runtimePolicy: state.parentSubagent.parentTurn.runtimePolicy,
+            ...(state.parentSubagent.parentTurn.taskLedger === false
+              ? { taskLedger: false as const }
+              : {}),
             providerTurnId,
             providerThreadId: providerTurn.providerThreadId,
             runOrdinal: state.parentSubagent.parentTurn.runOrdinal,
@@ -2965,7 +2974,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             ...(agent === undefined ? {} : { agent }),
             ...(variant === undefined ? {} : { variant }),
             system: [
-              orchestrationSystemPrompt,
+              orchestrationSystemPrompt(turn.taskLedger !== false),
               buildRuntimeInstructions({ harness: "OpenCode", model: turn.modelSelection.model }),
             ]
               .filter(Boolean)
@@ -3228,6 +3237,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 appThread: turnInput.appThread,
                 modelSelection: turnInput.modelSelection,
                 runtimePolicy: turnInput.runtimePolicy,
+                ...(turnInput.taskLedger === false ? { taskLedger: false as const } : {}),
                 providerTurnId,
                 providerThreadId: turnInput.providerThread.id,
                 runOrdinal: turnInput.runOrdinal,

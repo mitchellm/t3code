@@ -44,7 +44,7 @@ import * as PreviewAgentActivity from "../preview/PreviewAgentActivity.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
-import { type HarnessThreadReads, makeHarnessPort } from "./HarnessState.ts";
+import { type HarnessThreadReads, makeHarnessPort, readTaskLedgerOff } from "./HarnessState.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
@@ -1727,6 +1727,20 @@ export const layer: Layer.Layer<
         // pins until its compact hook runs or the session restarts, because
         // the system prompt is fixed at open.
         const pinnedRules = (yield* readPinnedRules) ?? "";
+        // Fork: a thread whose project turned the task ledger off is sent no ledger instructions.
+        // Read once per turn; the Claude hooks and the ledger tools read it again when they act.
+        const taskLedgerOff =
+          input.harnessReads === undefined
+            ? false
+            : yield* readTaskLedgerOff(
+                input.harnessReads,
+                serverSettings.getSettings.pipe(
+                  Effect.map(
+                    (settings) =>
+                      resolveProjectSettings(settings, input.appThread.projectId).settings,
+                  ),
+                ),
+              );
         // A judge or delegated child opens a whole extra provider session. A failed judge check
         // leaves the child an ordinary delegated one, which is still scoped.
         const mcpScope: ProviderAdapter.ProviderAdapterV2McpScope | undefined =
@@ -1769,6 +1783,7 @@ export const layer: Layer.Layer<
           ...(pinnedRules === "" ? {} : { pinnedRules }),
           readPinnedRules,
           ...(mcpScope === undefined ? {} : { mcpScope }),
+          ...(taskLedgerOff ? { taskLedger: false as const } : {}),
           ...(input.harnessReads === undefined
             ? {}
             : {

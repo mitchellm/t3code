@@ -10,6 +10,7 @@ import {
   withAssistantCitationComment,
 } from "@t3tools/shared/assistantCitations";
 import { isCurrencyAmountQuery, isPathWord } from "@t3tools/shared/composerTrigger";
+import { LEDGER_REQUEST_PREAMBLE } from "@t3tools/shared/taskLedger";
 import {
   splitPromptIntoComposerSegments,
   type ComposerPromptSegment,
@@ -318,12 +319,6 @@ export function composerStateAtPromptEnd(
   };
 }
 
-const LEDGER_PREAMBLE =
-  "Before you start, create a task ledger with the ledger_create tool: one top-level ask for each " +
-  "thing the task below asks for, quoting my words, with acceptance criteria that say what done " +
-  "means, and your plan steps under them. Then work the ledger, updating each item with evidence " +
-  "as you finish it.";
-
 /**
  * `/ledger <task>` is sent as an ordinary message: the agent is told to build the ledger itself,
  * so no server change is involved. Returns null when the text is not that command or has no task.
@@ -331,7 +326,7 @@ const LEDGER_PREAMBLE =
 export function expandLedgerSlashCommand(text: string): string | null {
   const match = /^\/ledger\s+([\s\S]*\S)\s*$/i.exec(text.trim());
   const task = match?.[1];
-  return task === undefined ? null : `${LEDGER_PREAMBLE}\n\nTask: ${task}`;
+  return task === undefined ? null : `${LEDGER_REQUEST_PREAMBLE}\n\nTask: ${task}`;
 }
 
 /** A `/ledger` with no task has nothing to itemize, so it is held in the composer, not sent. */
