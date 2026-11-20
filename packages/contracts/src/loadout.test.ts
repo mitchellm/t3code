@@ -12,6 +12,14 @@ const decodeSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const decodeProjectOverrides = Schema.decodeUnknownSync(ProjectSettingsOverrides);
 const decodeLedgerJson = Schema.decodeUnknownSync(LedgerJson);
 
+const presetDescriptions = {
+  solo: "One agent on the thread's own model. No delegated roles. On single fixes of up to 40 minutes this did as well as a planner with workers and a judge, at half the cost.",
+  blitz:
+    "Opus plans, Sonnet implements and judges, Haiku reads. Balanced cost for big tasks. Not for a single fix: measured on 5 to 40 minute fixes, a strong planner and judge with Sonnet workers did no better than the strong model alone.",
+  "checked-solo":
+    "One agent builds on the thread's model; Opus checks the finished work against your message. Measured with a Sonnet builder on hard fixes: 20 of 25 right first time against 7 of 25 unchecked, at about 3 times the cost. On small tasks it only adds cost.",
+};
+
 describe("loadout settings", () => {
   it("defaults to the built-in loadouts, solo first", () => {
     const settings = decodeServerSettings({});
@@ -51,11 +59,16 @@ describe("loadout settings", () => {
     expect(checked).toEqual({
       id: "checked-solo",
       name: "Checked solo",
-      description:
-        "One agent builds on the thread's model; Opus checks the finished work against your message.",
+      description: presetDescriptions["checked-solo"],
       structure: "solo",
       roles: { judge: { instanceId: "claudeAgent", model: "claude-opus-5-5", effort: "high" } },
     });
+  });
+
+  it("says what was measured in the descriptions of Solo, Blitz and Checked solo", () => {
+    for (const [id, description] of Object.entries(presetDescriptions)) {
+      expect(DEFAULT_LOADOUTS.find((loadout) => loadout.id === id)?.description).toBe(description);
+    }
   });
 
   it("judges Cross-check on Codex with an Opus fallback that survives a round trip", () => {
@@ -146,6 +159,83 @@ describe("loadout settings", () => {
     expect(decodeServerSettings({ loadouts: [retargeted, renamed] }).loadouts).toEqual([
       retargeted,
       renamed,
+    ]);
+  });
+
+  // The wording these three presets shipped with before their descriptions said what was measured,
+  // as a settings file that saved its list holds them.
+  const claudeRole = (model: string, effort?: string) => ({
+    instanceId: "claudeAgent",
+    model,
+    ...(effort === undefined ? {} : { effort }),
+  });
+  const earlierSolo = {
+    id: "solo",
+    name: "Solo",
+    description: "One agent on the thread's own model. No delegated roles.",
+    roles: {},
+  };
+  const earlierBlitz = {
+    id: "blitz",
+    name: "Blitz",
+    description:
+      "Opus plans, Sonnet implements and judges, Haiku reads. Balanced cost for big tasks.",
+    roles: {
+      planner: claudeRole("claude-opus-5-5", "high"),
+      explorer: claudeRole("claude-haiku-5-5"),
+      worker: claudeRole("claude-sonnet-5-5"),
+      judge: claudeRole("claude-sonnet-5-5"),
+    },
+  };
+  const earlierCheckedSolo = {
+    id: "checked-solo",
+    name: "Checked solo",
+    description:
+      "One agent builds on the thread's model; Opus checks the finished work against your message.",
+    structure: "solo",
+    roles: { judge: claudeRole("claude-opus-5-5", "high") },
+  };
+
+  it("upgrades untouched earlier copies of Solo, Blitz and Checked solo to the shipped presets, in place", () => {
+    const stored = JSON.parse(
+      JSON.stringify([earlierSolo, DEFAULT_LOADOUTS[1], earlierBlitz, earlierCheckedSolo]),
+    ) as unknown;
+    for (const loadouts of [
+      decodeServerSettings({ loadouts: stored }).loadouts,
+      decodeProjectOverrides({ loadouts: stored }).loadouts ?? [],
+    ]) {
+      expect(loadouts.map(({ id }) => id)).toEqual([
+        "solo",
+        "opus-blowout",
+        "blitz",
+        "checked-solo",
+      ]);
+      expect(loadouts.map(({ description }) => description)).toEqual([
+        presetDescriptions.solo,
+        DEFAULT_LOADOUTS[1]?.description,
+        presetDescriptions.blitz,
+        presetDescriptions["checked-solo"],
+      ]);
+      expect(loadouts).toEqual([
+        DEFAULT_LOADOUTS[0],
+        DEFAULT_LOADOUTS[1],
+        DEFAULT_LOADOUTS.find(({ id }) => id === "blitz"),
+        DEFAULT_LOADOUTS.find(({ id }) => id === "checked-solo"),
+      ]);
+    }
+  });
+
+  it("keeps a copy of an earlier preset that the user edited", () => {
+    const reworded = { ...earlierBlitz, description: `${earlierBlitz.description} My notes.` };
+    const retargeted = {
+      ...earlierCheckedSolo,
+      roles: { judge: claudeRole("claude-sonnet-5-5", "high") },
+    };
+    const renamed = { ...earlierSolo, name: "Plain" };
+    expect(decodeServerSettings({ loadouts: [renamed, reworded, retargeted] }).loadouts).toEqual([
+      renamed,
+      reworded,
+      retargeted,
     ]);
   });
 });

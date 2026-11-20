@@ -6,24 +6,17 @@ import {
   type LoadoutStructure,
   type OrchestratorMcpTarget,
   type ProviderOptionSelection,
+  SOLO_LOADOUT,
   SOLO_LOADOUT_ID,
   type ThreadLoadout,
 } from "@t3tools/contracts";
-
-/** What a thread runs under when its loadout is unset or no longer in the saved list. */
-const SOLO: Loadout = {
-  id: SOLO_LOADOUT_ID,
-  name: "Solo",
-  description: "One agent on the thread's own model. No delegated roles.",
-  roles: {},
-};
 
 /**
  * The list a person can pick from. Solo is the way back to "no delegated roles", so it stays
  * available even if the saved list dropped it.
  */
 export function withSolo(loadouts: ReadonlyArray<Loadout>): ReadonlyArray<Loadout> {
-  return loadouts.some(({ id }) => id === SOLO_LOADOUT_ID) ? loadouts : [SOLO, ...loadouts];
+  return loadouts.some(({ id }) => id === SOLO_LOADOUT_ID) ? loadouts : [SOLO_LOADOUT, ...loadouts];
 }
 
 /**
@@ -35,7 +28,7 @@ export function resolveLoadout(
   loadoutId: string | null | undefined,
 ): Loadout {
   const wanted = loadoutId ?? SOLO_LOADOUT_ID;
-  return loadouts.find(({ id }) => id === wanted) ?? SOLO;
+  return loadouts.find(({ id }) => id === wanted) ?? SOLO_LOADOUT;
 }
 
 export const loadoutHasJudge = (loadout: Loadout): boolean => loadout.roles.judge !== undefined;

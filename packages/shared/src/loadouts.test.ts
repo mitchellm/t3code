@@ -69,7 +69,7 @@ describe("resolveLoadout", () => {
       description: "",
       roles: { worker: sonnet },
     };
-    expect(resolveLoadout([custom], "gone")).toMatchObject({ id: "solo", roles: {} });
+    expect(resolveLoadout([custom], "gone")).toEqual(DEFAULT_LOADOUTS[0]);
     expect(resolveLoadout([custom], "mine")).toBe(custom);
   });
 
@@ -103,7 +103,7 @@ describe("withSolo", () => {
       description: "",
       roles: { worker: sonnet },
     };
-    expect(withSolo([custom]).map(({ id }) => id)).toEqual(["solo", "mine"]);
+    expect(withSolo([custom])).toEqual([DEFAULT_LOADOUTS[0], custom]);
     expect(withSolo(DEFAULT_LOADOUTS)).toBe(DEFAULT_LOADOUTS);
   });
 });

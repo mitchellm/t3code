@@ -81,15 +81,20 @@ export const SOLO_LOADOUT_ID: LoadoutId = "solo";
 
 /**
  * Solo is the default for every thread: a solo strong model matched a full org on a four-module
- * task at a quarter of the cost, so escalating to roles has to be a deliberate choice.
+ * task at a quarter of the cost, so escalating to roles has to be a deliberate choice. It is also
+ * what a thread runs under when the saved list no longer holds it, so it is not stored only in the
+ * list below.
  */
+export const SOLO_LOADOUT: Loadout = {
+  id: SOLO_LOADOUT_ID,
+  name: "Solo",
+  description:
+    "One agent on the thread's own model. No delegated roles. On single fixes of up to 40 minutes this did as well as a planner with workers and a judge, at half the cost.",
+  roles: {},
+};
+
 export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
-  {
-    id: SOLO_LOADOUT_ID,
-    name: "Solo",
-    description: "One agent on the thread's own model. No delegated roles.",
-    roles: {},
-  },
+  SOLO_LOADOUT,
   // Fork presets. Ids are the claudeAgent slugs in the model manifest; on an install without that
   // instance every role degrades to the thread's own model (see loadoutRoleTarget).
   {
@@ -108,7 +113,7 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
     id: "blitz",
     name: "Blitz",
     description:
-      "Opus plans, Sonnet implements and judges, Haiku reads. Balanced cost for big tasks.",
+      "Opus plans, Sonnet implements and judges, Haiku reads. Balanced cost for big tasks. Not for a single fix: measured on 5 to 40 minute fixes, a strong planner and judge with Sonnet workers did no better than the strong model alone.",
     roles: {
       planner: claude("claude-opus-5-5", "high"),
       explorer: claude("claude-haiku-5-5"),
@@ -160,7 +165,7 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
     id: "checked-solo",
     name: "Checked solo",
     description:
-      "One agent builds on the thread's model; Opus checks the finished work against your message.",
+      "One agent builds on the thread's model; Opus checks the finished work against your message. Measured with a Sonnet builder on hard fixes: 20 of 25 right first time against 7 of 25 unchecked, at about 3 times the cost. On small tasks it only adds cost.",
     structure: "solo",
     roles: { judge: claude("claude-opus-5-5", "high") },
   },
@@ -187,19 +192,59 @@ const RETIRED_LOADOUTS: ReadonlyArray<Loadout> = [
   },
 ];
 
+/**
+ * Presets that still ship under an earlier description, exactly as shipped. A saved copy of one is
+ * swapped for the current preset as it is read; the description is the only thing that changed.
+ */
+const EARLIER_PRESETS: ReadonlyArray<Loadout> = [
+  {
+    id: SOLO_LOADOUT_ID,
+    name: "Solo",
+    description: "One agent on the thread's own model. No delegated roles.",
+    roles: {},
+  },
+  {
+    id: "blitz",
+    name: "Blitz",
+    description:
+      "Opus plans, Sonnet implements and judges, Haiku reads. Balanced cost for big tasks.",
+    roles: {
+      planner: claude("claude-opus-5-5", "high"),
+      explorer: claude("claude-haiku-5-5"),
+      worker: claude("claude-sonnet-5-5"),
+      judge: claude("claude-sonnet-5-5"),
+    },
+  },
+  {
+    id: "checked-solo",
+    name: "Checked solo",
+    description:
+      "One agent builds on the thread's model; Opus checks the finished work against your message.",
+    structure: "solo",
+    roles: { judge: claude("claude-opus-5-5", "high") },
+  },
+];
+
 const sameLoadout = Schema.toEquivalence(Loadout);
 
 /**
  * Fork: a stored loadout list. Saving replaces the list whole, so anyone who saved once froze a
  * copy of every preset of that day. An untouched copy of a since-retired preset is dropped as it
- * is read; any edit makes it the user's own, and it stays.
+ * is read, and an untouched copy of an earlier description of a preset that still ships becomes
+ * the current preset in place; any edit makes a copy the user's own, and it stays.
  */
 export const SavedLoadouts = Schema.Array(Loadout).pipe(
   Schema.decodeTo(
     Schema.Array(Schema.toType(Loadout)),
     SchemaTransformation.transform<ReadonlyArray<Loadout>, ReadonlyArray<Loadout>>({
       decode: (loadouts) =>
-        loadouts.filter((loadout) => !RETIRED_LOADOUTS.some((old) => sameLoadout(old, loadout))),
+        loadouts.flatMap((loadout) => {
+          if (RETIRED_LOADOUTS.some((old) => sameLoadout(old, loadout))) return [];
+          const upgraded = EARLIER_PRESETS.some((old) => sameLoadout(old, loadout))
+            ? DEFAULT_LOADOUTS.find(({ id }) => id === loadout.id)
+            : undefined;
+          return [upgraded ?? loadout];
+        }),
       encode: (loadouts) => loadouts,
     }),
   ),
