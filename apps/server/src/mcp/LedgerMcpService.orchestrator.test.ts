@@ -122,8 +122,10 @@ it.effect("creates and reads a ledger through the real orchestrator and projecti
       ],
     };
     const created = yield* service.create(scope, create);
-    const read = yield* service.read(scope);
-    assert.deepEqual(read.ledger, created.ledger);
+    const read = yield* service.read(scope, {});
+    // A write lists only the items it changed, here all of them, so the items match a read's.
+    assert.equal(created.ledger?.changedOnly, true);
+    assert.deepEqual(read.ledger?.items, created.ledger?.items);
     assert.equal(read.ledger?.unfinished, 2);
 
     const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -237,7 +239,7 @@ it.effect(
         },
       });
       taskRecords.set(taskId, "running");
-      const running = yield* service.read(tasksScope);
+      const running = yield* service.read(tasksScope, {});
       assert.deepEqual(running.ledger?.items[0]?.tasks, [
         {
           taskId,
@@ -253,11 +255,11 @@ it.effect(
       // Status is read from the task each time, never stored on the ledger.
       taskRecords.set(taskId, "completed");
       assert.equal(
-        (yield* service.read(tasksScope)).ledger?.items[0]?.tasks?.[0]?.status,
+        (yield* service.read(tasksScope, {})).ledger?.items[0]?.tasks?.[0]?.status,
         "completed",
       );
       taskRecords.delete(taskId);
-      assert.isNull((yield* service.read(tasksScope)).ledger?.items[0]?.tasks?.[0]?.status);
+      assert.isNull((yield* service.read(tasksScope, {})).ledger?.items[0]?.tasks?.[0]?.status);
     }).pipe(
       Effect.provide(
         LedgerMcpService.layer.pipe(
@@ -330,7 +332,7 @@ const stampedLedger = (input: {
         budget: { minutes: 30 },
         parallelApproaches: 2,
       });
-      shown = (yield* service.read(stampScope)).ledger?.askCheck;
+      shown = (yield* service.read(stampScope, {})).ledger?.askCheck;
     } else {
       const created = yield* service.create(stampScope, {
         title: "Ship the parser",

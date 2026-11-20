@@ -1,6 +1,7 @@
 import {
   LedgerMcpAddItemsInput,
   LedgerMcpCreateInput,
+  LedgerMcpReadInput,
   LedgerMcpReadResult,
   LedgerMcpRetryInput,
   LedgerMcpSetCheckpointInput,
@@ -29,14 +30,17 @@ const retryNote =
   "An identical retry after a lost response is recognised from the arguments and does not repeat the change. Pass clientRequestId only to tell two identical calls apart.";
 
 const changedItemsNote =
-  "The result lists only the items this call changed (status, evidence, judging, verdict, waitingOn) plus the whole ledger's counts, unfinished, closed and requiresJudge; ledger_read shows every item.";
+  "The result lists only the items this call changed (status, judging, verdict, waitingOn; long text cut to a head, ending [+N chars cut; ...]) plus the whole ledger's counts, unfinished, closed and requiresJudge; ledger_read shows the rest.";
+
+const countsOnlyNote =
+  "The result lists no items, only the whole ledger's counts, unfinished, closed and requiresJudge; ledger_read shows the items.";
 
 const selfClosesNote =
   "When the last item is closed, dropped or deferred the ledger closes itself (an item still judging counts as unfinished until its verdict lands), so there is no need to call ledger_close; ledger_reopen reopens it, and ledger_create starts a new one.";
 
 const LedgerCreateTool = Tool.make("ledger_create", {
   ...ledgerTool,
-  description: `Create this thread's task ledger: an itemized checklist that is forced to completion. If it is not in the ledger it does not get done. Write one before changing files; a question needs none. Its top-level items are the user's asks: one per thing they asked for, each with quote (their words copied exactly from their message, checked against the thread) and an acceptance line saying what they will see when it is done. Your own plan steps go under an ask with parentItemId; keep them small and verifiable, each with an acceptance line saying how it is checked. Leave quote out only when no person asked for the work. Item ids and checkpoint ids are short keys you choose ("L1", "C1"), unique within the ledger. Give an item blockedBy when it cannot start until others are closed or dropped, and parentItemId to make it a sub-item. Record out-of-scope work with a deferReason instead of doing it. The thread is auto-continued while any item is open or in_progress, so only list work you intend to finish. A thread has one open ledger: while it is open, add to it with ledger_add_items. ${retryNote}`,
+  description: `Create this thread's task ledger: an itemized checklist that is forced to completion. If it is not in the ledger it does not get done. Write one before changing files; a question needs none. Its top-level items are the user's asks: one per thing they asked for, each with quote (their words copied exactly from their message, checked against the thread) and an acceptance line saying what they will see when it is done. Your own plan steps go under an ask with parentItemId; keep them small and verifiable, each with an acceptance line saying how it is checked. Leave quote out only when no person asked for the work. Item ids and checkpoint ids are short keys you choose ("L1", "C1"), unique within the ledger. Give an item blockedBy when it cannot start until others are closed or dropped, and parentItemId to make it a sub-item. Record out-of-scope work with a deferReason instead of doing it. The thread is auto-continued while any item is open or in_progress, so only list work you intend to finish. A thread has one open ledger: while it is open, add to it with ledger_add_items. ${changedItemsNote} ${retryNote}`,
   parameters: LedgerMcpCreateInput,
 }).annotate(Tool.Destructive, false);
 
@@ -54,26 +58,27 @@ const LedgerUpdateItemTool = Tool.make("ledger_update_item", {
 
 const LedgerSetCheckpointTool = Tool.make("ledger_set_checkpoint", {
   ...ledgerTool,
-  description: `Mark a ledger checkpoint reached (true) or not reached (false). Set it only once the milestone is actually true. ${retryNote}`,
+  description: `Mark a ledger checkpoint reached (true) or not reached (false). Set it only once the milestone is actually true. ${countsOnlyNote} ${retryNote}`,
   parameters: LedgerMcpSetCheckpointInput,
 }).annotate(Tool.Destructive, false);
 
 const LedgerCloseTool = Tool.make("ledger_close", {
   ...ledgerTool,
-  description: `Close this thread's ledger once every item is closed, dropped or deferred; it is rejected while any item is open or in_progress. Deferred items stay on record for later. A closed ledger stops auto-continuing the thread. The ledger also closes itself when its last item is closed, dropped or deferred, so this is only needed for a ledger that is not finished that way. ${retryNote}`,
+  description: `Close this thread's ledger once every item is closed, dropped or deferred; it is rejected while any item is open or in_progress. Deferred items stay on record for later. A closed ledger stops auto-continuing the thread. The ledger also closes itself when its last item is closed, dropped or deferred, so this is only needed for a ledger that is not finished that way. ${countsOnlyNote} ${retryNote}`,
   parameters: LedgerMcpRetryInput,
 }).annotate(Tool.Destructive, false);
 
 const LedgerReopenTool = Tool.make("ledger_reopen", {
   ...ledgerTool,
-  description: `Reopen this thread's closed ledger, including one that closed itself, so it can be edited again. ${retryNote}`,
+  description: `Reopen this thread's closed ledger, including one that closed itself, so it can be edited again. ${countsOnlyNote} ${retryNote}`,
   parameters: LedgerMcpRetryInput,
 }).annotate(Tool.Destructive, false);
 
 const LedgerReadTool = Tool.make("ledger_read", {
   ...ledgerTool,
   description:
-    "Read this thread's ledger compactly: status counts, the unfinished (open plus in_progress) count, checkpoints, and every item in tree order (sub-items follow their parent with a greater depth) with its status, blockers (waitingOn lists the unfinished ones), evidence, judging state and verdict notes. Returns ledger null when the thread has none.",
+    "Read this thread's ledger compactly: status counts, the unfinished (open plus in_progress) count, checkpoints, and every unfinished item in tree order (sub-items follow their parent with a greater depth) with its status, blockers (waitingOn lists the unfinished ones), acceptance, judging state, and evidence and verdict notes cut to a head. Closed, dropped and deferred items are one line each in briefs, the oldest collapsed into omitted on a big ledger. A cut ends [+N chars cut; ...]: pass itemId to read that one item complete. Returns ledger null when the thread has none.",
+  parameters: LedgerMcpReadInput,
   success: LedgerMcpReadResult,
 })
   .annotate(Tool.Readonly, true)

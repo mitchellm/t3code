@@ -146,7 +146,7 @@ import {
 } from "./LedgerJudgement.ts";
 import { workspaceCheckpoints } from "./LedgerJudgeCriteria.ts";
 import { linkDelegatedTask, resolveLedgerLink } from "./LedgerTaskLink.ts";
-import { snapshotLedger } from "./ledgerSnapshot.ts";
+import { judgementNotes, snapshotLedger } from "./ledgerSnapshot.ts";
 import {
   delegationRefusalFor,
   withInvestigationDelegationLease,
@@ -3784,7 +3784,15 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError(threadManagementFailure));
         return {
           ...judged,
-          ledger: after.ledger === undefined ? null : snapshotLedger(after.ledger, after.subagents),
+          // The verdict is on the item, whole; the result carries a head of it, like any write's.
+          notes: judgementNotes(judged.notes, input.itemId),
+          ledger:
+            after.ledger === undefined
+              ? null
+              : snapshotLedger(after.ledger, after.subagents, {
+                  kind: "changed",
+                  itemIds: [input.itemId],
+                }),
         };
       },
     ),
