@@ -142,6 +142,31 @@ export const LedgerItem = Schema.Struct({
 });
 export type LedgerItem = typeof LedgerItem.Type;
 
+/** Fork: which model's thread the stronger checker took over, and when (`Ledger.askCheckHandedOver`). */
+export const LedgerAskCheckHandedOver = Schema.Struct({
+  from: Schema.String,
+  to: Schema.String,
+  at: Schema.DateTimeUtc,
+});
+export type LedgerAskCheckHandedOver = typeof LedgerAskCheckHandedOver.Type;
+
+/** Fork: when the third failed check stopped the ledger, and how many had failed by then. */
+export const LedgerAskCheckStopped = Schema.Struct({
+  at: Schema.DateTimeUtc,
+  fails: NonNegativeInt,
+});
+export type LedgerAskCheckStopped = typeof LedgerAskCheckStopped.Type;
+
+const LedgerAskCheckHandedOverJson = LedgerAskCheckHandedOver.mapFields((fields) => ({
+  ...fields,
+  at: Schema.DateTimeUtcFromString,
+}));
+
+const LedgerAskCheckStoppedJson = LedgerAskCheckStopped.mapFields((fields) => ({
+  ...fields,
+  at: Schema.DateTimeUtcFromString,
+}));
+
 export const LedgerCheckpoint = Schema.Struct({
   id: LedgerCheckpointId,
   title: TrimmedNonEmptyString,
@@ -170,6 +195,24 @@ export const Ledger = Schema.Struct({
    * has at most one of this and `requiresJudge`. Absent on older records, which means false.
    */
   askCheck: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Fork: "v2" on an ask check ledger created under the `askCheckPolicy` setting's v2: two tries,
+   * then a hand-over to the stronger checker, then a stop. Fixed when the ledger is created, so a
+   * setting change never changes a running ledger. Absent means v1, which keeps handing work back.
+   */
+  askCheckPolicy: Schema.optionalKey(Schema.Literal("v2")),
+  /**
+   * Failed ask check verdicts recorded on this ledger since it was created. A reopen does not
+   * reset it. Counted only under v2.
+   */
+  askCheckFails: Schema.optionalKey(NonNegativeInt),
+  /** v2: the thread was handed to the stronger checker's model after the second failed check. */
+  askCheckHandedOver: Schema.optionalKey(LedgerAskCheckHandedOver),
+  /**
+   * v2: the third failed check stopped the ledger. The held item stays in progress, is never
+   * checked again and cannot be closed by the agent until the user writes.
+   */
+  askCheckStopped: Schema.optionalKey(LedgerAskCheckStopped),
   /** Fork: present when the ledger runs an investigation (Investigate mode). */
   investigation: Schema.optionalKey(LedgerInvestigation),
   createdAt: Schema.DateTimeUtc,
@@ -213,6 +256,8 @@ export const LedgerJson = Ledger.mapFields((fields) => ({
   ...fields,
   checkpoints: Schema.Array(LedgerCheckpointJson),
   items: Schema.Array(LedgerItemJson),
+  askCheckHandedOver: Schema.optionalKey(LedgerAskCheckHandedOverJson),
+  askCheckStopped: Schema.optionalKey(LedgerAskCheckStoppedJson),
   investigation: Schema.optionalKey(LedgerInvestigationJson),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
@@ -330,6 +375,11 @@ export const LedgerVerdictRecordCommand = Schema.Struct({
   ledgerId: LedgerId,
   itemId: LedgerItemId,
   verdict: LedgerItemVerdict,
+  /**
+   * v2 ask check: the thread was just switched from `from` to `to`, the stronger checker's model.
+   * The planner records it only when this verdict is the ledger's second failed check.
+   */
+  handOver: Schema.optionalKey(Schema.Struct({ from: Schema.String, to: Schema.String })),
   /** The evidence the judge was shown; a verdict for evidence that has since changed is stale. */
   judgedEvidence: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /**
@@ -376,6 +426,39 @@ export const LedgerItemTaskLinkCommand = Schema.Struct({
   itemId: LedgerItemId,
   task: LedgerItemTaskDraft,
 });
+
+/**
+ * Server-only: the user wrote, so a v2 ledger that a third failed check stopped may go on. Sent
+ * when a person's message arrives; nothing else about the ledger's ask check record changes.
+ */
+export const LedgerAskCheckResumeCommand = Schema.Struct({
+  type: Schema.Literal("ledger.ask-check.resume"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  ledgerId: LedgerId,
+});
+
+/**
+ * Payload of `ledger.ask-check.updated`: the whole v2 ask check record after a change, so a reader
+ * replaces its own. An absent `handedOver` or `stopped` means there is none.
+ */
+export const LedgerAskCheckUpdatedPayload = Schema.Struct({
+  ledgerId: LedgerId,
+  fails: NonNegativeInt,
+  handedOver: Schema.optionalKey(LedgerAskCheckHandedOver),
+  stopped: Schema.optionalKey(LedgerAskCheckStopped),
+  updatedAt: Schema.DateTimeUtc,
+});
+export type LedgerAskCheckUpdatedPayload = typeof LedgerAskCheckUpdatedPayload.Type;
+
+export const LedgerAskCheckUpdatedPayloadJson = LedgerAskCheckUpdatedPayload.mapFields(
+  (fields) => ({
+    ...fields,
+    handedOver: Schema.optionalKey(LedgerAskCheckHandedOverJson),
+    stopped: Schema.optionalKey(LedgerAskCheckStoppedJson),
+    updatedAt: Schema.DateTimeUtcFromString,
+  }),
+);
 
 /** Payload of `ledger.item.added`: only the newly added items, which readers upsert. */
 export const LedgerItemsAddedPayload = Schema.Struct({

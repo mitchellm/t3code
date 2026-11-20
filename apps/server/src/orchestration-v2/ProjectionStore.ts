@@ -1028,6 +1028,7 @@ export function applyToProjection(
     case "ledger.checkpoint.updated":
     case "ledger.closed":
     case "ledger.investigation.updated":
+    case "ledger.ask-check.updated":
     case "ledger.reopened": {
       // Ledger edits are not thread activity, so the thread and projection timestamps stay put.
       const ledger = applyLedgerEvent(projection.ledger, event);
@@ -2845,6 +2846,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "ledger.checkpoint.updated":
             case "ledger.closed":
             case "ledger.investigation.updated":
+            case "ledger.ask-check.updated":
             case "ledger.reopened": {
               // One row per thread holds the whole ledger, so a later event folds into the stored
               // document with the same reducer the in-memory projection and clients use.

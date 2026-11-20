@@ -180,6 +180,36 @@ describe("applyLedgerEvent", () => {
     expect(reopened?.updatedAt).toEqual(at(5));
   });
 
+  it("replaces the v2 ask check record whole, so a cleared stop stays cleared", () => {
+    const handedOver = { from: "sonnet", to: "opus", at: at(2) };
+    const stopped = applyLedgerEvent(
+      { ...created, askCheck: true, askCheckPolicy: "v2" },
+      {
+        ...base,
+        type: "ledger.ask-check.updated",
+        payload: {
+          ledgerId,
+          fails: 3,
+          handedOver,
+          stopped: { at: at(3), fails: 3 },
+          updatedAt: at(3),
+        },
+      },
+    );
+    expect(stopped?.askCheckFails).toBe(3);
+    expect(stopped?.askCheckHandedOver).toEqual(handedOver);
+    expect(stopped?.askCheckStopped).toEqual({ at: at(3), fails: 3 });
+    expect(stopped?.updatedAt).toEqual(at(3));
+    const resumed = applyLedgerEvent(stopped, {
+      ...base,
+      type: "ledger.ask-check.updated",
+      payload: { ledgerId, fails: 3, handedOver, updatedAt: at(4) },
+    });
+    expect(resumed?.askCheckFails).toBe(3);
+    expect(resumed?.askCheckHandedOver).toEqual(handedOver);
+    expect("askCheckStopped" in (resumed ?? {})).toBe(false);
+  });
+
   it("ignores events before a ledger exists and for a ledger it no longer holds", () => {
     const added: LedgerDomainEvent = {
       ...base,
@@ -242,6 +272,25 @@ describe("decideLedgerAutoContinue", () => {
         messages: [],
       }),
     ).toEqual({ type: "idle" });
+  });
+
+  it("stands down for a ledger a third failed check stopped, until the user writes", () => {
+    const stopped: Ledger = {
+      ...withItems(item("a", { status: "in_progress" })),
+      askCheck: true,
+      askCheckPolicy: "v2",
+      askCheckFails: 3,
+      askCheckStopped: { at: at(1), fails: 3 },
+    };
+    expect(decideLedgerAutoContinue({ ledger: stopped, messages: [userMessage] })).toEqual({
+      type: "idle",
+    });
+    // The same ledger with the stop cleared continues as any other.
+    const { askCheckStopped: _cleared, ...resumed } = stopped;
+    expect(decideLedgerAutoContinue({ ledger: resumed, messages: [userMessage] })).toMatchObject({
+      type: "continue",
+      round: 1,
+    });
   });
 
   it("starts at round one and names only the open items", () => {

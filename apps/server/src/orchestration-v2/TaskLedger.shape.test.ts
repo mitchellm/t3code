@@ -805,4 +805,33 @@ describe("tasks linked to an item", () => {
       { ...task("build"), createdAt: now },
     ]);
   });
+
+  it("stores the v2 ask check record as the projection does, and reads a ledger without one", () => {
+    const base = decodeLedgerJson({
+      id: ledgerId,
+      threadId,
+      title: "Checked",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      closedAt: null,
+    });
+    assert.isUndefined(base.askCheckFails);
+    assert.isUndefined(base.askCheckHandedOver);
+    assert.isUndefined(base.askCheckStopped);
+    const recorded: Ledger = {
+      ...base,
+      askCheck: true,
+      askCheckPolicy: "v2",
+      askCheckFails: 3,
+      askCheckHandedOver: { from: "sonnet", to: "opus", at: earlier },
+      askCheckStopped: { at: now, fails: 3 },
+    };
+    const stored = JSON.parse(JSON.stringify(encodeLedgerJson(recorded)));
+    assert.equal(stored.askCheckStopped.at, "2026-01-01T00:05:00.000Z");
+    assert.deepEqual(decodeLedgerJson(stored), recorded);
+  });
 });

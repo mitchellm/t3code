@@ -157,6 +157,16 @@ export const LedgerMcpSnapshot = Schema.Struct({
         "Present when the last ask to close is first checked against the user's message by a fresh session: closing it shows judging, then it closes on a pass or comes back in_progress with what is still missing. Closing any other item is immediate.",
     }),
   ),
+  askCheckFails: Schema.optionalKey(
+    NonNegativeInt.annotate({
+      description: "Failed checks on this ledger so far. The third one stops the check.",
+    }),
+  ),
+  askCheckStopped: Schema.optionalKey(
+    Schema.Literal(true).annotate({
+      description: "The check stopped: the last ask cannot be closed until the user writes.",
+    }),
+  ),
   counts: Schema.Struct({
     open: NonNegativeInt,
     in_progress: NonNegativeInt,

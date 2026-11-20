@@ -5,6 +5,7 @@ import type {
   OrchestrationV2Subagent,
 } from "@t3tools/contracts";
 import {
+  isAskCheckPolicyV2,
   orderLedgerTree,
   releasedLedgerItemIds,
   unreleasedBlockers,
@@ -154,6 +155,8 @@ export function snapshotLedger(
     closed: ledger.closedAt !== null,
     requiresJudge: ledger.requiresJudge === true,
     ...(ledger.askCheck === true ? { askCheck: true as const } : {}),
+    ...(isAskCheckPolicyV2(ledger) ? { askCheckFails: ledger.askCheckFails ?? 0 } : {}),
+    ...(ledger.askCheckStopped === undefined ? {} : { askCheckStopped: true as const }),
     counts,
     unfinished: counts.open + counts.in_progress,
     checkpoints: ledger.checkpoints.map(({ id, title, reached }) => ({

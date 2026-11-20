@@ -645,6 +645,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "ledger.item.judgement.abandon":
     case "ledger.item.judgement.started":
     case "ledger.item.task.link":
+    case "ledger.ask-check.resume":
     case "ledger.investigation.start":
     case "ledger.investigation.end":
     case "ledger.investigation.spend":
@@ -13590,6 +13591,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             return {
               requiresJudge: hasJudge && !checksAsks,
               askCheck: checksAsks || (!hasJudge && projectSettings.askCheck),
+              // Fixed here too, so changing the setting never changes a ledger already running.
+              ...(projectSettings.askCheckPolicy === "v2" ? { askCheckPolicy: "v2" as const } : {}),
             };
           })
         : undefined;
@@ -13625,6 +13628,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ]);
     // The planner returns no events for a redundant command; that is accepted, not an error.
     return { redundant: planned.success.length === 0 };
+  });
+
+  /**
+   * Fork: a person writing lifts the stop a third failed check put on a v2 ledger, in the same
+   * commit as their message so the turn it starts already sees the ledger free. Messages from
+   * the server, an agent or the CLI never do.
+   */
+  const resumeStoppedAskCheck = Effect.fn("Orchestrator.resumeStoppedAskCheck")(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    if (!isTypedByPerson(command)) return;
+    const { ledger } = yield* projectionStore
+      .getThreadRecords(command.threadId, ["ledger"])
+      .pipe(mapDispatchError(command));
+    if (ledger?.askCheckStopped === undefined) return;
+    yield* dispatchLedgerCommand(
+      {
+        type: "ledger.ask-check.resume",
+        commandId: CommandId.make(`${command.commandId}:ask-check-resume`),
+        threadId: command.threadId,
+        ledgerId: ledger.id,
+      },
+      events,
+      effects,
+    );
   });
 
   const dispatchUnsupported = (command: OrchestrationV2ServerCommand) =>
@@ -13827,6 +13857,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         }
         if (yield* holdForEndedInvestigation(command, events)) break;
+        yield* resumeStoppedAskCheck(command, events, effects);
         const guestSend =
           command.guestMessageId === undefined
             ? undefined
@@ -14054,6 +14085,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "ledger.item.judgement.abandon":
       case "ledger.item.judgement.started":
       case "ledger.item.task.link":
+      case "ledger.ask-check.resume":
       case "ledger.investigation.start":
       case "ledger.investigation.end":
       case "ledger.investigation.spend":

@@ -7,6 +7,7 @@ import {
   LedgerId,
   LedgerItemId,
   type Loadout,
+  MessageId,
   NodeId,
   type OrchestrationV2Subagent,
   OrchestratorMcpFailure,
@@ -15,6 +16,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -285,10 +287,10 @@ const judgedLoadout: Loadout = {
 };
 
 /**
- * What the orchestrator stamps on a ledger made on a fresh thread, under these settings. These
- * tests are about the stamps, so the task ledger is on unless a test turns it off.
+ * The ledger the orchestrator made on a fresh thread under these settings, and what ledger_read
+ * showed. These tests are about the stamps, so the task ledger is on unless a test turns it off.
  */
-const stampedLedger = (input: {
+const stampedFull = (input: {
   readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly loadoutId?: string;
   readonly start?: "create" | "investigation";
@@ -329,6 +331,7 @@ const stampedLedger = (input: {
     }
     const service = yield* LedgerMcpService.LedgerMcpService;
     let shown: boolean | undefined;
+    let shownFails: number | undefined;
     if (input.start === "investigation") {
       yield* orchestrator.dispatch({
         type: "ledger.investigation.start",
@@ -347,9 +350,10 @@ const stampedLedger = (input: {
         items: [{ id: LedgerItemId.make("L1"), title: "Parse", acceptance: "tests pass" }],
       });
       shown = created.ledger?.askCheck;
+      shownFails = created.ledger?.askCheckFails;
     }
     const ledger = (yield* orchestrator.getThreadProjection(stampThreadId)).ledger;
-    return { askCheck: ledger?.askCheck, requiresJudge: ledger?.requiresJudge, shown };
+    return { ledger, shown, shownFails };
   }).pipe(
     Effect.provide(
       LedgerMcpService.layer.pipe(
@@ -361,6 +365,25 @@ const stampedLedger = (input: {
     ),
   );
 };
+
+/** What the orchestrator stamps on a ledger made on a fresh thread, under these settings. */
+const stampedLedger = (input: Parameters<typeof stampedFull>[0]) =>
+  stampedFull(input).pipe(
+    Effect.map(({ ledger, shown }) => ({
+      askCheck: ledger?.askCheck,
+      requiresJudge: ledger?.requiresJudge,
+      shown,
+    })),
+  );
+
+/** The ask check policy the ledger was stamped with, and the failed-check count ledger_read showed. */
+const stampedPolicy = (input: Parameters<typeof stampedFull>[0]) =>
+  stampedFull(input).pipe(
+    Effect.map(({ ledger, shownFails }) => ({
+      policy: ledger?.askCheckPolicy,
+      shownFails,
+    })),
+  );
 
 it.effect(
   "a plain thread's new ledger is stamped for the ask check only once the setting is on",
@@ -511,4 +534,251 @@ it.effect("an investigation is judged by its refuter and gets no ask check", () 
       { askCheck: undefined, requiresJudge: true, shown: undefined },
     );
   }),
+);
+
+it.effect(
+  "the v2 ask check policy is stamped on the ledger at creation, and ledger_read counts",
+  () =>
+    Effect.gen(function* () {
+      // Off by default: the ledger is as it was, and shows no count.
+      assert.deepEqual(yield* stampedPolicy({ settings: { askCheck: true } }), {
+        policy: undefined,
+        shownFails: undefined,
+      });
+      assert.deepEqual(
+        yield* stampedPolicy({ settings: { askCheck: true, askCheckPolicy: "v1" } }),
+        { policy: undefined, shownFails: undefined },
+      );
+      assert.deepEqual(
+        yield* stampedPolicy({ settings: { askCheck: true, askCheckPolicy: "v2" } }),
+        { policy: "v2", shownFails: 0 },
+      );
+      // A project's own choice wins over the server's.
+      assert.deepEqual(
+        yield* stampedPolicy({
+          settings: {
+            askCheck: true,
+            projectSettingsOverrides: { [stampProjectId]: { askCheckPolicy: "v2" } },
+          },
+        }),
+        { policy: "v2", shownFails: 0 },
+      );
+      assert.deepEqual(
+        yield* stampedPolicy({
+          settings: {
+            askCheck: true,
+            askCheckPolicy: "v2",
+            projectSettingsOverrides: { [stampProjectId]: { askCheckPolicy: "v1" } },
+          },
+        }),
+        { policy: undefined, shownFails: undefined },
+      );
+    }),
+);
+
+it.effect(
+  "the policy is stamped only where an ask check is: not off, not judged, not an investigation",
+  () =>
+    Effect.gen(function* () {
+      const none = { policy: undefined, shownFails: undefined };
+      assert.deepEqual(
+        yield* stampedPolicy({ settings: { askCheckPolicy: "v2", askCheck: false } }),
+        none,
+      );
+      assert.deepEqual(
+        yield* stampedPolicy({
+          settings: { askCheckPolicy: "v2", loadouts: [...DEFAULT_LOADOUTS, judgedLoadout] },
+          loadoutId: judgedLoadout.id,
+        }),
+        none,
+      );
+      assert.deepEqual(
+        yield* stampedPolicy({
+          settings: { askCheckPolicy: "v2", loadouts: [...DEFAULT_LOADOUTS, judgedLoadout] },
+          loadoutId: judgedLoadout.id,
+          start: "investigation",
+        }),
+        none,
+      );
+      // A solo-structured loadout with a runnable judge is an ask check ledger whatever the setting.
+      assert.deepEqual(
+        yield* stampedPolicy({
+          settings: {
+            askCheckPolicy: "v2",
+            askCheck: false,
+            loadouts: [...DEFAULT_LOADOUTS, soloJudgedLoadout],
+          },
+          loadoutId: soloJudgedLoadout.id,
+        }),
+        { policy: "v2", shownFails: 0 },
+      );
+    }),
+);
+
+it.effect("a model switch made before a server wake is the model the wake's turn starts on", () =>
+  Effect.gen(function* () {
+    // The v2 hand-over switches the thread with the command t3_thread_configure sends, then queues
+    // the wake without naming a model: the run it starts must carry the new selection.
+    const handOverThreadId = ThreadId.make("thread:ledger-mcp-hand-over");
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:ledger-mcp-hand-over:thread"),
+      threadId: handOverThreadId,
+      projectId: stampProjectId,
+      title: "ledger hand over",
+      modelSelection: { instanceId, model: "gpt-5.1-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.model-selection.set",
+      commandId: CommandId.make("command:ledger-mcp-hand-over:switch"),
+      threadId: handOverThreadId,
+      modelSelection: { instanceId, model: "gpt-5.1-codex-max" },
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("command:ledger-mcp-hand-over:wake"),
+      threadId: handOverThreadId,
+      messageId: MessageId.make("message:ledger-mcp-hand-over:wake"),
+      text: "The check failed twice.",
+      notification: { source: { kind: "system" }, outcome: "failed", summary: "The check failed" },
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "server",
+    });
+    const projection = yield* orchestrator.getThreadProjection(handOverThreadId);
+    assert.equal(projection.thread.modelSelection.model, "gpt-5.1-codex-max");
+    assert.deepEqual(
+      projection.runs.map((run) => run.modelSelection.model),
+      ["gpt-5.1-codex-max"],
+    );
+  }).pipe(
+    Effect.provide(
+      LedgerMcpService.layer.pipe(
+        Layer.provideMerge(layerThreads),
+        Layer.provideMerge(layerOrchestrator),
+        Layer.provideMerge(NodeCrypto.layer),
+        Layer.provideMerge(ServerSettings.layerTest({ taskLedger: true })),
+      ),
+    ),
+  ),
+);
+
+const stopSettings = { taskLedger: true, askCheck: true, askCheckPolicy: "v2" } as const;
+
+it.effect("a person's message lifts a v2 stop, and nothing the server or an agent sends does", () =>
+  Effect.gen(function* () {
+    const stopThreadId = ThreadId.make("thread:ledger-mcp-stop");
+    const stopScope: McpInvocationContext.McpInvocationScope = {
+      ...scope,
+      thread: {
+        threadId: stopThreadId,
+        providerSessionId: "ledger-mcp-session",
+        providerInstanceId: instanceId,
+      },
+    };
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:ledger-mcp-stop:thread"),
+      threadId: stopThreadId,
+      projectId: stampProjectId,
+      title: "ledger stop",
+      modelSelection: { instanceId, model: "gpt-5.1-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const service = yield* LedgerMcpService.LedgerMcpService;
+    const created = yield* service.create(stopScope, {
+      title: "Ship the parser",
+      items: [{ id: LedgerItemId.make("L1"), title: "Parse", acceptance: "tests pass" }],
+    });
+    const ledgerId = LedgerId.make(created.ledger!.ledgerId);
+    yield* service.updateItem(stopScope, {
+      itemId: LedgerItemId.make("L1"),
+      status: "in_progress",
+    });
+    const at = yield* DateTime.now;
+    for (const attempt of [1, 2, 3]) {
+      yield* orchestrator.dispatch({
+        type: "ledger.item.verdict.record",
+        commandId: CommandId.make(`command:ledger-mcp-stop:fail:${attempt}`),
+        threadId: stopThreadId,
+        ledgerId,
+        itemId: LedgerItemId.make("L1"),
+        verdict: {
+          outcome: "fail",
+          judge: { instanceId, model: "gpt-5.1-codex" },
+          notes: `fail ${attempt}`,
+          at,
+        },
+      });
+    }
+    const ledgerNow = () =>
+      Effect.map(orchestrator.getThreadProjection(stopThreadId), ({ ledger }) => ledger);
+    const stopped = yield* ledgerNow();
+    assert.equal(stopped?.askCheckFails, 3);
+    assert.equal(stopped?.askCheckStopped?.fails, 3);
+    const read = (yield* service.read(stopScope, {})).ledger;
+    assert.equal(read?.askCheckFails, 3);
+    assert.isTrue(read?.askCheckStopped);
+    // The agent's close of the held ask is refused, with the text that tells it what to do.
+    const refused = yield* Effect.flip(
+      service.updateItem(stopScope, {
+        itemId: LedgerItemId.make("L1"),
+        status: "closed",
+        evidence: "parser.test.ts: 12 passed",
+      }),
+    );
+    assert.include(
+      JSON.stringify(refused),
+      "The check failed three times and has stopped. Tell the user what is done",
+    );
+
+    const send = (
+      name: string,
+      createdBy: "user" | "agent",
+      creationSource: "web" | "server" | "mcp",
+    ) =>
+      orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`command:ledger-mcp-stop:${name}`),
+        threadId: stopThreadId,
+        messageId: MessageId.make(`message:ledger-mcp-stop:${name}`),
+        text: name,
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy,
+        creationSource,
+      });
+    yield* send("wake", "agent", "server");
+    yield* send("from-an-agent", "user", "mcp");
+    assert.isDefined((yield* ledgerNow())?.askCheckStopped);
+
+    yield* send("person", "user", "web");
+    const resumed = yield* ledgerNow();
+    assert.isUndefined(resumed?.askCheckStopped);
+    // It resets nothing else: the count stays, so one more failed check stops the ledger again.
+    assert.equal(resumed?.askCheckFails, 3);
+  }).pipe(
+    Effect.provide(
+      LedgerMcpService.layer.pipe(
+        Layer.provideMerge(layerThreads),
+        Layer.provideMerge(makeLayerOrchestrator(stopSettings)),
+        Layer.provideMerge(NodeCrypto.layer),
+        Layer.provideMerge(ServerSettings.layerTest(stopSettings)),
+      ),
+    ),
+  ),
 );

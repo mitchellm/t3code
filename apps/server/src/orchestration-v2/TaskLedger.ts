@@ -10,10 +10,20 @@ import type {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { isRefutedApproach } from "@t3tools/shared/investigation";
-import { askCheckedItems, isFinishedOpenLedger, judgedClaim } from "@t3tools/shared/taskLedger";
+import {
+  askCheckedItems,
+  isAskCheckPolicyV2,
+  isFinishedOpenLedger,
+  judgedClaim,
+} from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
+import {
+  ASK_CHECK_HAND_OVER_AFTER_FAILS,
+  ASK_CHECK_STOP_AFTER_FAILS,
+  ASK_CHECK_STOPPED_TEXT,
+} from "./AskCheckPolicy.ts";
 import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import {
   followInvestigation,
@@ -63,6 +73,8 @@ export function ledgerEventFromPlan(
     case "ledger.closed":
       return { ...envelope, type: planned.type, payload: planned.payload };
     case "ledger.reopened":
+      return { ...envelope, type: planned.type, payload: planned.payload };
+    case "ledger.ask-check.updated":
       return { ...envelope, type: planned.type, payload: planned.payload };
     case "ledger.investigation.updated":
       return { ...envelope, type: planned.type, payload: planned.payload };
@@ -277,10 +289,10 @@ const describeItems = (items: ReadonlyArray<LedgerItem>) =>
   items.map((item) => `${item.id} (${item.status})`).join(", ");
 
 /**
- * `requiresJudge` defaults to the ledger's own field so no caller can forget the gate; a close
- * without a passing verdict becomes a judgement in progress. For `ledger.create` it is the value
- * to stamp. A command that changes nothing plans no events, so a retry does not bump `updatedAt`.
- * `askCheck` is only ever a value to stamp at `ledger.create`; later commands read the ledger's.
+ * `requiresJudge` defaults to the ledger's own field so no caller can forget the gate: a close
+ * without a passing verdict becomes a judgement. A command that changes nothing plans no events,
+ * so a retry does not bump `updatedAt`. For `ledger.create`, `requiresJudge`, `askCheck` and
+ * `askCheckPolicy` are the values to stamp; later commands read the ledger's.
  */
 export function planLedgerCommand(input: {
   readonly command: LedgerCommand;
@@ -288,6 +300,7 @@ export function planLedgerCommand(input: {
   readonly now: DateTime.Utc;
   readonly requiresJudge?: boolean;
   readonly askCheck?: boolean;
+  readonly askCheckPolicy?: "v2";
 }): Result.Result<ReadonlyArray<PlannedLedgerEvent>, LedgerRejection> {
   // Fork: Investigate mode rides the ledger; its own commands and the solve it decides.
   const { command } = input;
@@ -302,17 +315,73 @@ export function planLedgerCommand(input: {
   const problem = investigationCommandProblem(command, input.ledger);
   if (problem !== undefined) return Result.fail(problem);
   return Result.map(planCoreLedgerCommand({ ...input, command }), (planned) =>
-    followInvestigation(
+    recordAskCheckFailure(
       input.ledger,
-      closeWhenFinished(
+      command,
+      followInvestigation(
         input.ledger,
-        command,
-        stampRefuterVerdict(command, input.ledger, planned),
+        closeWhenFinished(
+          input.ledger,
+          command,
+          stampRefuterVerdict(command, input.ledger, planned),
+          input.now,
+        ),
         input.now,
       ),
       input.now,
     ),
   );
+}
+
+/**
+ * Fork: the v2 ask check counts the failed checks of the whole ledger, hands the thread over after
+ * the second and stops the ledger at the third. It rides the verdict's own events, so the count
+ * can never disagree with what was recorded: a verdict that changed nothing (a stale answer)
+ * counts for nothing.
+ */
+function recordAskCheckFailure(
+  ledger: Ledger | undefined,
+  command: LedgerCommand,
+  planned: ReadonlyArray<PlannedLedgerEvent>,
+  now: DateTime.Utc,
+): ReadonlyArray<PlannedLedgerEvent> {
+  if (
+    ledger === undefined ||
+    !isAskCheckPolicyV2(ledger) ||
+    command.type !== "ledger.item.verdict.record" ||
+    command.verdict.outcome !== "fail"
+  ) {
+    return planned;
+  }
+  // A recorded verdict is the only thing that raises an item's count of them.
+  const before = ledger.items.find(({ id }) => id === command.itemId);
+  const recorded = planned.some(
+    (event) =>
+      event.type === "ledger.item.updated" &&
+      event.payload.item.id === command.itemId &&
+      (event.payload.item.judgements ?? 0) > (before?.judgements ?? 0),
+  );
+  if (!recorded) return planned;
+  const fails = (ledger.askCheckFails ?? 0) + 1;
+  const handedOver =
+    ledger.askCheckHandedOver ??
+    (fails === ASK_CHECK_HAND_OVER_AFTER_FAILS && command.handOver !== undefined
+      ? { ...command.handOver, at: now }
+      : undefined);
+  const stopped = fails >= ASK_CHECK_STOP_AFTER_FAILS ? { at: now, fails } : ledger.askCheckStopped;
+  return [
+    ...planned,
+    {
+      type: "ledger.ask-check.updated",
+      payload: {
+        ledgerId: ledger.id,
+        fails,
+        ...(handedOver === undefined ? {} : { handedOver }),
+        ...(stopped === undefined ? {} : { stopped }),
+        updatedAt: now,
+      },
+    },
+  ];
 }
 
 /**
@@ -354,6 +423,7 @@ function planCoreLedgerCommand(input: {
   readonly now: DateTime.Utc;
   readonly requiresJudge?: boolean;
   readonly askCheck?: boolean;
+  readonly askCheckPolicy?: "v2";
 }): Result.Result<ReadonlyArray<PlannedLedgerEvent>, LedgerRejection> {
   const { command, ledger, now } = input;
   const requiresJudge = input.requiresJudge ?? ledger?.requiresJudge ?? false;
@@ -420,6 +490,8 @@ function planCoreLedgerCommand(input: {
           items: createdItems,
           ...(stampedRequiresJudge ? { requiresJudge: true } : {}),
           ...(stampedAskCheck ? { askCheck: true } : {}),
+          // The policy only means something beside the ask check it caps.
+          ...(stampedAskCheck && input.askCheckPolicy === "v2" ? { askCheckPolicy: "v2" } : {}),
           createdAt: now,
           updatedAt: now,
           closedAt: null,
@@ -437,6 +509,27 @@ function planCoreLedgerCommand(input: {
     if (ledger.closedAt === null) return reject(`Ledger ${ledger.id} is not closed.`);
     return Result.succeed([
       { type: "ledger.reopened", payload: { ledgerId: ledger.id, updatedAt: now } },
+    ]);
+  }
+
+  // The user writing lifts a v2 stop whether or not the ledger has since closed, so it is never a
+  // reason to refuse their message; with nothing stopped it plans nothing.
+  if (command.type === "ledger.ask-check.resume") {
+    if (ledger.askCheckStopped === undefined || !isAskCheckPolicyV2(ledger)) {
+      return Result.succeed([]);
+    }
+    return Result.succeed([
+      {
+        type: "ledger.ask-check.updated",
+        payload: {
+          ledgerId: ledger.id,
+          fails: ledger.askCheckFails ?? 0,
+          ...(ledger.askCheckHandedOver === undefined
+            ? {}
+            : { handedOver: ledger.askCheckHandedOver }),
+          updatedAt: now,
+        },
+      },
     ]);
   }
 
@@ -850,6 +943,16 @@ function planCoreLedgerCommand(input: {
       const verdict = evidence === item.evidence ? item.verdict : null;
       // Fork: an ask check ledger holds only the close that would finish its asks.
       const heldForAskCheck = ledger.askCheck === true && closesLastCheckedAsk(ledger, item);
+      // Fork: a stopped v2 ledger takes no more closes of the held item from the agent; the user's
+      // own close above stays final.
+      if (
+        target === "closed" &&
+        byAgent &&
+        heldForAskCheck &&
+        ledger.askCheckStopped !== undefined
+      ) {
+        return reject(ASK_CHECK_STOPPED_TEXT);
+      }
       if (
         target === "closed" &&
         byAgent &&

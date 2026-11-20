@@ -546,6 +546,196 @@ describe("planLedgerCommand ask check", () => {
   });
 });
 
+describe("planLedgerCommand ask check policy v2", () => {
+  const idOf = (name: string) => LedgerItemId.make(`item:${name}`);
+  const ask = (name: string, overrides: Partial<LedgerItem> = {}) =>
+    item({ id: idOf(name), title: name, quote: `quote of ${name}`, ...overrides });
+  const v2Ledger = (items: ReadonlyArray<LedgerItem>, flags: Partial<Ledger> = {}): Ledger => ({
+    ...ledgerWith(),
+    askCheck: true,
+    askCheckPolicy: "v2",
+    items,
+    ...flags,
+  });
+  const failOn = (name: string, extra: { handOver?: { from: string; to: string } } = {}) =>
+    ({
+      type: "ledger.item.verdict.record",
+      commandId: CommandId.make(`command:plan:v2-fail:${name}`),
+      threadId,
+      ledgerId,
+      itemId: idOf(name),
+      verdict: verdict("fail"),
+      ...extra,
+    }) satisfies LedgerCommand;
+  const events = (command: LedgerCommand, ledger: Ledger) => {
+    const result = planLedgerCommand({ command, ledger, now });
+    assert.isTrue(Result.isSuccess(result), Result.isFailure(result) ? result.failure : "");
+    return Result.isSuccess(result) ? result.success : [];
+  };
+  const askCheckUpdate = (command: LedgerCommand, ledger: Ledger) => {
+    const found = events(command, ledger).find(({ type }) => type === "ledger.ask-check.updated");
+    return found?.type === "ledger.ask-check.updated" ? found.payload : undefined;
+  };
+  const closeBy = (name: string, createdBy?: "agent"): LedgerCommand => ({
+    type: "ledger.item.update",
+    commandId: CommandId.make(`command:plan:v2-close:${name}:${createdBy ?? "user"}`),
+    threadId,
+    ledgerId,
+    itemId: idOf(name),
+    status: "closed",
+    ...(createdBy === undefined ? {} : { createdBy }),
+  });
+  const STOP_TEXT =
+    "The check failed three times and has stopped. Tell the user what is done, what the last check found (ledger_read has its notes) and what you would try next; do not keep changing code for this item unless they ask.";
+
+  it("stamps the policy at creation only beside an ask check", () => {
+    const create: LedgerCommand = {
+      type: "ledger.create",
+      commandId: CommandId.make("command:plan:create-v2"),
+      threadId,
+      ledgerId,
+      title: "Checked",
+      startState: "",
+      checkpoints: [],
+      winConditions: [],
+      items: [],
+    };
+    const stamp = (flags: {
+      requiresJudge?: boolean;
+      askCheck?: boolean;
+      askCheckPolicy?: "v2";
+    }) => {
+      const result = planLedgerCommand({ command: create, ledger: undefined, now, ...flags });
+      return Result.isSuccess(result) && result.success[0]?.type === "ledger.created"
+        ? result.success[0].payload.askCheckPolicy
+        : "not created";
+    };
+    assert.equal(stamp({ askCheck: true, askCheckPolicy: "v2" }), "v2");
+    assert.isUndefined(stamp({ askCheck: true }));
+    assert.isUndefined(stamp({ askCheckPolicy: "v2" }));
+    assert.isUndefined(stamp({ askCheck: true, requiresJudge: true, askCheckPolicy: "v2" }));
+  });
+
+  it("counts failed checks for the ledger across items and across a reopen", () => {
+    const ledger = v2Ledger([ask("a"), ask("b")]);
+    assert.equal(askCheckUpdate(failOn("a"), ledger)?.fails, 1);
+    // A second failed check on another item adds to the same count.
+    const afterFirst = v2Ledger([ask("a"), ask("b")], { askCheckFails: 1 });
+    assert.equal(askCheckUpdate(failOn("b"), afterFirst)?.fails, 2);
+    // Reopening a closed item plans no ask check change, so the count stands.
+    const reopened = events(
+      {
+        type: "ledger.item.update",
+        commandId: CommandId.make("command:plan:v2-reopen"),
+        threadId,
+        ledgerId,
+        itemId: idOf("a"),
+        status: "open",
+      },
+      v2Ledger([ask("a", { status: "closed", closedAt: earlier }), ask("b")], {
+        askCheckFails: 2,
+      }),
+    );
+    assert.isFalse(reopened.some(({ type }) => type === "ledger.ask-check.updated"));
+    // A pass is not a failed check.
+    const pass = events({ ...failOn("a"), verdict: verdict("pass") }, ledger);
+    assert.isFalse(pass.some(({ type }) => type === "ledger.ask-check.updated"));
+  });
+
+  it("leaves a v1 ledger and a judged ledger uncounted", () => {
+    const v1: Ledger = { ...ledgerWith(), askCheck: true, items: [ask("a")] };
+    assert.isUndefined(askCheckUpdate(failOn("a"), v1));
+    const judged = v2Ledger([ask("a")], { askCheck: false, requiresJudge: true });
+    assert.isUndefined(askCheckUpdate(failOn("a"), judged));
+  });
+
+  it("records the hand-over on the second failed check, and only then", () => {
+    const handOver = { from: "claude-sonnet-5-5", to: "claude-opus-5-5" };
+    const second = askCheckUpdate(
+      failOn("a", { handOver }),
+      v2Ledger([ask("a")], { askCheckFails: 1 }),
+    );
+    assert.equal(second?.fails, 2);
+    assert.deepEqual(second?.handedOver, { ...handOver, at: now });
+    assert.isUndefined(second?.stopped);
+    // Without a stronger checker the server passes none, and nothing is recorded.
+    assert.isUndefined(
+      askCheckUpdate(failOn("a"), v2Ledger([ask("a")], { askCheckFails: 1 }))?.handedOver,
+    );
+    // The first fail never hands over, even when asked to.
+    assert.isUndefined(askCheckUpdate(failOn("a", { handOver }), v2Ledger([ask("a")]))?.handedOver);
+  });
+
+  it("stops the ledger on the third failed check and keeps the hand-over record", () => {
+    const handedOver = { from: "sonnet", to: "opus", at: earlier };
+    const third = askCheckUpdate(
+      failOn("a"),
+      v2Ledger([ask("a")], { askCheckFails: 2, askCheckHandedOver: handedOver }),
+    );
+    assert.equal(third?.fails, 3);
+    assert.deepEqual(third?.stopped, { at: now, fails: 3 });
+    assert.deepEqual(third?.handedOver, handedOver);
+  });
+
+  it("refuses the agent's close of the held ask while stopped, and only that", () => {
+    const stopped = v2Ledger(
+      [ask("a", { status: "closed", closedAt: earlier }), ask("b"), ask("c")],
+      { askCheckFails: 3, askCheckStopped: { at: earlier, fails: 3 } },
+    );
+    // With another ask unfinished the close is not the checked one, so it is immediate.
+    assert.isTrue(
+      Result.isSuccess(planLedgerCommand({ command: closeBy("b", "agent"), ledger: stopped, now })),
+    );
+    const held = v2Ledger([ask("a", { status: "closed", closedAt: earlier }), ask("b")], {
+      askCheckFails: 3,
+      askCheckStopped: { at: earlier, fails: 3 },
+    });
+    const refused = planLedgerCommand({ command: closeBy("b", "agent"), ledger: held, now });
+    assert.isTrue(Result.isFailure(refused));
+    assert.equal(Result.isFailure(refused) ? refused.failure : "", STOP_TEXT);
+    // The user's own close is final.
+    const byUser = planLedgerCommand({ command: closeBy("b"), ledger: held, now });
+    assert.isTrue(Result.isSuccess(byUser));
+    // Before the stop the same close is held for a check, as on v1.
+    const unstopped = planLedgerCommand({
+      command: closeBy("b", "agent"),
+      ledger: v2Ledger([ask("a", { status: "closed", closedAt: earlier }), ask("b")]),
+      now,
+    });
+    assert.isTrue(Result.isSuccess(unstopped));
+  });
+
+  it("clears the stop when the user writes, resetting nothing else", () => {
+    const resume = (ledger: Ledger) =>
+      events(
+        {
+          type: "ledger.ask-check.resume",
+          commandId: CommandId.make("command:plan:v2-resume"),
+          threadId,
+          ledgerId,
+        },
+        ledger,
+      );
+    const handedOver = { from: "sonnet", to: "opus", at: earlier };
+    const cleared = resume(
+      v2Ledger([ask("a")], {
+        askCheckFails: 3,
+        askCheckHandedOver: handedOver,
+        askCheckStopped: { at: earlier, fails: 3 },
+      }),
+    ).find(({ type }) => type === "ledger.ask-check.updated");
+    assert.equal(cleared?.type === "ledger.ask-check.updated" ? cleared.payload.fails : -1, 3);
+    assert.isUndefined(cleared?.type === "ledger.ask-check.updated" && cleared.payload.stopped);
+    assert.deepEqual(
+      cleared?.type === "ledger.ask-check.updated" ? cleared.payload.handedOver : undefined,
+      handedOver,
+    );
+    // Nothing is stopped, nothing changes.
+    assert.deepEqual(resume(v2Ledger([ask("a")], { askCheckFails: 1 })), []);
+    assert.deepEqual(resume({ ...ledgerWith(), askCheck: true, items: [ask("a")] }), []);
+  });
+});
+
 describe("planLedgerCommand no-ops", () => {
   it("plans nothing for a checkpoint already in the requested state or an unchanged item", () => {
     const ledger: Ledger = {

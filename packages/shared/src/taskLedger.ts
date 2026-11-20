@@ -98,6 +98,22 @@ export function askCheckedItems(ledger: Pick<Ledger, "items">): ReadonlyArray<Le
   return asks.length > 0 ? asks : ledger.items.filter((item) => item.parentItemId === undefined);
 }
 
+/**
+ * Fork: whether the ledger's ask check runs under the v2 policy (two tries, a hand-over, then a
+ * stop). A judged ledger never does: its judge gates every close, so it has no ask check.
+ */
+export const isAskCheckPolicyV2 = (
+  ledger: Pick<Ledger, "askCheck" | "askCheckPolicy" | "requiresJudge"> | undefined,
+): boolean =>
+  ledger?.askCheck === true && ledger.requiresJudge !== true && ledger.askCheckPolicy === "v2";
+
+/**
+ * Fork: a v2 ledger that a third failed check stopped. The agent may end its turn with the held
+ * item open, so no follow-up, Stop hook block or replan nudge applies until the user writes.
+ */
+const askCheckStopped = (ledger: Pick<Ledger, "askCheckStopped"> | undefined): boolean =>
+  ledger?.askCheckStopped !== undefined;
+
 export type LedgerAutoContinueDecision =
   | { readonly type: "idle" }
   | {
@@ -190,6 +206,7 @@ export function decideLedgerAutoContinue(input: {
   if (ledger === undefined || ledger.closedAt !== null) return { type: "idle" };
   const open = ledger.items.filter(isOpen);
   if (open.length === 0) return { type: "idle" };
+  if (askCheckStopped(ledger)) return { type: "idle" };
 
   let streak = 0;
   let counting = true;
@@ -392,6 +409,17 @@ export function applyLedgerEvent(
       return { ...ledger, closedAt: event.payload.closedAt, updatedAt: event.payload.updatedAt };
     case "ledger.reopened":
       return { ...ledger, closedAt: null, updatedAt: event.payload.updatedAt };
+    case "ledger.ask-check.updated": {
+      const { askCheckHandedOver: _handedOver, askCheckStopped: _stopped, ...rest } = ledger;
+      const { fails, handedOver, stopped, updatedAt } = event.payload;
+      return {
+        ...rest,
+        askCheckFails: fails,
+        ...(handedOver === undefined ? {} : { askCheckHandedOver: handedOver }),
+        ...(stopped === undefined ? {} : { askCheckStopped: stopped }),
+        updatedAt,
+      };
+    }
     case "ledger.investigation.updated":
       return {
         ...ledger,

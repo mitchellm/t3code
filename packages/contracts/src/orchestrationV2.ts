@@ -58,6 +58,9 @@ import {
 } from "./checkpointDiff.ts";
 import {
   Ledger,
+  LedgerAskCheckResumeCommand,
+  LedgerAskCheckUpdatedPayload,
+  LedgerAskCheckUpdatedPayloadJson,
   LedgerCheckpointUpdatedPayload,
   LedgerCheckpointUpdatedPayloadJson,
   LedgerClosedPayload,
@@ -2149,6 +2152,12 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     type: Schema.Literal("ledger.reopened"),
     payload: LedgerReopenedPayload,
   }),
+  // Fork: the v2 ask check's failed-check record changed.
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("ledger.ask-check.updated"),
+    payload: LedgerAskCheckUpdatedPayload,
+  }),
   // Fork: Investigate mode's record on the ledger changed.
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -3079,6 +3088,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("ledger.ask-check.updated"),
+    payload: LedgerAskCheckUpdatedPayloadJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("ledger.investigation.updated"),
     payload: LedgerInvestigationUpdatedPayloadJson,
   }),
@@ -3804,6 +3818,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
   LedgerJudgementAbandonCommand,
   LedgerJudgementStartedCommand,
   LedgerItemTaskLinkCommand,
+  LedgerAskCheckResumeCommand,
   // Fork: Investigate mode; clients reach these only through the investigation RPCs.
   LedgerInvestigationStartCommand,
   LedgerInvestigationEndCommand,
