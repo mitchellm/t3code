@@ -1,15 +1,17 @@
 import type { Ledger, NodeId } from "@t3tools/contracts";
-import { partitionLedgerFollowUp } from "@t3tools/shared/taskLedger";
+import { isAskCheckPolicyV2, partitionLedgerFollowUp } from "@t3tools/shared/taskLedger";
 
 import { answerWouldPass } from "../mcp/LedgerJudgement.ts";
+import { ASK_CHECK_HAND_OVER_AFTER_FAILS } from "./AskCheckPolicy.ts";
 
 const isOpen = (item: Ledger["items"][number]) =>
   item.status === "open" || item.status === "in_progress";
 
 /**
  * Whether a finished judge task wakes the planner: a fail always, a pass only when it finishes
- * the ledger, unblocks work, or leaves an idle planner something to do. The verdict is recorded
- * either way. Anything this cannot place as a pass wakes, as before.
+ * the ledger, unblocks work, or leaves an idle planner something to do. Anything this cannot
+ * place wakes. A v2 ask check's second and later fails do not: the server wakes the thread
+ * itself, with the hand-over or stop text, once it has recorded them.
  */
 export function judgeVerdictWakesPlanner(input: {
   readonly ledger: Ledger | undefined;
@@ -22,12 +24,12 @@ export function judgeVerdictWakesPlanner(input: {
   const judged = ledger?.items.find(
     (item) => item.judging === true && item.judgeTaskId === input.taskId,
   );
-  if (
-    ledger === undefined ||
-    judged === undefined ||
-    !answerWouldPass(ledger, judged, input.answer)
-  ) {
-    return true;
+  if (ledger === undefined || judged === undefined) return true;
+  if (!answerWouldPass(ledger, judged, input.answer)) {
+    return !(
+      isAskCheckPolicyV2(ledger) &&
+      (ledger.askCheckFails ?? 0) + 1 >= ASK_CHECK_HAND_OVER_AFTER_FAILS
+    );
   }
   const others = ledger.items.filter((item) => item.id !== judged.id && isOpen(item));
   // The pass finishes the ledger: the planner owes the solve and report. Under an ask check the

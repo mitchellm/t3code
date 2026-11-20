@@ -2050,6 +2050,10 @@ describe("OrchestratorMcpService provider resolution", () => {
       readonly loadoutId?: string;
       /** The model the checker's task is recorded as having run on; the thread's own by default. */
       readonly ranOn?: { readonly instanceId: ProviderInstanceId; readonly model: string };
+      /** The model the alternate instance offers; "gpt-5.4" by default. */
+      readonly altModel?: string;
+      /** More models the thread's own instance offers, for a judge on the same instance. */
+      readonly ownModels?: ReadonlyArray<string>;
     }) =>
       Effect.gen(function* () {
         const dispatched = yield* Ref.make<ReadonlyArray<Record<string, unknown>>>([]);
@@ -2140,15 +2144,29 @@ describe("OrchestratorMcpService provider resolution", () => {
               ),
           }),
           providerRegistryLayer([
-            providerSnapshot({
-              instanceId: codexInstanceId,
-              driver: ProviderDriverKind.make("codex"),
-              model: "gpt-5.4",
-            }),
+            (() => {
+              const own = providerSnapshot({
+                instanceId: codexInstanceId,
+                driver: ProviderDriverKind.make("codex"),
+                model: "gpt-5.4",
+              });
+              return {
+                ...own,
+                models: [
+                  ...own.models,
+                  ...(input.ownModels ?? []).map((slug) => ({
+                    slug,
+                    name: slug,
+                    isCustom: false,
+                    capabilities: null,
+                  })),
+                ],
+              };
+            })(),
             providerSnapshot({
               instanceId: altInstanceId,
               driver: ProviderDriverKind.make("codex"),
-              model: "gpt-5.4",
+              model: input.altModel ?? "gpt-5.4",
             }),
           ]),
           adapterRegistryLayer([codexInstanceId, altInstanceId]),
@@ -2243,7 +2261,14 @@ describe("OrchestratorMcpService provider resolution", () => {
       commands.find((command) => command.type === "delegated_task.request") as
         | { readonly modelSelection: { readonly instanceId: string; readonly model: string } }
         | undefined;
-    const judgedBy = (id: string, structure: "solo" | undefined) => ({
+    const judgedBy = (
+      id: string,
+      structure: "solo" | undefined,
+      judge: { readonly instanceId: ProviderInstanceId; readonly model: string } = {
+        instanceId: altInstanceId,
+        model: "gpt-5.4",
+      },
+    ) => ({
       providerInstances: { [altInstanceId]: { driver: "codex", enabled: true } },
       loadouts: [
         ...DEFAULT_LOADOUTS,
@@ -2252,7 +2277,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           name: id,
           description: "",
           ...(structure === undefined ? {} : { structure }),
-          roles: { judge: { instanceId: altInstanceId, model: "gpt-5.4" } },
+          roles: { judge },
         },
       ],
     });
@@ -2292,6 +2317,185 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(verdictOf(delegating)?.outcome, "pass");
         }),
     );
+
+    describe("under the v2 policy", () => {
+      const FAILED = "C1: FAIL - src/export.ts still writes the old names\nVERDICT: FAIL";
+      const v2 = (fails: number, more: Partial<Ledger> = {}): Partial<Ledger> => ({
+        askCheck: true,
+        askCheckPolicy: "v2",
+        ...(fails === 0 ? {} : { askCheckFails: fails }),
+        ...more,
+      });
+      const JUDGE_MODEL = "gpt-5.4-pro";
+      const alt = { instanceId: altInstanceId, model: JUDGE_MODEL };
+      /** A solo loadout whose judge is another instance's stronger model. */
+      const strongerSolo = {
+        loadoutId: "solo-stronger",
+        settings: judgedBy("solo-stronger", "solo", alt),
+        altModel: JUDGE_MODEL,
+        ranOn: alt,
+      } as const;
+      const types = (commands: ReadonlyArray<Record<string, unknown>>) =>
+        commands.map(({ type }) => type);
+      const switchOf = (commands: ReadonlyArray<Record<string, unknown>>) =>
+        commands.find(
+          (command) =>
+            command.type === "provider.switch" || command.type === "thread.model-selection.set",
+        ) as
+          | {
+              readonly type: string;
+              readonly modelSelection: { readonly instanceId: string; readonly model: string };
+            }
+          | undefined;
+      const wakeOf = (commands: ReadonlyArray<Record<string, unknown>>) =>
+        commands.find((command) => command.type === "message.dispatch") as
+          | {
+              readonly text: string;
+              readonly createdBy: string;
+              readonly creationSource: string;
+              readonly dispatchMode: { readonly type: string };
+              readonly notification: { readonly source: { readonly kind: string } };
+            }
+          | undefined;
+      const handOverOf = (commands: ReadonlyArray<Record<string, unknown>>) =>
+        commands.find((command) => command.type === "ledger.item.verdict.record")?.handOver;
+
+      it.effect(
+        "hands the thread to the stronger checker after the second failed check, before the wake turn",
+        () =>
+          Effect.gen(function* () {
+            const commands = yield* checked({
+              ...strongerSolo,
+              flags: v2(1),
+              summary: FAILED,
+            });
+            // The same switch t3_thread_configure sends: another instance means a provider switch.
+            const switched = switchOf(commands);
+            assert.equal(switched?.type, "provider.switch");
+            assert.equal(switched?.modelSelection.instanceId, altInstanceId);
+            assert.equal(switched?.modelSelection.model, JUDGE_MODEL);
+            // The ledger records who took over from whom, on the verdict that made it so.
+            assert.deepEqual(handOverOf(commands), { from: "gpt-5.4", to: JUDGE_MODEL });
+            const wake = wakeOf(commands);
+            assert.isTrue(
+              wake?.text.startsWith(
+                `The check failed twice, so ${JUDGE_MODEL} has taken over this thread from here. The work so far is in the checkout; what the check found is below.\n\n`,
+              ),
+            );
+            assert.include(wake?.text ?? "", "src/export.ts still writes the old names");
+            assert.equal(wake?.createdBy, "agent");
+            assert.equal(wake?.creationSource, "server");
+            assert.equal(wake?.dispatchMode.type, "queue_after_active");
+            assert.equal(wake?.notification.source.kind, "system");
+            // The model changes first, so the wake turn runs on it; the wake is last.
+            const order = types(commands);
+            assert.isBelow(
+              order.indexOf("provider.switch"),
+              order.indexOf("ledger.item.verdict.record"),
+            );
+            assert.isBelow(
+              order.indexOf("ledger.item.verdict.record"),
+              order.indexOf("message.dispatch"),
+            );
+          }),
+      );
+
+      it.effect(
+        "switches a judge on the thread's own instance with the model-selection command",
+        () =>
+          Effect.gen(function* () {
+            const commands = yield* checked({
+              flags: v2(1),
+              summary: FAILED,
+              loadoutId: "solo-same-instance",
+              ownModels: [JUDGE_MODEL],
+              settings: judgedBy("solo-same-instance", "solo", {
+                instanceId: codexInstanceId,
+                model: JUDGE_MODEL,
+              }),
+              ranOn: { instanceId: codexInstanceId, model: JUDGE_MODEL },
+            });
+            assert.equal(switchOf(commands)?.type, "thread.model-selection.set");
+            assert.equal(switchOf(commands)?.modelSelection.model, JUDGE_MODEL);
+            assert.deepEqual(handOverOf(commands), { from: "gpt-5.4", to: JUDGE_MODEL });
+          }),
+      );
+
+      it.effect(
+        "has no stronger checker to hand over to when the check runs on the thread's own model",
+        () =>
+          Effect.gen(function* () {
+            // The setting, with no loadout: the check is the thread's own model.
+            const own = yield* checked({ flags: v2(1), summary: FAILED });
+            assert.isUndefined(switchOf(own));
+            assert.isUndefined(handOverOf(own));
+            // The second wake still goes out, with what the check found and no hand-over sentence.
+            assert.isFalse(wakeOf(own)?.text.startsWith("The check failed twice") ?? true);
+            assert.include(wakeOf(own)?.text ?? "", "src/export.ts still writes the old names");
+            // A solo loadout whose judge is the thread's own model changes nothing either.
+            const same = yield* checked({
+              flags: v2(1),
+              summary: FAILED,
+              loadoutId: "solo-same-model",
+              settings: judgedBy("solo-same-model", "solo", {
+                instanceId: codexInstanceId,
+                model: "gpt-5.4",
+              }),
+              ranOn: { instanceId: codexInstanceId, model: "gpt-5.4" },
+            });
+            assert.isUndefined(switchOf(same));
+            assert.isUndefined(handOverOf(same));
+            assert.isDefined(wakeOf(same));
+          }),
+      );
+
+      it.effect(
+        "tells the agent the check stopped after the third failed check, and hands over nothing",
+        () =>
+          Effect.gen(function* () {
+            const commands = yield* checked({
+              ...strongerSolo,
+              flags: v2(2, {
+                askCheckHandedOver: { from: "gpt-5.4", to: JUDGE_MODEL, at: madeAt },
+              }),
+              summary: FAILED,
+            });
+            assert.isUndefined(switchOf(commands));
+            assert.isUndefined(handOverOf(commands));
+            const wake = wakeOf(commands);
+            assert.isTrue(
+              wake?.text.startsWith(
+                "The check failed three times and has stopped. Tell the user what is done, what the last check found (ledger_read has its notes) and what you would try next; do not keep changing code for this item unless they ask.\n\n",
+              ),
+            );
+            assert.include(wake?.text ?? "", "src/export.ts still writes the old names");
+          }),
+      );
+
+      it.effect(
+        "leaves the first failed check, a pass and a v1 ledger to the completion wake and a plain record",
+        () =>
+          Effect.gen(function* () {
+            for (const [name, run] of [
+              ["first failed check", { flags: v2(0), summary: FAILED }],
+              ["pass", { flags: v2(1), summary: passes(3) }],
+              [
+                "v1 ledger on its second fail",
+                { flags: { askCheck: true, askCheckFails: 1 }, summary: FAILED },
+              ],
+            ] as const) {
+              const commands = yield* checked({ ...strongerSolo, ...run });
+              assert.isUndefined(switchOf(commands), name);
+              assert.isUndefined(handOverOf(commands), name);
+              assert.isUndefined(wakeOf(commands), name);
+              assert.isDefined(
+                commands.find((command) => command.type === "ledger.item.verdict.record"),
+                name,
+              );
+            }
+          }),
+      );
+    });
   });
 
   describe("delegating work on a ledger item", () => {

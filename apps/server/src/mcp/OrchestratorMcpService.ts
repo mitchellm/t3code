@@ -80,9 +80,13 @@ import {
   strongerJudgeTarget,
   withSolo,
 } from "@t3tools/shared/loadouts";
-import { wasAsked } from "@t3tools/shared/taskLedger";
+import { isAskCheckPolicyV2, wasAsked } from "@t3tools/shared/taskLedger";
 import { isolationReport, resolveDelegationWorkspace } from "./WorkerIsolation.ts";
-import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
+import {
+  createModelSelection,
+  getProviderOptionCurrentValue,
+  modelSelectionCommandType,
+} from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
@@ -109,6 +113,10 @@ import {
   subagentResultForRun,
   delegatedTaskProgress,
 } from "@t3tools/provider-core/server/subagentProjection";
+import {
+  ASK_CHECK_HAND_OVER_AFTER_FAILS,
+  askCheckFailureWake,
+} from "../orchestration-v2/AskCheckPolicy.ts";
 import {
   DispatchModeLimit,
   type DispatchModeRefusal,
@@ -2212,6 +2220,115 @@ const make = Effect.gen(function* () {
           });
     // `prepareJudgement` refuses before any port runs when there is no ledger.
     const ledgerId = () => ledger!.id;
+
+    /**
+     * Fork: the second failed check of a v2 ledger puts the thread on the stronger checker's model,
+     * the solo loadout's judge, with the command t3_thread_configure sends. Done before the verdict
+     * is recorded and the wake queued, so the wake turn already runs there. Nothing to do, and
+     * nothing recorded, when the check ran on the thread's own model or the switch is refused.
+     */
+    const handOverToStrongerChecker = Effect.fn("OrchestratorMcpService.askCheckHandOver")(
+      function* (taskId: NodeId) {
+        const { active } = yield* loadLoadouts(parent.thread);
+        if (soloJudgeRole(active) === undefined) return undefined;
+        const target = yield* expectedJudge().pipe(Effect.option);
+        if (Option.isNone(target)) return undefined;
+        const own = parent.thread.modelSelection;
+        if (
+          target.value.providerInstanceId === own.instanceId &&
+          target.value.model === own.model
+        ) {
+          return undefined;
+        }
+        const modelSelection = createModelSelection(
+          target.value.providerInstanceId,
+          target.value.model,
+          target.value.options,
+        );
+        const switched = yield* threadManagement
+          .dispatch({
+            type: modelSelectionCommandType(own.instanceId, modelSelection),
+            commandId: stableCommandId({
+              scope,
+              requestKey: `${taskId}`,
+              operation: "ask-check-hand-over",
+            }),
+            threadId: scope.thread.threadId,
+            modelSelection,
+          })
+          .pipe(Effect.option);
+        if (Option.isNone(switched)) {
+          yield* Effect.logWarning("Could not hand the thread to the stronger checker", {
+            threadId: scope.thread.threadId,
+            to: modelSelection.model,
+          });
+          return undefined;
+        }
+        return { from: own.model, to: modelSelection.model };
+      },
+    );
+
+    /**
+     * Fork: the wake for the second and later failed checks of a v2 ledger, queued behind whatever
+     * the thread is running. It carries the hand-over or stop text with the notes; the judge's own
+     * completion wake stays off for these (see `judgeVerdictWakesPlanner`), so the agent is woken
+     * once. A thread that cannot take it (archived) has nobody to tell.
+     */
+    const wakeAfterFailedCheck = Effect.fn("OrchestratorMcpService.askCheckWake")(
+      function* (input: {
+        readonly taskId: NodeId;
+        readonly itemId: LedgerItemId;
+        readonly fails: number;
+        readonly handedOverTo: string | undefined;
+        readonly notes: string;
+      }) {
+        const item = ledger?.items.find(({ id }) => id === input.itemId);
+        // The shape of the completion wake it stands in for, so a second fail without a hand-over
+        // reads as it always did.
+        const notes = `Delegated task ${input.taskId} (Check ${input.itemId}: ${item?.title ?? input.itemId}) [completed]:\n${input.notes}`;
+        const text = askCheckFailureWake({
+          fails: input.fails,
+          handedOverTo: input.handedOverTo,
+          notes,
+        });
+        yield* threadManagement
+          .dispatch({
+            type: "message.dispatch",
+            commandId: stableCommandId({
+              scope,
+              requestKey: `${input.taskId}`,
+              operation: "ask-check-wake",
+            }),
+            threadId: scope.thread.threadId,
+            messageId: stableOperationMessageId({
+              scope,
+              requestKey: `${input.taskId}`,
+              operation: "ask-check-wake",
+            }),
+            text,
+            notification: {
+              source: { kind: "system" },
+              outcome: "failed",
+              summary: `The check of ${input.itemId} failed (${input.fails} so far)`,
+              detail: text,
+            },
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "server",
+          })
+          .pipe(
+            Effect.asVoid,
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not wake the thread after a failed check", {
+                threadId: scope.thread.threadId,
+                cause,
+              }),
+            ),
+          );
+      },
+    );
+
     const ports: BackgroundJudgementPorts = {
       delegate: Effect.fn("OrchestratorMcpService.judgeDelegate")(function* ({
         prompt,
@@ -2303,8 +2420,30 @@ const make = Effect.gen(function* () {
           Effect.map(({ subagents }) => subagents),
           Effect.mapError(threadManagementFailure),
         ),
-      recordVerdict: ({ itemId, judgedEvidence, verdict, taskId, judgingRequestedAt }) =>
-        threadManagement
+      recordVerdict: Effect.fn("OrchestratorMcpService.recordVerdict")(function* ({
+        itemId,
+        judgedEvidence,
+        verdict,
+        taskId,
+        judgingRequestedAt,
+      }) {
+        // Fork: the v2 ask check policy. Only a failed check this very request raised counts: a
+        // stale answer, which the planner records as nothing, must not hand the thread over.
+        const judging = ledger?.items.find(({ id }) => id === itemId);
+        const countsAsFail =
+          isAskCheckPolicyV2(ledger) &&
+          verdict.outcome === "fail" &&
+          judging?.judging === true &&
+          judgingRequestedAt !== undefined &&
+          DateTime.toEpochMillis(judging.updatedAt) === DateTime.toEpochMillis(judgingRequestedAt);
+        const fails = (ledger?.askCheckFails ?? 0) + 1;
+        const handedOverTo =
+          countsAsFail &&
+          fails === ASK_CHECK_HAND_OVER_AFTER_FAILS &&
+          ledger?.askCheckHandedOver === undefined
+            ? yield* handOverToStrongerChecker(taskId)
+            : undefined;
+        const { sequence } = yield* threadManagement
           .dispatch({
             type: "ledger.item.verdict.record",
             commandId: stableCommandId({
@@ -2316,13 +2455,22 @@ const make = Effect.gen(function* () {
             ledgerId: ledgerId(),
             itemId,
             verdict,
+            ...(handedOverTo === undefined ? {} : { handOver: handedOverTo }),
             judgedEvidence,
             ...(judgingRequestedAt === undefined ? {} : { judgingRequestedAt }),
           })
-          .pipe(
-            Effect.map(({ sequence }) => sequence),
-            Effect.mapError(dispatchFailureMessage),
-          ),
+          .pipe(Effect.mapError(dispatchFailureMessage));
+        if (countsAsFail && fails >= ASK_CHECK_HAND_OVER_AFTER_FAILS) {
+          yield* wakeAfterFailedCheck({
+            taskId,
+            itemId,
+            fails,
+            handedOverTo: handedOverTo?.to,
+            notes: verdict.notes,
+          });
+        }
+        return sequence;
+      }),
       started: ({ itemId, taskId, promptDigest }) => {
         const judging = ledger?.items.find(({ id }) => id === itemId);
         return threadManagement

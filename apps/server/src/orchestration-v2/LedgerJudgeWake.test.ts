@@ -73,6 +73,48 @@ describe("whether a judge verdict wakes the planner", () => {
     expect(wakes(more, pass, false)).toBe(true);
   });
 
+  describe("under the v2 ask check policy", () => {
+    const v2 = (fails: number): Ledger => ({
+      ...ledgerOf(judging()),
+      requiresJudge: false,
+      askCheck: true,
+      askCheckPolicy: "v2",
+      ...(fails === 0 ? {} : { askCheckFails: fails }),
+    });
+    const pass =
+      "C1: PASS - looked at the forwarded path and the CLI.\nC2: PASS - nothing else was asked; read the message again.\nVERDICT: PASS";
+
+    it("wakes for the first failed check as before, and leaves the second and third to the server's own wake", () => {
+      // The server records the second and later failures and wakes the thread itself, with the
+      // text of the hand-over or the stop, so the completion wake would be a second turn.
+      expect(wakes(v2(0), FAIL, false)).toBe(true);
+      expect(wakes(v2(1), FAIL, false)).toBe(false);
+      expect(wakes(v2(1), FAIL, true)).toBe(false);
+      expect(wakes(v2(2), FAIL, false)).toBe(false);
+      // A v1 ledger keeps waking for every failed check.
+      const { askCheckPolicy: _dropped, ...v1 } = v2(2);
+      expect(wakes(v1, FAIL, false)).toBe(true);
+    });
+
+    it("still wakes nobody for a passed check that finishes the ledger, however many failed before", () => {
+      expect(wakes(v2(0), pass, false)).toBe(false);
+      expect(wakes(v2(2), pass, false)).toBe(false);
+      expect(wakes(v2(2), pass, true)).toBe(false);
+    });
+
+    it("wakes for an answer that cannot be placed as a failure it recorded itself", () => {
+      // No item is judging for this task, so the server did not record anything to wake on.
+      expect(
+        judgeVerdictWakesPlanner({
+          ledger: v2(1),
+          taskId: "task:unknown" as NodeId,
+          answer: FAIL,
+          plannerBusy: false,
+        }),
+      ).toBe(true);
+    });
+  });
+
   it("wakes for a pass that unblocks an item or lets a parent close", () => {
     const blocked = ledgerOf(judging(), item("b", { blockedBy: [LedgerItemId.make("item:a")] }));
     expect(wakes(blocked, PASS, true)).toBe(true);
