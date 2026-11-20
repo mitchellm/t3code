@@ -13,12 +13,13 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { matchRoleCandidate, parseJudgeVerdict } from "@t3tools/shared/loadouts";
-import { askCheckedItems, judgedClaim } from "@t3tools/shared/taskLedger";
+import { askCheckedItems, isAskCheckPolicyV2, judgedClaim } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- A synchronous digest keeps the verdict check a pure comparison.
 import * as NodeCrypto from "node:crypto";
 
+import { ASK_CHECK_STOPPED_TEXT } from "../orchestration-v2/AskCheckPolicy.ts";
 import {
   acceptanceCriteria,
   ASK_CHECK_ANSWER_FORMAT,
@@ -356,17 +357,29 @@ function requestLines(request: RequestMessages): ReadonlyArray<string> {
 }
 
 /**
- * Fork: the ask check's prompt. The checker sees the user's request and the list of what was
- * asked, and nothing the agent wrote about its own work: shown the agent's account, a checker
- * passed work it failed without it. It hunts for the case the first fix left undone.
+ * Fork: the v2 ask check policy's two additions to the checker's prompt. A check that sprawls
+ * across the machine, or fails work on a hunch, costs a round the builder cannot use.
+ */
+const V2_WORKSPACE_RULE =
+  "Work only inside this checkout. If you need scratch files, put them in the system temp folder and delete them when you are done; do not read or write anywhere else outside the checkout.";
+const V2_REPRODUCE_RULE =
+  'A FAIL must say how to reproduce it: the command you ran and what it printed, or the exact code path with file:line and what happens on it. If you suspect a problem and cannot show it, it is not a FAIL: list it under a heading "Unconfirmed:" after your criterion lines and pass the criterion.';
+
+/**
+ * Fork: the ask check's prompt. The checker sees the request and what was asked, and nothing the
+ * agent wrote about its own work (shown it, a checker passed work it failed without). Under v2 it
+ * also stays in the checkout and fails only what it can reproduce; the v1 text is held exactly.
  */
 function askCheckPrompt(
   criteria: ReadonlyArray<string>,
   request: RequestMessages,
   base: JudgeBase | undefined,
+  v2: boolean,
 ): string {
+  const intro =
+    "You are an independent checker. Another agent says it has finished what the user asked for. You did not do the work and you have none of its context. Your job is to find where the request is still not met. Check with read-only inspection and by running tests and commands that change nothing. Do not modify any file.";
   return [
-    "You are an independent checker. Another agent says it has finished what the user asked for. You did not do the work and you have none of its context. Your job is to find where the request is still not met. Check with read-only inspection and by running tests and commands that change nothing. Do not modify any file.",
+    v2 ? `${intro} ${V2_WORKSPACE_RULE}` : intro,
     "",
     REQUEST_INTRO,
     "",
@@ -377,6 +390,7 @@ function askCheckPrompt(
     numberedCriteria(criteria),
     "",
     ...howToCheck("each criterion"),
+    ...(v2 ? [V2_REPRODUCE_RULE] : []),
     "",
     ...hardeningRules(base, ASK_CHECK_ANSWER_FORMAT),
   ].join("\n");
@@ -405,7 +419,12 @@ function judgementPrompt(
   request: RequestMessages | undefined,
 ): string {
   if (isAskCheckLedger(ledger)) {
-    return askCheckPrompt(criteria, request ?? { messages: [], trimmed: false }, base);
+    return askCheckPrompt(
+      criteria,
+      request ?? { messages: [], trimmed: false },
+      base,
+      isAskCheckPolicyV2(ledger),
+    );
   }
   if (item.setAside !== undefined) {
     return setAsidePrompt(ledger, item, item.setAside, criteria, base, linked);
@@ -542,6 +561,10 @@ const judgeableItem = Effect.fn("LedgerJudgement.judgeable")(function* (
   if (item === undefined) return yield* invalid(`Unknown item ${itemId}.`);
   if (item.status === "closed" || item.status === "dropped" || item.status === "deferred") {
     return yield* invalid(`Item ${item.id} is ${item.status}. Reopen it before judging it.`);
+  }
+  // Fork: a stopped v2 ledger takes no more checks, from the agent or the server.
+  if (isAskCheckLedger(ledger) && ledger.askCheckStopped !== undefined) {
+    return yield* invalid(ASK_CHECK_STOPPED_TEXT);
   }
   if (isAskCheckLedger(ledger) && !askCheckedItems(ledger).some(({ id }) => id === item.id)) {
     return yield* invalid(

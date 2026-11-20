@@ -1445,6 +1445,90 @@ it.effect("holds the ask check's prompt to the tuned text, character for charact
   });
 });
 
+/** The v2 check's own passages, word for word. */
+const V2_WORKSPACE_RULE =
+  "Work only inside this checkout. If you need scratch files, put them in the system temp folder and delete them when you are done; do not read or write anywhere else outside the checkout.";
+const V2_REPRODUCE_RULE =
+  'A FAIL must say how to reproduce it: the command you ran and what it printed, or the exact code path with file:line and what happens on it. If you suspect a problem and cannot show it, it is not a FAIL: list it under a heading "Unconfirmed:" after your criterion lines and pass the criterion.';
+
+it.effect("adds the v2 passages to the ask check's prompt and changes nothing else", () => {
+  const v2 = harness({ asked: theRequest, run: run({ summary: passes(3) }) });
+  return Effect.gen(function* () {
+    yield* requestJudgement({
+      ledger: checkedLedger([syncAsk, exportAsk], { askCheckPolicy: "v2" }),
+      itemId,
+      ports: v2.ports,
+    });
+    const prompt = v2.delegated[0]?.prompt ?? "";
+    // The three passages: scratch files stay in the checkout or the temp folder, a FAIL is
+    // reproducible, and a suspicion that cannot be shown goes under "Unconfirmed:".
+    expect(prompt).toContain(V2_WORKSPACE_RULE);
+    expect(prompt).toContain(
+      "A FAIL must say how to reproduce it: the command you ran and what it printed, or the exact code path with file:line and what happens on it.",
+    );
+    expect(prompt).toContain(
+      'If you suspect a problem and cannot show it, it is not a FAIL: list it under a heading "Unconfirmed:" after your criterion lines and pass the criterion.',
+    );
+    // The workspace rule closes the first paragraph; the reproduce rule closes "How to check".
+    const lines = prompt.split("\n");
+    expect(lines[0]?.endsWith(` ${V2_WORKSPACE_RULE}`)).toBe(true);
+    expect(lines[lines.indexOf(V2_REPRODUCE_RULE) - 1]).toBe(
+      "Do not fail the work for things the user did not ask for, for style, or for extra tests you would have liked.",
+    );
+    // Taking those two additions out gives the v1 text exactly.
+    const withoutAdditions = prompt
+      .replace(` ${V2_WORKSPACE_RULE}`, "")
+      .replace(`${V2_REPRODUCE_RULE}\n`, "");
+    expect(withoutAdditions).toBe(ASK_CHECK_PROMPT_FIXTURE);
+    // "Unconfirmed:" lines are plain text in the notes: a pass that carries them is still a pass.
+    const unconfirmed = [
+      ...passes(3).split("\n").slice(0, 3),
+      "Unconfirmed:",
+      "- the retry path may drop rows; I could not show it",
+      "Tests: vp test run -> passed",
+      "VERDICT: PASS",
+    ].join("\n");
+    expect(answerWouldPass(checkedLedger([syncAsk, exportAsk]), exportAsk, unconfirmed)).toBe(true);
+  });
+});
+
+it.effect("keeps a v1 and a judged ledger's prompt free of the v2 passages", () => {
+  const v1 = harness({ asked: theRequest, run: run({ summary: passes(3) }) });
+  const judged = harness({ asked: theRequest });
+  return Effect.gen(function* () {
+    yield* requestJudgement({
+      ledger: checkedLedger([syncAsk, exportAsk]),
+      itemId,
+      ports: v1.ports,
+    });
+    expect(v1.delegated[0]?.prompt).toBe(ASK_CHECK_PROMPT_FIXTURE);
+    // The policy rides only on an ask check ledger: a judged one never carries it.
+    yield* requestJudgement({
+      ledger: ledgerOf({ askCheckPolicy: "v2" }, [exportAsk]),
+      itemId,
+      ports: judged.ports,
+    });
+    expect(judged.delegated[0]?.prompt).not.toContain(V2_WORKSPACE_RULE);
+    expect(judged.delegated[0]?.prompt).not.toContain("A FAIL must say how to reproduce it");
+  });
+});
+
+it.effect("never checks again once the ledger stopped, whoever asks", () => {
+  const { ports, delegated } = harness({ asked: theRequest });
+  const stopped = checkedLedger([syncAsk, exportAsk], {
+    askCheckPolicy: "v2",
+    askCheckFails: 3,
+    askCheckStopped: { at, fails: 3 },
+  });
+  return Effect.gen(function* () {
+    const exit = yield* Effect.exit(requestJudgement({ ledger: stopped, itemId, ports }));
+    expect(failureOf(exit)?.message).toBe(
+      "The check failed three times and has stopped. Tell the user what is done, what the last check found (ledger_read has its notes) and what you would try next; do not keep changing code for this item unless they ask.",
+    );
+    expect(delegated).toHaveLength(0);
+  });
+});
+
 it.effect("fails an ask check answer that leaves out the coverage criterion", () => {
   const { ports, recorded } = harness({ asked: theRequest, run: run({ summary: passes(2) }) });
   return Effect.gen(function* () {
