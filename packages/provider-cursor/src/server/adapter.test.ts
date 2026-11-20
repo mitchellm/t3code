@@ -756,13 +756,14 @@ describe("CursorAdapterV2", () => {
       };
       // Starts at run 5: a conversation from before device instructions existed, now resumed.
       let runOrdinal = 4;
-      const send = Effect.fnUntraced(function* (compact = false) {
+      const send = Effect.fnUntraced(function* (compact = false, taskLedger?: false) {
         runOrdinal += 1;
         const turnInput = {
           threadId,
           providerThread,
           modelSelection,
           runtimePolicy,
+          ...(taskLedger === false ? { taskLedger } : {}),
           runId: RunId.make(`cursor-device-run-${runOrdinal}`),
           runOrdinal,
           providerTurnOrdinal: runOrdinal,
@@ -804,6 +805,16 @@ describe("CursorAdapterV2", () => {
       yield* setDeviceAccess(true);
       assert.deepEqual(yield* send(), told(false, true), "device access turned on later");
       assert.deepEqual(yield* send(), told(false, false));
+
+      // A thread whose project turned the task ledger off is told the rest of the orchestration,
+      // but not to write a ledger.
+      yield* send(true);
+      yield* send();
+      assert.include(sentMessages.at(-1)!, "ledger_create");
+      yield* send(true);
+      yield* send(false, false);
+      assert.include(sentMessages.at(-1)!, "## T3 Code orchestration");
+      assert.notInclude(sentMessages.at(-1)!, "ledger_create");
     }).pipe(
       Effect.scoped,
       Effect.provide(

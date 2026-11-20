@@ -58,6 +58,7 @@ import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import { LedgerToolkit } from "./toolkits/ledger/tools.ts";
 import * as LedgerHandlers from "./toolkits/ledger/handlers.ts";
 import * as LedgerMcpService from "./LedgerMcpService.ts";
+import * as LedgerToolVisibility from "./LedgerToolVisibility.ts";
 import { AgentPinsToolkit } from "./toolkits/agentPins/tools.ts";
 import * as AgentPinsHandlers from "./toolkits/agentPins/handlers.ts";
 import * as AgentPinsMcpService from "./AgentPinsMcpService.ts";
@@ -1077,9 +1078,13 @@ const provideRegistrationServices = <Services>() =>
  * built with the server are provided here; `McpInvocationContext` is left to
  * the transport, whose auth middleware resolves it per request.
  */
-export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, RX>(
+const hiddenWhileLedgerOff = McpServer.visibility(LedgerToolVisibility.makeCheck);
+
+const registerToolkitWith = <Tools extends Record<string, Tool.Any>, EX, RX, AM, EM, RM>(
   toolkit: Toolkit.Toolkit<Tools>,
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
+  /** Middleware that wraps each of the toolkit's registrations, such as a visibility check. */
+  middleware: Layer.Layer<AM, EM, RM>,
 ) =>
   Layer.effectDiscard(
     withToolAnalytics(
@@ -1091,9 +1096,24 @@ export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, 
         Exclude<Tool.Requirements<Tools[keyof Tools]>, McpInvocationContext.McpInvocationContext>
       >().layer,
     ),
+    Layer.provide(middleware),
     Layer.provide(McpServer.McpServer.layer),
     Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)),
   );
+
+export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, RX>(
+  toolkit: Toolkit.Toolkit<Tools>,
+  handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
+) => registerToolkitWith(toolkit, handlers, Layer.empty);
+
+/**
+ * Fork: for a toolkit with a ledger tool. A thread that runs without the task ledger is not
+ * offered those tools in its `tools/list` (see `LedgerToolVisibility`).
+ */
+export const ledgerToolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, RX>(
+  toolkit: Toolkit.Toolkit<Tools>,
+  handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
+) => registerToolkitWith(toolkit, handlers, hiddenWhileLedgerOff.layer);
 
 const imageToolRegistration = <Tools extends Record<string, Tool.Any>, A, E, R, EX, RX>(
   register: Effect.Effect<A, E, R>,
@@ -1123,16 +1143,18 @@ export const layerPreviewToolkit = Layer.mergeAll(
   layerPreviewSnapshotRegistration,
 );
 
-export const layerOrchestratorToolkit = toolkitRegistration(
+// Holds ledger_request_judgement, so it is registered with the ledger tools' visibility check.
+export const layerOrchestratorToolkit = ledgerToolkitRegistration(
   OrchestratorToolkit,
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
-export const layerLedgerToolkit = toolkitRegistration(LedgerToolkit, LedgerHandlers.layer).pipe(
-  Layer.provide(LedgerMcpService.layer),
-);
+export const layerLedgerToolkit = ledgerToolkitRegistration(
+  LedgerToolkit,
+  LedgerHandlers.layer,
+).pipe(Layer.provide(LedgerMcpService.layer));
 
 // Fork: agent-written pins (pin_add, pin_remove).
 export const layerAgentPinsToolkit = toolkitRegistration(

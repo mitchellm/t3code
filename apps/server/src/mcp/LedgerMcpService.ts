@@ -23,22 +23,17 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { isLedgerRequest, unquotedAsk, wasAsked } from "@t3tools/shared/taskLedger";
+import { unquotedAsk, wasAsked } from "@t3tools/shared/taskLedger";
 
 import {
   investigationSpawnGuard,
   investigationSpawnRefusal,
 } from "../orchestration-v2/Investigation.ts";
 import * as LedgerJudgeRunner from "../orchestration-v2/LedgerJudgeRunner.ts";
-import {
-  type LedgerLink,
-  ledgerLinkOf,
-  readLedgerChain,
-  taskLedgerOff,
-} from "../orchestration-v2/TaskLedgerSwitch.ts";
+import { type LedgerLink, ledgerLinkOf } from "../orchestration-v2/TaskLedgerSwitch.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { latestUserMessageAt } from "./InvestigationSpawnGuard.ts";
+import * as LedgerOffRule from "./LedgerOffRule.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { ledgerLinksTasks, type LedgerResultView, snapshotLedger } from "./ledgerSnapshot.ts";
@@ -138,49 +133,19 @@ const make = Effect.gen(function* () {
     );
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const judgeRunner = yield* LedgerJudgeRunner.LedgerJudgeRunner;
-  const serverSettings = yield* ServerSettings.ServerSettingsService;
-
-  /** Whether the user's latest message is the one a `/ledger` command sends. */
-  const latestAskIsLedgerRequest = Effect.fn("LedgerMcpService.latestAskIsLedgerRequest")(
-    function* (threadId: ThreadId) {
-      const { messages } = yield* threads
-        .getThreadRecords(threadId, ["messages"], { messageRoles: ["user"] })
-        .pipe(Effect.mapError(unavailable));
-      const latest = messages
-        .filter(wasAsked)
-        .reduce<(typeof messages)[number] | undefined>(
-          (last, message) =>
-            last === undefined ||
-            DateTime.toEpochMillis(message.createdAt) >= DateTime.toEpochMillis(last.createdAt)
-              ? message
-              : last,
-          undefined,
-        );
-      return latest !== undefined && isLedgerRequest(latest.text);
-    },
-  );
+  const ledgerOffRule = yield* LedgerOffRule.make;
 
   /**
    * Fork: the `taskLedger` project setting. A thread that runs without the ledger gets this one
-   * refusal from every ledger tool instead of a ledger. The tool list is built once for every
-   * session, so it cannot omit the tools for one thread; the instructions leave them out.
+   * refusal from every ledger tool instead of a ledger. The tool list leaves the tools out too
+   * (`LedgerToolVisibility`), but a session opened before the setting changed still lists them.
    */
   const refuseWhileLedgerOff = Effect.fn("LedgerMcpService.refuseWhileLedgerOff")(function* (own: {
     readonly threadId: ThreadId;
     readonly projectId: ProjectId;
     readonly link: LedgerLink;
   }) {
-    const settings = yield* serverSettings.getSettings.pipe(Effect.mapError(unavailable));
-    const resolved = resolveProjectSettings(settings, own.projectId).settings;
-    if (resolved.taskLedger !== false) return;
-    const chain = yield* readLedgerChain(own.threadId, (id) =>
-      id === own.threadId
-        ? Effect.succeed(own.link)
-        : threads
-            .getProjectThreadRecords({ projectId: own.projectId, threadId: id }, ["ledger"])
-            .pipe(Effect.map(ledgerLinkOf), Effect.mapError(unavailable)),
-    );
-    if (!taskLedgerOff(resolved, chain) || (yield* latestAskIsLedgerRequest(own.threadId))) return;
+    if (!(yield* ledgerOffRule.withholdsLedger(own))) return;
     return yield* failure(
       "capability_denied",
       "The task ledger is off for this project, so this thread has no ledger. Work without one.",

@@ -1,5 +1,8 @@
 // No T3 imports inside the string; resolve Pi and typebox from the user's Pi install.
-import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import {
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  t3OrchestrationInstructions,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 
@@ -22,6 +25,7 @@ const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
+const ORCHESTRATION_INSTRUCTIONS_WITHOUT_LEDGER = ${JSON.stringify(t3OrchestrationInstructions(false).trim())};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
@@ -462,16 +466,26 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     }
   });
 
+  // This file is one cached copy for every session, so it cannot be told per thread whether the
+  // task ledger is on. The server leaves the ledger tools out of the tool list for a thread that
+  // runs without it, so the section follows that list; an empty one (the server was not reached)
+  // keeps the full text.
+  const orchestrationInstructions = () =>
+    catalog.length > 0 && !catalog.some((tool) => tool.name === "ledger_create")
+      ? ORCHESTRATION_INSTRUCTIONS_WITHOUT_LEDGER
+      : ORCHESTRATION_INSTRUCTIONS;
+
   // Keep guidance in the system prompt so leading slash commands still expand.
   pi.on("before_agent_start", (event, ctx) => {
     reconcileDiscovery(ctx);
+    const instructions = orchestrationInstructions();
     const sections = event.systemPromptOptions?.sections;
     if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
       // A full prompt override bypasses Pi's later section rendering.
-      sections.t3_code_orchestration = ORCHESTRATION_INSTRUCTIONS;
+      sections.t3_code_orchestration = instructions;
       return undefined;
     }
-    return { systemPrompt: event.systemPrompt + "\\n\\n" + ORCHESTRATION_INSTRUCTIONS };
+    return { systemPrompt: event.systemPrompt + "\\n\\n" + instructions };
   });
 }
 `;

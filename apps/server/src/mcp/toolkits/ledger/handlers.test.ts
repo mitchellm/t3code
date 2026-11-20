@@ -1,3 +1,4 @@
+import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -13,6 +14,7 @@ import {
   type LedgerMcpSnapshot,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2Run,
+  OrchestratorMcpFailure,
   ProviderInstanceId,
   RunId,
   ThreadId,
@@ -24,7 +26,8 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
-import { McpSchema, McpServer } from "effect/ai";
+import { McpSchema, McpServer, Toolkit } from "effect/ai";
+import { HttpBody, HttpClient, HttpRouter } from "effect/http";
 
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as LedgerJudgeRunner from "../../../orchestration-v2/LedgerJudgeRunner.ts";
@@ -40,7 +43,11 @@ import {
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import { idleThreadProjection, liveThreadShell } from "../../McpToolAccess.testkit.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
+import { OrchestratorToolkit } from "../orchestrator/tools.ts";
 
 const ownThread = ThreadId.make("thread:ledger-own");
 const otherThread = ThreadId.make("thread:ledger-other");
@@ -624,6 +631,206 @@ describe("with the task ledger turned off for the project", () => {
       }),
     );
   });
+});
+
+describe("the ledger tools in the tool list with the task ledger turned off", () => {
+  const off = { taskLedger: false };
+  const ledgerToolNames = [
+    "ledger_create",
+    "ledger_add_items",
+    "ledger_update_item",
+    "ledger_set_checkpoint",
+    "ledger_close",
+    "ledger_reopen",
+    "ledger_read",
+  ].toSorted();
+  const plainThread = ThreadId.make("thread:list-plain");
+  const rolesThread = ThreadId.make("thread:list-roles");
+  const ledgerThread = ThreadId.make("thread:list-has-ledger");
+  const askedThread = ThreadId.make("thread:list-asked");
+  const childThread = ThreadId.make("thread:list-child");
+  const threadScope = (threadId: ThreadId) =>
+    scopeFor(threadId) as McpInvocationContext.McpThreadInvocationScope;
+  const credentials = new Map<string, McpInvocationContext.McpThreadInvocationScope>([
+    ["plain", threadScope(plainThread)],
+    ["roles", threadScope(rolesThread)],
+    ["ledger", threadScope(ledgerThread)],
+    ["asked", threadScope(askedThread)],
+    ["child", threadScope(childThread)],
+  ]);
+  const credentialRegistry = Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+    resolve: (token) => Effect.succeed(credentials.get(token)),
+  });
+  // An MCP client signed in from outside any thread; it has no ledger to withhold.
+  const clientCredential = Layer.succeed(McpHttpServer.McpClientAuthenticator)({
+    authenticate: () =>
+      Effect.succeed({
+        ...scopeFor(undefined),
+        client: { sessionId: "client-1", label: "Claude Code", access: "auto" as const },
+      }),
+  });
+
+  /** Threads in each state the rule tells apart: plain, on a loadout with roles, with a ledger, asked for one, a child. */
+  const withThreads = () => {
+    const fake = makeFakeThreads();
+    fake.loadouts.set(rolesThread, { id: "blitz", reason: null, setBy: "user" });
+    fake.ledgers.set(
+      ledgerThread,
+      fixtureLedger([fixtureItem(1, "open", { evidence: null, verdict: null })]),
+    );
+    fake.messages.set(askedThread, [
+      {
+        id: MessageId.make("message:list-asked"),
+        runId: RunId.make("run:list-asked"),
+        role: "user",
+        text: `${LEDGER_REQUEST_PREAMBLE}\n\nTask: move the settings page`,
+        createdAt: NOW,
+        createdBy: "user",
+        creationSource: "web",
+      } as unknown as OrchestrationV2ConversationMessage,
+    ]);
+    fake.parents.set(childThread, rolesThread);
+    return fake;
+  };
+
+  const ledgerServer = (
+    fake: ReturnType<typeof makeFakeThreads>,
+    settings: Parameters<typeof ServerSettings.layerTest>[0],
+  ) =>
+    McpHttpServer.layerMcpTransport(McpHttpServer.layerLedgerToolkit).pipe(
+      Layer.provide(NodeCrypto.layer),
+      Layer.provide(ServerSettings.layerTest(settings)),
+      Layer.provide(fake.layer),
+      Layer.provide(credentialRegistry),
+      Layer.provide(clientCredential),
+    );
+
+  const serveOptions = { disableListenLog: true, disableLogger: true };
+
+  /** `tools/list` and `tools/call` over the real HTTP transport, as a provider session makes them. */
+  const sessions = Effect.gen(function* () {
+    const httpClient = yield* HttpClient.HttpClient;
+    const rpc = (token: string, method: string, params: object) =>
+      Effect.gen(function* () {
+        const headers = {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${token}`,
+        };
+        const initialize = yield* httpClient.post("/mcp", {
+          headers,
+          body: HttpBody.text(
+            `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
+            "application/json",
+          ),
+        });
+        const response = yield* httpClient.post("/mcp", {
+          headers: {
+            ...headers,
+            "mcp-session-id": initialize.headers["mcp-session-id"]!,
+            "mcp-protocol-version": "2025-06-18",
+          },
+          body: HttpBody.text(
+            JSON.stringify({ jsonrpc: "2.0", id: 2, method, params }),
+            "application/json",
+          ),
+        });
+        return ((yield* response.json) as { readonly result: unknown }).result;
+      });
+    return {
+      listed: (token: string) =>
+        rpc(token, "tools/list", {}).pipe(
+          Effect.map((result) =>
+            (result as { readonly tools: ReadonlyArray<{ readonly name: string }> }).tools
+              .map((tool) => tool.name)
+              .toSorted(),
+          ),
+        ),
+      called: (token: string, name: string, args: Record<string, unknown>) =>
+        rpc(token, "tools/call", { name, arguments: args }).pipe(
+          Effect.map((result) => result as McpSchema.CallToolResult),
+        ),
+    };
+  });
+
+  it.effect(
+    "leaves the ledger tools out of a plain thread's list and lists them to every other caller",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* HttpRouter.serve(ledgerServer(withThreads(), off), serveOptions).pipe(Layer.build);
+          const { listed } = yield* sessions;
+          expect(yield* listed("plain")).toEqual([]);
+          // A loadout with roles, a thread with a ledger, one that asked for a ledger, a child of a
+          // roles thread, and a client with no thread all keep the whole set.
+          for (const token of ["roles", "ledger", "asked", "child", "client"]) {
+            expect(yield* listed(token), token).toEqual(ledgerToolNames);
+          }
+        }),
+      ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("lists the same tools to a plain thread when the project keeps the ledger on", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(ledgerServer(withThreads(), {}), serveOptions).pipe(Layer.build);
+        const { listed } = yield* sessions;
+        for (const token of ["plain", "roles", "ledger", "asked", "child", "client"]) {
+          expect(yield* listed(token), token).toEqual(ledgerToolNames);
+        }
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("still answers a call to a tool its list left out with the one line saying why", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // A session opened before the setting was turned off still has the tools in its list.
+        yield* HttpRouter.serve(ledgerServer(withThreads(), off), serveOptions).pipe(Layer.build);
+        const { called } = yield* sessions;
+        const refused = failureOf(yield* called("plain", "ledger_read", {}));
+        expect(refused?.code).toBe("capability_denied");
+        expect(refused?.message).toBe(
+          "The task ledger is off for this project, so this thread has no ledger. Work without one.",
+        );
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("leaves ledger_request_judgement out of a plain thread's list too", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // The judgement tool is part of the orchestrator toolkit, which the ledger shares no code with.
+        const Judgement = Toolkit.make(
+          OrchestratorToolkit.tools.ledger_request_judgement,
+          OrchestratorToolkit.tools.t3_thread_read,
+        );
+        const unreachable = McpToolAccess.reads(() =>
+          Effect.fail(new OrchestratorMcpFailure({ code: "thread_not_found", message: "Unused." })),
+        );
+        const serverLayer = McpHttpServer.layerMcpTransport(
+          McpHttpServer.ledgerToolkitRegistration(
+            Judgement,
+            McpToolAccess.toLayer(Judgement, {
+              ledger_request_judgement: unreachable,
+              t3_thread_read: unreachable,
+            }),
+          ),
+        ).pipe(
+          Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(ServerSettings.layerTest(off)),
+          Layer.provide(withThreads().layer),
+          Layer.provide(credentialRegistry),
+          Layer.provide(clientCredential),
+        );
+        yield* HttpRouter.serve(serverLayer, serveOptions).pipe(Layer.build);
+        const { listed } = yield* sessions;
+        expect(yield* listed("plain")).toEqual(["t3_thread_read"]);
+        expect(yield* listed("roles")).toEqual(["ledger_request_judgement", "t3_thread_read"]);
+        expect(yield* listed("client")).toEqual(["ledger_request_judgement", "t3_thread_read"]);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
 });
 
 it.effect("maps orchestrator rejections to clear tool errors and applies valid transitions", () => {

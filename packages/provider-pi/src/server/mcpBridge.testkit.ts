@@ -48,6 +48,8 @@ export async function loadMcpBridge(
     readonly allowsTool?: (name: string) => boolean;
     readonly runtimeMode?: string;
     readonly inputSchema?: Record<string, unknown>;
+    /** The server lists the ledger tools; it leaves them out for a thread whose project turned the task ledger off. */
+    readonly ledgerTools?: boolean;
   } = {},
 ) {
   const handlers = new Map<string, AgentStartHook>();
@@ -74,6 +76,12 @@ export async function loadMcpBridge(
       annotations: { readOnlyHint: false },
     },
     { name: "preview_snapshot", description: "Inspect the collaborative browser." },
+    ...(options.ledgerTools === true
+      ? [
+          { name: "ledger_create", description: "Write this thread's task ledger." },
+          { name: "ledger_read", description: "Read this thread's task ledger." },
+        ]
+      : []),
   ].map((tool) => ({
     ...tool,
     inputSchema: options.inputSchema ?? { type: "object", properties: {} },

@@ -78,6 +78,21 @@ describe("Pi orchestration prompt section", () => {
       assert.include(result!.systemPrompt, "orchestrator_capabilities");
     }
   });
+
+  // The extension is one cached file for every session, so it follows the tool list the server
+  // gave this session: the server leaves the ledger tools out for a thread that runs without one.
+  it.each([
+    { name: "listed", ledgerTools: true, ledger: true },
+    { name: "left out of the tool list", ledgerTools: false, ledger: false },
+  ])("tells the agent about the task ledger only when its tools are $name", async (input) => {
+    const bridge = await loadMcpBridge({ ledgerTools: input.ledgerTools });
+    const hook = bridge.handlers.get("before_agent_start")!;
+    const result = await hook({ systemPrompt: "base" }, { ui: { notify: assert.fail } });
+    const prompt = result!.systemPrompt;
+    assert.include(prompt, "orchestrator_capabilities");
+    assert.equal(prompt.includes("### Task ledger"), input.ledger);
+    assert.equal(prompt.includes("ledger_create"), input.ledger);
+  });
 });
 
 describe("Pi project trust", () => {
