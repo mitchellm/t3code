@@ -77,7 +77,7 @@ const LedgerReopenTool = Tool.make("ledger_reopen", {
 const LedgerReadTool = Tool.make("ledger_read", {
   ...ledgerTool,
   description:
-    "Read this thread's ledger compactly: status counts, the unfinished (open plus in_progress) count, checkpoints, and every unfinished item in tree order (sub-items follow their parent with a greater depth) with its status, blockers (waitingOn lists the unfinished ones), acceptance, judging state, and evidence and verdict notes cut to a head. Closed, dropped and deferred items are one line each in briefs, the oldest collapsed into omitted on a big ledger. A cut ends [+N chars cut; ...]: pass itemId to read that one item complete. Returns ledger null when the thread has none.",
+    "Read this thread's ledger compactly: status counts, the unfinished (open plus in_progress) count, checkpoints, and every unfinished item in tree order (sub-items follow their parent with a greater depth) with its status, blockers (waitingOn lists the unfinished ones), acceptance, judging state, and evidence and verdict notes, whole when the ledger is small enough and otherwise cut to a head. Closed, dropped and deferred items are one line each in briefs, the oldest collapsed into omitted on a big ledger. A cut ends [+N chars cut; ...]: pass itemId to read that one item complete. Returns ledger null when the thread has none.",
   parameters: LedgerMcpReadInput,
   success: LedgerMcpReadResult,
 })

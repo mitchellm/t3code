@@ -19,8 +19,10 @@ export type LedgerTaskStatusRecord = Pick<OrchestrationV2Subagent, "id" | "statu
  */
 const LEDGER_RESULT_MAX_CHARS = 30_000;
 
-/** Every free-text field of an item listed in full (title, acceptance, evidence, notes, reasons). */
+/** The shortest a free-text field of a listed item is cut to (title, acceptance, evidence, notes, reasons). */
 const FIELD_CAP = 600;
+/** Caps tried in turn for the unfinished items of a whole-ledger read: uncut first, then shorter until they fit. */
+const READ_CAPS = [Number.POSITIVE_INFINITY, 4_000, 1_500, FIELD_CAP];
 /** Newest linked tasks an item lists when the result is bounded; the rest are counted. */
 const TASKS_SHOWN = 3;
 /** One-line entries: the title, and the head of the evidence or reason. */
@@ -234,15 +236,23 @@ export function snapshotLedger(
   );
   // Oldest first, as the ledger holds them; a write lists no finished items it did not change.
   const finished = shown === undefined ? ledger.items.filter((item) => !isUnfinished(item)) : [];
-  const full = listed.map((entry) => itemOf(entry, FIELD_CAP, TASKS_SHOWN, restOf(entry.item.id)));
-  // Full items must leave room for finished lines, or those would collapse for no reason.
-  const fitsFull =
-    measure(assemble(full)) + (finished.length === 0 ? 0 : BRIEFS_RESERVE) <=
-    LEDGER_RESULT_MAX_CHARS;
-
-  const listedLines = fitsFull ? [] : listed.map(({ item }) => lineOf(item, released));
+  // A read cuts only as far as it must: the agent acts on the acceptance line and the judge's notes.
+  // A write's result always takes the short cap, since its caller just sent that text.
   const finishedLines = finished.map((item) => lineOf(item, released));
   const cost = (line: string) => measure(line) + 1;
+  const finishedCost = finishedLines.reduce((sum, line) => sum + cost(line), 12);
+  let full: ReadonlyArray<SnapshotItem> = [];
+  let fitsFull = false;
+  for (const cap of view.kind === "read" ? READ_CAPS : [FIELD_CAP]) {
+    full = listed.map((entry) => itemOf(entry, cap, TASKS_SHOWN, restOf(entry.item.id)));
+    // Longer text never pushes a finished line out: above the shortest cap every line must still fit.
+    // At the shortest cap the items only leave a reserve, and the oldest lines collapse past it.
+    const forLines = finished.length === 0 ? 0 : cap === FIELD_CAP ? BRIEFS_RESERVE : finishedCost;
+    fitsFull = measure(assemble(full)) + forLines <= LEDGER_RESULT_MAX_CHARS;
+    if (fitsFull) break;
+  }
+
+  const listedLines = fitsFull ? [] : listed.map(({ item }) => lineOf(item, released));
   const total = [...listedLines, ...finishedLines].reduce((sum, line) => sum + cost(line), 0);
   // 12 is the `,"briefs":[` and `]` that wrap the lines.
   let room = LEDGER_RESULT_MAX_CHARS - measure(assemble(fitsFull ? full : [])) - 12;

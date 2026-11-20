@@ -1059,15 +1059,15 @@ it.effect(
         expect(byId("L53").judging).toBe(true);
         expect(byId("L55")).toMatchObject({ blockedBy: ["L51", "L52"], waitingOn: ["L51", "L52"] });
 
-        // Long text is cut to its head, and the marker says how much and how to get the rest.
-        expect(byId("L51").evidence).toMatch(/^L51 evidence start /);
-        expect(byId("L51").evidence).not.toContain("L51 evidence end");
-        expect(byId("L51").evidence).toMatch(
-          /\[\+[\d,]+ chars cut; ledger_read itemId "L51" has the rest\]$/,
-        );
-        expect(byId("L51").verdictNotes).toMatch(/^L51 failed verdict notes start /);
+        // Whole text would push finished lines out, so it is cut, but no further than it must be:
+        // well past the shortest head, with the marker saying how much went and where the rest is.
+        const evidence = byId("L51").evidence ?? "";
+        expect(evidence).toMatch(/^L51 evidence start /);
+        expect(evidence).not.toContain("L51 evidence end");
+        expect(evidence).toMatch(/\[\+[\d,]+ chars cut; ledger_read itemId "L51" has the rest\]$/);
+        expect(evidence.length).toBeGreaterThan(1_000);
         expect(byId("L51").verdictNotes).toMatch(
-          /\[\+[\d,]+ chars cut; ledger_read itemId "L51" has the rest\]$/,
+          /^L51 failed verdict notes start .*\[\+[\d,]+ chars cut; ledger_read itemId "L51" has the rest\]$/,
         );
         expect(byId("L57").evidence).toBeNull();
 
@@ -1081,6 +1081,35 @@ it.effect(
   },
 );
 
+it.effect("cuts nothing from an ordinary ledger that fits whole", () => {
+  const fake = makeFakeThreads();
+  const acceptance = grow("L3 acceptance", 1_200);
+  fake.ledgers.set(
+    ownThread,
+    fixtureLedger([
+      fixtureItem(1, "closed"),
+      fixtureItem(2, "closed"),
+      fixtureItem(3, "in_progress", { acceptance, verdict: failedVerdict(3) }),
+      fixtureItem(4, "open", { evidence: null, verdict: null }),
+    ]),
+  );
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      const read = yield* call("ledger_read", {});
+      expectBounded(read);
+      const ledger = ledgerOf(read);
+      // The agent acts on the acceptance line and the judge's notes, so a read that has the room shows them whole.
+      expect(ledger.items.find(({ id }) => id === "L3")).toMatchObject({
+        acceptance,
+        evidence: grow("L3 evidence", 3_000),
+        verdictNotes: grow("L3 failed verdict notes", 2_000),
+      });
+      expect(JSON.stringify(ledger.items)).not.toContain("chars cut");
+      expect(ledger.briefs).toHaveLength(2);
+    }),
+  );
+});
+
 it.effect(
   "collapses the oldest finished items into a count on a huge ledger, never an unfinished one",
   () => {
@@ -1092,7 +1121,12 @@ it.effect(
         ...Array.from({ length: 600 }, (_, index) =>
           fixtureItem(index + 1, statuses[index % statuses.length]!),
         ),
-        ...Array.from({ length: 10 }, (_, index) => fixtureItem(601 + index, "in_progress")),
+        ...Array.from({ length: 10 }, (_, index) =>
+          fixtureItem(601 + index, "in_progress", {
+            evidence: grow(`L${601 + index} evidence`, 6_000),
+            verdict: failedVerdict(601 + index),
+          }),
+        ),
       ]),
     );
     return withServer(fake, (call) =>
@@ -1106,6 +1140,18 @@ it.effect(
         });
         expect(ledger.items.map(({ id }) => id)).toEqual(
           Array.from({ length: 10 }, (_, index) => `L${601 + index}`),
+        );
+
+        // Too much text to show whole: each field keeps its head, and the marker says how much went and where the rest is.
+        const first = ledger.items[0]!;
+        expect(first.evidence).toMatch(/^L601 evidence start /);
+        expect(first.evidence).not.toContain("L601 evidence end");
+        expect(first.evidence).toMatch(
+          /\[\+[\d,]+ chars cut; ledger_read itemId "L601" has the rest\]$/,
+        );
+        expect(first.verdictNotes).toMatch(/^L601 failed verdict notes start /);
+        expect(first.verdictNotes).toMatch(
+          /\[\+[\d,]+ chars cut; ledger_read itemId "L601" has the rest\]$/,
         );
 
         const note = /^(\d+) older finished items \(L1 to L(\d+)\) are not listed/.exec(
