@@ -5,6 +5,7 @@ import {
   type LedgerItemId,
   type LedgerMcpAddItemsInput,
   type LedgerMcpCreateInput,
+  type LedgerMcpReadInput,
   type LedgerMcpReadResult,
   type LedgerMcpRetryInput,
   type LedgerMcpSetCheckpointInput,
@@ -32,7 +33,7 @@ import * as LedgerJudgeRunner from "../orchestration-v2/LedgerJudgeRunner.ts";
 import { latestUserMessageAt } from "./InvestigationSpawnGuard.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { requireThreadScope, type McpInvocationScope } from "./McpInvocationContext.ts";
-import { ledgerLinksTasks, snapshotLedger } from "./ledgerSnapshot.ts";
+import { ledgerLinksTasks, type LedgerResultView, snapshotLedger } from "./ledgerSnapshot.ts";
 import { dispatchFailure, unavailable } from "./threadAccess.ts";
 
 export type LedgerMcpOperation =
@@ -76,6 +77,7 @@ export class LedgerMcpService extends Context.Service<
     ) => Effect.Effect<LedgerMcpWriteResult, OrchestratorMcpFailure>;
     readonly read: (
       scope: McpInvocationScope,
+      input: LedgerMcpReadInput,
     ) => Effect.Effect<LedgerMcpReadResult, OrchestratorMcpFailure>;
   }
 >()("t3/mcp/LedgerMcpService") {}
@@ -155,18 +157,34 @@ const make = Effect.gen(function* () {
       readonly projectId: ProjectId;
       readonly ledger: Ledger | undefined;
     },
-    onlyItemIds?: ReadonlyArray<string>,
+    view: LedgerResultView,
   ) {
     if (own.ledger === undefined) return null;
-    if (!ledgerLinksTasks(own.ledger)) return snapshotLedger(own.ledger, [], onlyItemIds);
+    if (!ledgerLinksTasks(own.ledger)) return snapshotLedger(own.ledger, [], view);
     const { subagents } = yield* threads
       .getProjectThreadRecords({ projectId: own.projectId, threadId: own.threadId }, ["subagents"])
       .pipe(Effect.mapError(unavailable));
-    return snapshotLedger(own.ledger, subagents, onlyItemIds);
+    return snapshotLedger(own.ledger, subagents, view);
   });
 
-  const read = Effect.fn("LedgerMcpService.read")(function* (scope: McpInvocationScope) {
-    return { ledger: yield* snapshotOf(yield* loadOwnLedger(scope)) };
+  const read = Effect.fn("LedgerMcpService.read")(function* (
+    scope: McpInvocationScope,
+    input: LedgerMcpReadInput,
+  ) {
+    const own = yield* loadOwnLedger(scope);
+    const { itemId } = input;
+    if (itemId !== undefined && own.ledger?.items.some((item) => item.id === itemId) === false) {
+      return yield* failure(
+        "invalid_request",
+        `Unknown item ${itemId}. ledger_read lists the items.`,
+      );
+    }
+    return {
+      ledger: yield* snapshotOf(
+        own,
+        itemId === undefined ? { kind: "read" } : { kind: "item", itemId },
+      ),
+    };
   });
 
   const write = Effect.fn("LedgerMcpService.write")(function* (
@@ -183,8 +201,8 @@ const make = Effect.gen(function* () {
     }) => Effect.Effect<OrchestrationV2ServerCommand, OrchestratorMcpFailure>,
     /** Whether the ledger already shows the change this call asks for. */
     applied: (ledger: Ledger | undefined) => boolean,
-    /** The only items the result lists; every item when absent. */
-    changedItemIds?: ReadonlyArray<string>,
+    /** The items the result lists: the ones this call changed. */
+    view: LedgerResultView,
   ) {
     const { threadId, ledger } = yield* loadOwnLedger(scope);
     const send = (requestKey: string) => {
@@ -209,7 +227,7 @@ const make = Effect.gen(function* () {
       const after = yield* loadOwnLedger(scope);
       return {
         sequence,
-        ledger: yield* snapshotOf(after, changedItemIds),
+        ledger: yield* snapshotOf(after, view),
         applied: applied(after.ledger),
       };
     });
@@ -257,7 +275,7 @@ const make = Effect.gen(function* () {
       ledgerId: LedgerId;
     }) => OrchestrationV2ServerCommand,
     applied: (ledger: Ledger) => boolean,
-    changedItemIds?: ReadonlyArray<string>,
+    view: LedgerResultView = { kind: "changed", itemIds: [] },
   ) =>
     write(
       scope,
@@ -269,7 +287,7 @@ const make = Effect.gen(function* () {
           ? Effect.fail(noLedger())
           : Effect.succeed(command({ commandId, threadId, ledgerId: ledger.id })),
       (ledger) => ledger !== undefined && applied(ledger),
-      changedItemIds,
+      view,
     );
 
   const checkQuotes = Effect.fn("LedgerMcpService.checkQuotes")(function* (
@@ -337,6 +355,7 @@ const make = Effect.gen(function* () {
           };
         }),
       (ledger) => ledger !== undefined && ledger.closedAt === null,
+      { kind: "changed", itemIds: input.items.map(({ id }) => id), goal: true },
     );
   });
 
@@ -351,7 +370,7 @@ const make = Effect.gen(function* () {
       input,
       (common) => ({ type: "ledger.item.add", ...common, items: input.items }),
       (ledger) => input.items.every((added) => ledger.items.some((item) => item.id === added.id)),
-      input.items.map(({ id }) => id),
+      { kind: "changed", itemIds: input.items.map(({ id }) => id) },
     );
   });
 
@@ -425,7 +444,7 @@ const make = Effect.gen(function* () {
           (input.parentItemId === undefined || (item.parentItemId ?? null) === input.parentItemId)
         );
       },
-      [input.itemId],
+      { kind: "changed", itemIds: [input.itemId] },
     );
     if (input.status !== undefined) {
       yield* startRequestedJudge(scope, input.itemId).pipe(

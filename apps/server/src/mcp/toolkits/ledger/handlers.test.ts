@@ -4,7 +4,9 @@ import {
   EnvironmentId,
   EventId,
   type Ledger,
+  LedgerCheckpointId,
   LedgerId,
+  type LedgerItem,
   LedgerItemId,
   MessageId,
   NodeId,
@@ -536,11 +538,15 @@ it.effect("returns only the changed items with the whole ledger's counts from a 
         unfinished: 10,
       });
 
-      // ledger_read still lists every item, and says nothing about being partial.
+      // ledger_read lists the ten unfinished items in full and the two finished ones as lines.
       const read = (yield* call("ledger_read", {})).structuredContent as {
         ledger: LedgerMcpSnapshot;
       };
-      expect(read.ledger.items).toHaveLength(12);
+      expect(read.ledger.items).toHaveLength(10);
+      expect(read.ledger.briefs).toEqual([
+        "L4 closed: Item 4 | parser.test.ts: 12 passed",
+        "L12 deferred: Later | Out of scope",
+      ]);
       expect(read.ledger.changedOnly).toBeUndefined();
     }),
   );
@@ -599,8 +605,8 @@ it.effect("takes blockers, sub-items and deferral, and reads them back in tree o
             { id: "L1", depth: 0, parentItemId: null, waitingOn: [] },
             { id: "L1.a", depth: 1, parentItemId: "L1" },
             { id: "L2", depth: 0, blockedBy: ["L1"], waitingOn: ["L1"] },
-            { id: "L3", status: "deferred", deferReason: "Out of scope" },
           ],
+          briefs: ["L3 deferred: Plugin API | Out of scope"],
         },
       });
 
@@ -904,6 +910,446 @@ it.effect("never reaches another thread's ledger", () => {
       for (const { tool } of server.tools.filter(({ tool }) => tool.name.startsWith("ledger_"))) {
         expect(Object.keys(tool.inputSchema.properties ?? {})).not.toContain("threadId");
       }
+    }),
+  );
+});
+
+// The client refuses a tool result past about 25,000 tokens, so every ledger result stays under
+// this many characters (see LEDGER_RESULT_MAX_CHARS) however large the ledger grows.
+const RESULT_BOUND = 30_000;
+
+const ledgerOf = (result: McpSchema.CallToolResult) =>
+  (result.structuredContent as { ledger: LedgerMcpSnapshot }).ledger;
+
+const expectBounded = (result: McpSchema.CallToolResult) => {
+  const text = result.content.reduce(
+    (sum, part) => sum + (part.type === "text" ? part.text.length : 0),
+    0,
+  );
+  expect(JSON.stringify(result.structuredContent).length).toBeLessThanOrEqual(RESULT_BOUND);
+  expect(text).toBeLessThanOrEqual(RESULT_BOUND);
+};
+
+/** `length` characters that start and end with the label, so a cut shows which end survived. */
+const grow = (label: string, length: number) => {
+  const head = `${label} start `;
+  const tail = ` ${label} end`;
+  return head + "x".repeat(Math.max(0, length - head.length - tail.length)) + tail;
+};
+
+const judge = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
+
+const fixtureItem = (
+  index: number,
+  status: LedgerItem["status"],
+  extra: Partial<LedgerItem> = {},
+): LedgerItem => {
+  const id = `L${index}`;
+  const at = DateTime.add(NOW, { minutes: index });
+  return {
+    id: LedgerItemId.make(id),
+    title: `Item ${index}: make part ${index} work`,
+    acceptance: `Part ${index} works end to end`,
+    status,
+    evidence: grow(`${id} evidence`, 3_000),
+    dropReason: status === "dropped" ? `${id} is covered elsewhere` : null,
+    ...(status === "deferred" ? { deferReason: `${id} is out of scope` } : {}),
+    verdict: { outcome: "pass", judge, notes: grow(`${id} verdict notes`, 2_000), at },
+    judgements: 1,
+    tasks: [1, 2].map((n) => ({
+      taskId: NodeId.make(`task:${id}:${n}`),
+      childThreadId: ThreadId.make(`thread:${id}:${n}`),
+      role: "worker",
+      providerInstanceId: judge.instanceId,
+      model: "claude-sonnet-5-5",
+      createdAt: at,
+    })),
+    createdAt: at,
+    updatedAt: at,
+    closedAt: status === "closed" || status === "dropped" || status === "deferred" ? at : null,
+    ...extra,
+  };
+};
+
+const failedVerdict = (index: number): LedgerItem["verdict"] => ({
+  outcome: "fail",
+  judge,
+  notes: grow(`L${index} failed verdict notes`, 2_000),
+  at: DateTime.add(NOW, { minutes: index }),
+});
+
+const fixtureLedger = (items: ReadonlyArray<LedgerItem>): Ledger => ({
+  id: LedgerId.make("ledger:big"),
+  threadId: ownThread,
+  title: "Port the importer",
+  startState: grow("start state", 600),
+  checkpoints: [
+    {
+      id: LedgerCheckpointId.make("C1"),
+      title: "Importer merged",
+      reached: false,
+      reachedAt: null,
+    },
+  ],
+  winConditions: ["Every fixture imports", "The CLI smoke test passes"],
+  items,
+  requiresJudge: true,
+  createdAt: NOW,
+  updatedAt: NOW,
+  closedAt: null,
+});
+
+const key = (id: string) => LedgerItemId.make(id);
+
+/** 50 closed items with long evidence, verdict notes and two tasks each, then 10 unfinished. */
+const sixtyItems = () => [
+  ...Array.from({ length: 50 }, (_, index) => fixtureItem(index + 1, "closed")),
+  fixtureItem(51, "in_progress", { verdict: failedVerdict(51) }),
+  fixtureItem(52, "in_progress", { verdict: failedVerdict(52) }),
+  fixtureItem(53, "in_progress", { judging: true, verdict: null }),
+  fixtureItem(54, "open", { blockedBy: [key("L51")], evidence: null, verdict: null }),
+  fixtureItem(55, "open", { blockedBy: [key("L51"), key("L52")], evidence: null, verdict: null }),
+  fixtureItem(56, "open", { verdict: failedVerdict(56) }),
+  ...[57, 58, 59, 60].map((index) => fixtureItem(index, "open", { evidence: null, verdict: null })),
+];
+
+it.effect(
+  "keeps ledger_read under a fixed size on a 60-item ledger and shows every unfinished item",
+  () => {
+    const fake = makeFakeThreads();
+    fake.ledgers.set(ownThread, fixtureLedger(sixtyItems()));
+    return withServer(fake, (call) =>
+      Effect.gen(function* () {
+        const read = yield* call("ledger_read", {});
+        expect(failureOf(read)).toBeUndefined();
+        expectBounded(read);
+        const ledger = ledgerOf(read);
+        expect(ledger).toMatchObject({
+          closed: false,
+          requiresJudge: true,
+          counts: { open: 7, in_progress: 3, closed: 50 },
+          unfinished: 10,
+          checkpoints: [{ id: "C1", title: "Importer merged", reached: false }],
+          winConditions: ["Every fixture imports", "The CLI smoke test passes"],
+        });
+        expect(ledger.startState).toMatch(/^start state start /);
+
+        // Every unfinished item is listed, with what the agent needs to act on it.
+        expect(ledger.items.map(({ id }) => id)).toEqual([
+          "L51",
+          "L52",
+          "L53",
+          "L54",
+          "L55",
+          "L56",
+          "L57",
+          "L58",
+          "L59",
+          "L60",
+        ]);
+        const byId = (id: string) => ledger.items.find((item) => item.id === id)!;
+        expect(byId("L51")).toMatchObject({
+          title: "Item 51: make part 51 work",
+          acceptance: "Part 51 works end to end",
+          status: "in_progress",
+          waitingOn: [],
+          judging: false,
+          verdict: "fail",
+        });
+        expect(byId("L53").judging).toBe(true);
+        expect(byId("L55")).toMatchObject({ blockedBy: ["L51", "L52"], waitingOn: ["L51", "L52"] });
+
+        // Whole text would push finished lines out, so it is cut, but no further than it must be:
+        // well past the shortest head, with the marker saying how much went and where the rest is.
+        const evidence = byId("L51").evidence ?? "";
+        expect(evidence).toMatch(/^L51 evidence start /);
+        expect(evidence).not.toContain("L51 evidence end");
+        expect(evidence).toMatch(/\[\+[\d,]+ chars cut; ledger_read itemId "L51" has the rest\]$/);
+        expect(evidence.length).toBeGreaterThan(1_000);
+        expect(byId("L51").verdictNotes).toMatch(
+          /^L51 failed verdict notes start .*\[\+[\d,]+ chars cut; ledger_read itemId "L51" has the rest\]$/,
+        );
+        expect(byId("L57").evidence).toBeNull();
+
+        // Finished items are one short line each, none collapsed on a ledger this size.
+        expect(ledger.briefs).toHaveLength(50);
+        expect(ledger.briefs?.[0]).toMatch(/^L1 closed: Item 1: make part 1 work/);
+        expect(ledger.briefs?.every((line) => line.length <= 240)).toBe(true);
+        expect(ledger.omitted).toBeUndefined();
+      }),
+    );
+  },
+);
+
+it.effect("cuts nothing from an ordinary ledger that fits whole", () => {
+  const fake = makeFakeThreads();
+  const acceptance = grow("L3 acceptance", 1_200);
+  fake.ledgers.set(
+    ownThread,
+    fixtureLedger([
+      fixtureItem(1, "closed"),
+      fixtureItem(2, "closed"),
+      fixtureItem(3, "in_progress", { acceptance, verdict: failedVerdict(3) }),
+      fixtureItem(4, "open", { evidence: null, verdict: null }),
+    ]),
+  );
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      const read = yield* call("ledger_read", {});
+      expectBounded(read);
+      const ledger = ledgerOf(read);
+      // The agent acts on the acceptance line and the judge's notes, so a read that has the room shows them whole.
+      expect(ledger.items.find(({ id }) => id === "L3")).toMatchObject({
+        acceptance,
+        evidence: grow("L3 evidence", 3_000),
+        verdictNotes: grow("L3 failed verdict notes", 2_000),
+      });
+      expect(JSON.stringify(ledger.items)).not.toContain("chars cut");
+      expect(ledger.briefs).toHaveLength(2);
+    }),
+  );
+});
+
+it.effect(
+  "collapses the oldest finished items into a count on a huge ledger, never an unfinished one",
+  () => {
+    const fake = makeFakeThreads();
+    const statuses = ["closed", "dropped", "deferred"] as const;
+    fake.ledgers.set(
+      ownThread,
+      fixtureLedger([
+        ...Array.from({ length: 600 }, (_, index) =>
+          fixtureItem(index + 1, statuses[index % statuses.length]!),
+        ),
+        ...Array.from({ length: 10 }, (_, index) =>
+          fixtureItem(601 + index, "in_progress", {
+            evidence: grow(`L${601 + index} evidence`, 6_000),
+            verdict: failedVerdict(601 + index),
+          }),
+        ),
+      ]),
+    );
+    return withServer(fake, (call) =>
+      Effect.gen(function* () {
+        const read = yield* call("ledger_read", {});
+        expectBounded(read);
+        const ledger = ledgerOf(read);
+        expect(ledger).toMatchObject({
+          counts: { in_progress: 10, closed: 200, dropped: 200 },
+          unfinished: 10,
+        });
+        expect(ledger.items.map(({ id }) => id)).toEqual(
+          Array.from({ length: 10 }, (_, index) => `L${601 + index}`),
+        );
+
+        // Too much text to show whole: each field keeps its head, and the marker says how much went and where the rest is.
+        const first = ledger.items[0]!;
+        expect(first.evidence).toMatch(/^L601 evidence start /);
+        expect(first.evidence).not.toContain("L601 evidence end");
+        expect(first.evidence).toMatch(
+          /\[\+[\d,]+ chars cut; ledger_read itemId "L601" has the rest\]$/,
+        );
+        expect(first.verdictNotes).toMatch(/^L601 failed verdict notes start /);
+        expect(first.verdictNotes).toMatch(
+          /\[\+[\d,]+ chars cut; ledger_read itemId "L601" has the rest\]$/,
+        );
+
+        const note = /^(\d+) older finished items \(L1 to L(\d+)\) are not listed/.exec(
+          ledger.omitted ?? "",
+        );
+        expect(note).not.toBeNull();
+        const collapsed = Number(note![1]);
+        expect(collapsed).toBeGreaterThan(0);
+        // The newest finished items stay listed; the count and the lines add up to all 600.
+        expect(Number(note![2])).toBe(collapsed);
+        expect((ledger.briefs ?? []).length + collapsed).toBe(600);
+        expect(ledger.briefs?.at(-1)).toMatch(/^L600 deferred: /);
+        expect(ledger.briefs?.[0]).toMatch(new RegExp(`^L${collapsed + 1} `));
+      }),
+    );
+  },
+);
+
+it.effect("still lists every unfinished item, one line each, when full items would not fit", () => {
+  const fake = makeFakeThreads();
+  fake.ledgers.set(
+    ownThread,
+    fixtureLedger([
+      ...Array.from({ length: 20 }, (_, index) => fixtureItem(index + 1, "closed")),
+      ...Array.from({ length: 150 }, (_, index) =>
+        fixtureItem(21 + index, index % 2 === 0 ? "open" : "in_progress", {
+          verdict: failedVerdict(21 + index),
+        }),
+      ),
+    ]),
+  );
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      const read = yield* call("ledger_read", {});
+      expectBounded(read);
+      const ledger = ledgerOf(read);
+      expect(ledger.unfinished).toBe(150);
+      const shown = [
+        ...ledger.items.map(({ id }) => id),
+        ...(ledger.briefs ?? []).map((line) => line.split(" ")[0]),
+      ];
+      for (let index = 21; index < 171; index += 1) expect(shown).toContain(`L${index}`);
+      expect(ledger.briefs?.find((line) => line.startsWith("L22 "))).toMatch(/^L22 in_progress: /);
+      expect(ledger.omitted).toMatch(/^Unfinished items are one line each because/);
+
+      // Past what one line each can hold, the result still fits and says what it left out.
+      fake.ledgers.set(
+        ownThread,
+        fixtureLedger(Array.from({ length: 1_500 }, (_, index) => fixtureItem(index + 1, "open"))),
+      );
+      const crowded = yield* call("ledger_read", {});
+      expectBounded(crowded);
+      expect(ledgerOf(crowded)).toMatchObject({ unfinished: 1_500 });
+      expect(ledgerOf(crowded).omitted).toMatch(
+        /\d+ of them \(L\d+ to L1500\) are not listed because even one line each would not fit\.$/,
+      );
+    }),
+  );
+});
+
+it.effect("returns one item complete with itemId, and cuts only what cannot fit", () => {
+  const fake = makeFakeThreads();
+  fake.ledgers.set(
+    ownThread,
+    fixtureLedger([
+      ...sixtyItems(),
+      fixtureItem(61, "in_progress", { evidence: grow("L61 evidence", 200_000) }),
+    ]),
+  );
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      const read = yield* call("ledger_read", { itemId: "L7" });
+      expect(failureOf(read)).toBeUndefined();
+      expectBounded(read);
+      const ledger = ledgerOf(read);
+      expect(ledger).toMatchObject({ itemOnly: true, unfinished: 11, counts: { closed: 50 } });
+      expect(ledger.briefs).toBeUndefined();
+      expect(ledger.items).toHaveLength(1);
+      expect(ledger.items[0]).toMatchObject({
+        id: "L7",
+        status: "closed",
+        evidence: grow("L7 evidence", 3_000),
+        verdictNotes: grow("L7 verdict notes", 2_000),
+      });
+      expect(ledger.items[0]?.tasks?.map(({ taskId }) => taskId)).toEqual([
+        "task:L7:1",
+        "task:L7:2",
+      ]);
+
+      // One item bigger than the bound is cut, with the same marker.
+      const huge = yield* call("ledger_read", { itemId: "L61" });
+      expectBounded(huge);
+      const evidence = ledgerOf(huge).items[0]?.evidence ?? "";
+      expect(evidence).toMatch(/^L61 evidence start /);
+      expect(evidence).toMatch(/\[\+[\d,]+ chars cut/);
+
+      expect(failureOf(yield* call("ledger_read", { itemId: "L999" }))).toMatchObject({
+        code: "invalid_request",
+        message: expect.stringContaining("Unknown item L999"),
+      });
+    }),
+  );
+});
+
+it.effect("bounds a write's result to the items it changed, and keeps a retry recognised", () => {
+  const fake = makeFakeThreads();
+  fake.ledgers.set(ownThread, fixtureLedger(sixtyItems()));
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      const update = { itemId: "L52", evidence: grow("L52 new evidence", 3_000) };
+      const updated = yield* call("ledger_update_item", update);
+      expect(failureOf(updated)).toBeUndefined();
+      expectBounded(updated);
+      const delta = ledgerOf(updated);
+      expect(delta.items.map(({ id }) => id)).toEqual(["L52"]);
+      expect(delta.items[0]?.evidence).toMatch(/\[\+[\d,]+ chars cut/);
+      expect(delta).toMatchObject({ changedOnly: true, unfinished: 10, requiresJudge: true });
+      // The goal belongs to ledger_read and ledger_create; a write does not repeat it.
+      expect(delta.startState).toBeUndefined();
+      expect(delta.winConditions).toBeUndefined();
+
+      const planned = fake.planned();
+      const retried = yield* call("ledger_update_item", update);
+      expect(retried.structuredContent).toEqual(updated.structuredContent);
+      expect(fake.planned()).toBe(planned);
+
+      const added = yield* call("ledger_add_items", {
+        items: Array.from({ length: 40 }, (_, index) => ({
+          id: `N${index}`,
+          title: `New ${index}`,
+          acceptance: grow(`N${index} acceptance`, 3_000),
+        })),
+      });
+      expect(failureOf(added)).toBeUndefined();
+      expectBounded(added);
+      const addedDelta = ledgerOf(added);
+      expect(addedDelta).toMatchObject({ changedOnly: true, unfinished: 50 });
+      const shown = [
+        ...addedDelta.items.map(({ id }) => id),
+        ...(addedDelta.briefs ?? []).map((line) => line.split(" ")[0]),
+      ];
+      for (let index = 0; index < 40; index += 1) expect(shown).toContain(`N${index}`);
+
+      const checkpoint = yield* call("ledger_set_checkpoint", {
+        checkpointId: "C1",
+        reached: true,
+      });
+      expectBounded(checkpoint);
+      expect(ledgerOf(checkpoint)).toMatchObject({
+        changedOnly: true,
+        items: [],
+        checkpoints: [{ id: "C1", reached: true }],
+      });
+    }),
+  );
+});
+
+it.effect("bounds the result of creating a big ledger and of closing and reopening one", () => {
+  const fake = makeFakeThreads();
+  return withServer(fake, (call) =>
+    Effect.gen(function* () {
+      const created = yield* call("ledger_create", {
+        title: "Big",
+        startState: grow("start state", 5_000),
+        winConditions: ["It all works"],
+        items: Array.from({ length: 60 }, (_, index) => ({
+          id: `L${index + 1}`,
+          title: `Item ${index + 1}`,
+          acceptance: grow(`L${index + 1} acceptance`, 1_000),
+        })),
+      });
+      expect(failureOf(created)).toBeUndefined();
+      expectBounded(created);
+      const ledger = ledgerOf(created);
+      expect(ledger).toMatchObject({
+        counts: { open: 60 },
+        unfinished: 60,
+        winConditions: ["It all works"],
+      });
+      expect(ledger.startState).toMatch(/^start state start .*\[\+[\d,]+ chars cut/);
+      const shown = [
+        ...ledger.items.map(({ id }) => id),
+        ...(ledger.briefs ?? []).map((line) => line.split(" ")[0]),
+      ];
+      for (let index = 1; index <= 60; index += 1) expect(shown).toContain(`L${index}`);
+
+      fake.ledgers.set(
+        ownThread,
+        fixtureLedger(Array.from({ length: 60 }, (_, index) => fixtureItem(index + 1, "closed"))),
+      );
+      const closed = yield* call("ledger_close", {});
+      expect(failureOf(closed)).toBeUndefined();
+      expectBounded(closed);
+      expect(ledgerOf(closed)).toMatchObject({ closed: true, items: [] });
+      const reopened = yield* call("ledger_reopen", {});
+      expect(failureOf(reopened)).toBeUndefined();
+      expectBounded(reopened);
+      expect(ledgerOf(reopened)).toMatchObject({ closed: false, counts: { closed: 60 } });
     }),
   );
 });

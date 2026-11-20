@@ -130,11 +130,22 @@ export const LedgerMcpRequestJudgementInput = Schema.Struct({
 });
 export type LedgerMcpRequestJudgementInput = typeof LedgerMcpRequestJudgementInput.Type;
 
+export const LedgerMcpReadInput = Schema.Struct({
+  itemId: Schema.optional(
+    LedgerMcpItemKey.annotate({
+      description:
+        "Read just this item, complete: all of its evidence, verdict notes and tasks. Omit it to read the whole ledger, with long text cut to a head.",
+    }),
+  ),
+});
+export type LedgerMcpReadInput = typeof LedgerMcpReadInput.Type;
+
 export const LedgerMcpSnapshot = Schema.Struct({
   ledgerId: Schema.String,
   title: Schema.String,
-  startState: Schema.String,
-  winConditions: Schema.Array(Schema.String),
+  /** Only on ledger_read and ledger_create: a write's result does not repeat the goal. */
+  startState: Schema.optionalKey(Schema.String),
+  winConditions: Schema.optionalKey(Schema.Array(Schema.String)),
   closed: Schema.Boolean,
   requiresJudge: Schema.Boolean.annotate({
     description:
@@ -162,7 +173,13 @@ export const LedgerMcpSnapshot = Schema.Struct({
   changedOnly: Schema.optionalKey(
     Schema.Literal(true).annotate({
       description:
-        "Present on ledger_update_item and ledger_add_items results: items lists only the items this call changed, while the counts, unfinished and closed describe the whole ledger. ledger_read shows every item.",
+        "Present on every write's result: items lists only the items this call changed, while the counts, unfinished and closed describe the whole ledger. ledger_read shows the rest.",
+    }),
+  ),
+  itemOnly: Schema.optionalKey(
+    Schema.Literal(true).annotate({
+      description:
+        "Present on ledger_read with itemId: items holds that one item, complete, and nothing else of the ledger's items.",
     }),
   ),
   items: Schema.Array(
@@ -217,6 +234,28 @@ export const LedgerMcpSnapshot = Schema.Struct({
             "Delegated tasks linked to this item with ledgerItemId, in link order. status is live; null once the task is gone. task_status reads a task's report.",
         }),
       ),
+      /** Fork: present when older linked tasks were left out of `tasks`. */
+      tasksCut: Schema.optionalKey(
+        NonNegativeInt.annotate({
+          description:
+            "How many older tasks are left out of tasks; ledger_read with itemId lists every one.",
+        }),
+      ),
+    }),
+  ).annotate({
+    description:
+      "Long text (title, acceptance, evidence, verdict notes, reasons) is cut to a head and ends with [+N chars cut; ...]: ledger_read with itemId has the rest.",
+  }),
+  briefs: Schema.optionalKey(
+    Schema.Array(Schema.String).annotate({
+      description:
+        "One line per item not shown in full: closed, dropped and deferred items as 'id status: title | head of the evidence or reason', and, only when full items would not fit, unfinished ones too.",
+    }),
+  ),
+  omitted: Schema.optionalKey(
+    Schema.String.annotate({
+      description:
+        "Present when items were left out to keep the result under its size limit: how many and which ids. Unfinished items are left out only when even one line each would not fit.",
     }),
   ),
 });

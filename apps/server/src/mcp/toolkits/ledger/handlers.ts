@@ -1,6 +1,7 @@
 import type {
   LedgerMcpAddItemsInput,
   LedgerMcpCreateInput,
+  LedgerMcpReadInput,
   LedgerMcpRetryInput,
   LedgerMcpSetCheckpointInput,
   LedgerMcpUpdateItemInput,
@@ -53,7 +54,7 @@ const handlers = {
     withService((service, scope, input: LedgerMcpRetryInput) => service.reopen(scope, input)),
   ),
   ledger_read: McpToolAccess.readsAsCaller(
-    withService((service, scope, _input: Record<string, never>) => service.read(scope)),
+    withService((service, scope, input: LedgerMcpReadInput) => service.read(scope, input)),
   ),
 } satisfies McpToolAccess.Handlers<typeof LedgerToolkit.tools>;
 
