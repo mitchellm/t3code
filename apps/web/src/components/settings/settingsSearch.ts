@@ -776,6 +776,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "ask-check-policy",
+    title: "When a check fails",
+    to: "/settings/threads",
+    scope: "project-defaults",
+    searchTerms: [
+      "task ledger ask check fails failed retry keep trying hand over stronger model stop limit",
+    ],
+  },
+  {
     id: "app-version",
     title: "Version",
     to: "/settings/about",

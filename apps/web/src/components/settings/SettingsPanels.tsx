@@ -61,6 +61,7 @@ import { scopedIdleCompaction } from "./scopedSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { PinnedRulesSettings } from "./PinnedRulesSettings";
 import { LoadoutSettings } from "./LoadoutSettings";
+import { AskCheckPolicySettings } from "./AskCheckPolicySettings";
 import { AskCheckSettings } from "./AskCheckSettings";
 import { PlanBeforeEditingSettings } from "./PlanBeforeEditingSettings";
 import { TaskLedgerSettings } from "./TaskLedgerSettings";
@@ -603,6 +604,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ? ["Check finished work against your message"]
       : []),
     ...(settings.taskLedger !== DEFAULT_UNIFIED_SETTINGS.taskLedger ? ["Task ledger"] : []),
+    ...(settings.askCheckPolicy !== DEFAULT_UNIFIED_SETTINGS.askCheckPolicy
+      ? ["When a check fails"]
+      : []),
     ...getChangedBrowserSettingLabels(settings),
     ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
       ? ["Agent browser access"]
@@ -720,6 +724,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       planBeforeEditing: DEFAULT_UNIFIED_SETTINGS.planBeforeEditing,
       askCheck: DEFAULT_UNIFIED_SETTINGS.askCheck,
       taskLedger: DEFAULT_UNIFIED_SETTINGS.taskLedger,
+      askCheckPolicy: DEFAULT_UNIFIED_SETTINGS.askCheckPolicy,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
@@ -1940,6 +1945,7 @@ export function ThreadsSettingsPanel() {
         <TaskLedgerSettings />
         <PlanBeforeEditingSettings />
         <AskCheckSettings />
+        <AskCheckPolicySettings />
         <LoadoutSettings />
       </SettingsSection>
 

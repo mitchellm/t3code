@@ -136,6 +136,33 @@ describe("task ledger setting", () => {
   });
 });
 
+describe("ask check policy setting", () => {
+  it("keeps trying (v1) for settings written before it existed", () => {
+    expect(decodeServerSettings({}).askCheckPolicy).toBe("v1");
+    expect(DEFAULT_SERVER_SETTINGS.askCheckPolicy).toBe("v1");
+  });
+
+  it("keeps a project's override and patches it per project", () => {
+    expect(
+      decodeServerSettings({ projectSettingsOverrides: { project: { askCheckPolicy: "v2" } } })
+        .projectSettingsOverrides[ProjectId.make("project")]?.askCheckPolicy,
+    ).toBe("v2");
+    expect(
+      decodeServerSettingsPatch({
+        askCheckPolicy: "v2",
+        projectSettingsOverrides: { project: { askCheckPolicy: "v1" } },
+      }),
+    ).toEqual({
+      askCheckPolicy: "v2",
+      projectSettingsOverrides: { project: { askCheckPolicy: "v1" } },
+    });
+  });
+
+  it("rejects a policy that is neither v1 nor v2", () => {
+    expect(() => decodeServerSettingsPatch({ askCheckPolicy: "v3" })).toThrow();
+  });
+});
+
 describe("child MCP servers setting", () => {
   it("lists no user-scoped server for settings written before it existed", () => {
     expect(decodeServerSettings({}).childMcpServers).toEqual([]);

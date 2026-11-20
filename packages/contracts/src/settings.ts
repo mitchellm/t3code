@@ -1031,6 +1031,13 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
+/**
+ * What a failed ask check does to the thread. v1 keeps handing the work back for as long as the
+ * agent keeps trying; v2 caps the tries (see `Ledger.askCheckPolicy`).
+ */
+export const AskCheckPolicy = Schema.Literals(["v1", "v2"]);
+export type AskCheckPolicy = typeof AskCheckPolicy.Type;
+
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
 );
@@ -1099,6 +1106,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "planBeforeEditing",
   "askCheck",
   "taskLedger",
+  "askCheckPolicy",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1141,6 +1149,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   planBeforeEditing: Schema.optionalKey(Schema.Boolean),
   askCheck: Schema.optionalKey(Schema.Boolean),
   taskLedger: Schema.optionalKey(Schema.Boolean),
+  askCheckPolicy: Schema.optionalKey(AskCheckPolicy),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1407,6 +1416,12 @@ export const ServerSettings = Schema.Struct({
    * down. A thread with a ledger, or under a loadout with roles or a judge, keeps it either way.
    */
   taskLedger: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Stamped on a ledger when it is created, so changing it mid-task never changes a running
+   * ledger: "v1" keeps handing a failed ask check back, "v2" hands the thread over to the stronger
+   * checker after two fails and stops after three.
+   */
+  askCheckPolicy: AskCheckPolicy.pipe(Schema.withDecodingDefault(Effect.succeed("v1" as const))),
   /**
    * Claude only: delegated children start T3's server and the project's .mcp.json servers, not the
    * servers in the user's Claude config, because each child is a full extra session. Names listed
@@ -1779,6 +1794,7 @@ export const ServerSettingsPatch = Schema.Struct({
   planBeforeEditing: Schema.optionalKey(Schema.Boolean),
   askCheck: Schema.optionalKey(Schema.Boolean),
   taskLedger: Schema.optionalKey(Schema.Boolean),
+  askCheckPolicy: Schema.optionalKey(AskCheckPolicy),
   childMcpServers: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   branchNamingMode: Schema.optionalKey(BranchNamingMode),
   branchNamePrefix: Schema.optionalKey(TrimmedString),

@@ -103,6 +103,18 @@ describe("resolveProjectSettings", () => {
     expect(resolveProjectSettings(settings, otherProjectId).settings.taskLedger).toBe(true);
   });
 
+  it("resolves the ask check policy per project, v1 unless a project opts into v2", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectSettingsOverrides: { [projectId]: { askCheckPolicy: "v2" } },
+    });
+    const v2 = resolveProjectSettings(settings, projectId);
+    expect(v2.settings.askCheckPolicy).toBe("v2");
+    expect(v2.sources.askCheckPolicy).toBe("project");
+    const other = resolveProjectSettings(settings, otherProjectId);
+    expect(other.settings.askCheckPolicy).toBe("v1");
+    expect(other.sources.askCheckPolicy).toBe("environment");
+  });
+
   it("honours the aggregate's own fields only until the server has folded them", () => {
     const aggregateModel = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.5");
     const project = {
