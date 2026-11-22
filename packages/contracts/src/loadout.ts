@@ -165,7 +165,7 @@ export const DEFAULT_LOADOUTS: ReadonlyArray<Loadout> = [
     id: "checked-solo",
     name: "Checked solo",
     description:
-      "One agent builds on the thread's model; Opus checks the finished work against your message, up to three times, then stops and reports. Measured on hard fixes: a Sonnet builder got 21 of 30 right first time against 13 of 30 unchecked, at 2.4 times the cost; an Opus builder 26 of 30 against 19 of 30, at 1.5 times the cost, with the earlier uncapped check. On small tasks it only adds cost.",
+      "One agent builds on the thread's model; Opus checks the finished work against your message, up to three times, then stops and reports. Measured on hard fixes: a Sonnet builder got 21 of 30 right first time against 13 of 30 unchecked, at 2.4 times the cost; an Opus builder 26 of 30 against 19 of 30, at 1.6 times the cost, with the earlier uncapped check. On small tasks it only adds cost.",
     structure: "solo",
     roles: { judge: claude("claude-opus-5-5", "high") },
   },
