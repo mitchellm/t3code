@@ -540,13 +540,23 @@ it.effect(
   "the v2 ask check policy is stamped on the ledger at creation, and ledger_read counts",
   () =>
     Effect.gen(function* () {
-      // Off by default: the ledger is as it was, and shows no count.
+      // The capped policy is the default; a project that sets nothing gets it.
       assert.deepEqual(yield* stampedPolicy({ settings: { askCheck: true } }), {
-        policy: undefined,
-        shownFails: undefined,
+        policy: "v2",
+        shownFails: 0,
       });
+      // v1 is the earlier behaviour: the ledger carries no policy and shows no count.
       assert.deepEqual(
         yield* stampedPolicy({ settings: { askCheck: true, askCheckPolicy: "v1" } }),
+        { policy: undefined, shownFails: undefined },
+      );
+      assert.deepEqual(
+        yield* stampedPolicy({
+          settings: {
+            askCheck: true,
+            projectSettingsOverrides: { [stampProjectId]: { askCheckPolicy: "v1" } },
+          },
+        }),
         { policy: undefined, shownFails: undefined },
       );
       assert.deepEqual(

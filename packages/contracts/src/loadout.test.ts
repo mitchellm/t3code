@@ -17,7 +17,7 @@ const presetDescriptions = {
   blitz:
     "Opus plans, Sonnet implements and judges, Haiku reads. Balanced cost for big tasks. Not for a single fix: measured on 5 to 40 minute fixes, a strong planner and judge with Sonnet workers did no better than the strong model alone.",
   "checked-solo":
-    "One agent builds on the thread's model; Opus checks the finished work against your message. Measured with a Sonnet builder on hard fixes: 20 of 25 right first time against 7 of 25 unchecked, at about 3 times the cost. On small tasks it only adds cost.",
+    "One agent builds on the thread's model; Opus checks the finished work against your message, up to three times, then stops and reports. Measured on hard fixes: a Sonnet builder got 21 of 30 right first time against 13 of 30 unchecked, at 2.4 times the cost; an Opus builder 26 of 30 against 19 of 30, at 1.5 times the cost, with the earlier uncapped check. On small tasks it only adds cost.",
 };
 
 describe("loadout settings", () => {
@@ -196,7 +196,21 @@ describe("loadout settings", () => {
     roles: { judge: claudeRole("claude-opus-5-5", "high") },
   };
 
+  // The description Checked solo shipped with before its second benchmark run.
+  const firstRunCheckedSolo = {
+    ...earlierCheckedSolo,
+    description:
+      "One agent builds on the thread's model; Opus checks the finished work against your message. Measured with a Sonnet builder on hard fixes: 20 of 25 right first time against 7 of 25 unchecked, at about 3 times the cost. On small tasks it only adds cost.",
+  };
+
   it("upgrades untouched earlier copies of Solo, Blitz and Checked solo to the shipped presets, in place", () => {
+    const shippedCheckedSolo = DEFAULT_LOADOUTS.find(({ id }) => id === "checked-solo");
+    expect(decodeServerSettings({ loadouts: [firstRunCheckedSolo] }).loadouts).toEqual([
+      shippedCheckedSolo,
+    ]);
+    expect(decodeProjectOverrides({ loadouts: [firstRunCheckedSolo] }).loadouts).toEqual([
+      shippedCheckedSolo,
+    ]);
     const stored = JSON.parse(
       JSON.stringify([earlierSolo, DEFAULT_LOADOUTS[1], earlierBlitz, earlierCheckedSolo]),
     ) as unknown;

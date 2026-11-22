@@ -137,9 +137,10 @@ describe("task ledger setting", () => {
 });
 
 describe("ask check policy setting", () => {
-  it("keeps trying (v1) for settings written before it existed", () => {
-    expect(decodeServerSettings({}).askCheckPolicy).toBe("v1");
-    expect(DEFAULT_SERVER_SETTINGS.askCheckPolicy).toBe("v1");
+  it("caps the tries (v2) unless the settings say otherwise", () => {
+    expect(decodeServerSettings({}).askCheckPolicy).toBe("v2");
+    expect(DEFAULT_SERVER_SETTINGS.askCheckPolicy).toBe("v2");
+    expect(decodeServerSettings({ askCheckPolicy: "v1" }).askCheckPolicy).toBe("v1");
   });
 
   it("keeps a project's override and patches it per project", () => {

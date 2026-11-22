@@ -781,7 +781,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/threads",
     scope: "project-defaults",
     searchTerms: [
-      "task ledger ask check fails failed retry keep trying hand over stronger model stop limit",
+      "task ledger ask check fails failed retry keep trying up to three checks capped default hand over stronger model stop limit",
     ],
   },
   {

@@ -9,10 +9,15 @@ import {
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 
-const POLICY_LABELS: Record<AskCheckPolicy, string> = {
+const POLICY_NAMES: Record<AskCheckPolicy, string> = {
   v1: "Keep trying",
-  v2: "Two tries, then hand over, then stop",
+  v2: "Up to three checks",
 };
+
+const policyLabel = (policy: AskCheckPolicy) =>
+  policy === DEFAULT_UNIFIED_SETTINGS.askCheckPolicy
+    ? `${POLICY_NAMES[policy]} (default)`
+    : POLICY_NAMES[policy];
 
 export function AskCheckPolicySettings() {
   const settings = useScopedSettings();
@@ -27,7 +32,7 @@ export function AskCheckPolicySettings() {
       description={
         mixed
           ? "The selected targets use different policies."
-          : "What happens when the check of finished work fails. A new task keeps the policy it started with."
+          : "What happens when the check of finished work fails. Up to three checks: after the second the thread moves to the checker's model, after the third the agent stops and reports. A task keeps the policy it started with."
       }
       resetAction={
         settings.askCheckPolicy !== DEFAULT_UNIFIED_SETTINGS.askCheckPolicy ? (
@@ -48,15 +53,15 @@ export function AskCheckPolicySettings() {
         >
           <SelectTrigger size="sm" className="w-full sm:w-72" aria-label="When a check fails">
             <SelectValue>
-              {(value: AskCheckPolicy | null) => (value === null ? "Mixed" : POLICY_LABELS[value])}
+              {(value: AskCheckPolicy | null) => (value === null ? "Mixed" : policyLabel(value))}
             </SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
-            <SelectItem hideIndicator value="v1">
-              {POLICY_LABELS.v1}
-            </SelectItem>
             <SelectItem hideIndicator value="v2">
-              {POLICY_LABELS.v2}
+              {policyLabel("v2")}
+            </SelectItem>
+            <SelectItem hideIndicator value="v1">
+              {policyLabel("v1")}
             </SelectItem>
           </SelectPopup>
         </Select>

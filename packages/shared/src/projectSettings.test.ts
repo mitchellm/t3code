@@ -103,15 +103,15 @@ describe("resolveProjectSettings", () => {
     expect(resolveProjectSettings(settings, otherProjectId).settings.taskLedger).toBe(true);
   });
 
-  it("resolves the ask check policy per project, v1 unless a project opts into v2", () => {
+  it("resolves the ask check policy per project, v2 unless a project opts into v1", () => {
     const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      projectSettingsOverrides: { [projectId]: { askCheckPolicy: "v2" } },
+      projectSettingsOverrides: { [projectId]: { askCheckPolicy: "v1" } },
     });
-    const v2 = resolveProjectSettings(settings, projectId);
-    expect(v2.settings.askCheckPolicy).toBe("v2");
-    expect(v2.sources.askCheckPolicy).toBe("project");
+    const v1 = resolveProjectSettings(settings, projectId);
+    expect(v1.settings.askCheckPolicy).toBe("v1");
+    expect(v1.sources.askCheckPolicy).toBe("project");
     const other = resolveProjectSettings(settings, otherProjectId);
-    expect(other.settings.askCheckPolicy).toBe("v1");
+    expect(other.settings.askCheckPolicy).toBe("v2");
     expect(other.sources.askCheckPolicy).toBe("environment");
   });
 

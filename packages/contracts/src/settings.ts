@@ -1419,9 +1419,10 @@ export const ServerSettings = Schema.Struct({
   /**
    * Stamped on a ledger when it is created, so changing it mid-task never changes a running
    * ledger: "v1" keeps handing a failed ask check back, "v2" hands the thread over to the stronger
-   * checker after two fails and stops after three.
+   * checker after two fails and stops after three. v2 is the default; a ledger created before
+   * that carries no policy and stays v1.
    */
-  askCheckPolicy: AskCheckPolicy.pipe(Schema.withDecodingDefault(Effect.succeed("v1" as const))),
+  askCheckPolicy: AskCheckPolicy.pipe(Schema.withDecodingDefault(Effect.succeed("v2" as const))),
   /**
    * Claude only: delegated children start T3's server and the project's .mcp.json servers, not the
    * servers in the user's Claude config, because each child is a full extra session. Names listed
