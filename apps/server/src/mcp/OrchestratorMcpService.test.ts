@@ -2401,6 +2401,27 @@ describe("OrchestratorMcpService provider resolution", () => {
       );
 
       it.effect(
+        "names both models' selections on the verdict, so the thread can go back to its own",
+        () =>
+          Effect.gen(function* () {
+            const commands = yield* checked({
+              ...strongerSolo,
+              flags: v2(1),
+              summary: FAILED,
+            });
+            const selections = commands.find(
+              (command) => command.type === "ledger.item.verdict.record",
+            )?.handOverSelections as
+              | { readonly from: Record<string, unknown>; readonly to: Record<string, unknown> }
+              | undefined;
+            assert.equal(selections?.from.instanceId, codexInstanceId);
+            assert.equal(selections?.from.model, "gpt-5.4");
+            assert.equal(selections?.to.instanceId, altInstanceId);
+            assert.equal(selections?.to.model, JUDGE_MODEL);
+          }),
+      );
+
+      it.effect(
         "switches a judge on the thread's own instance with the model-selection command",
         () =>
           Effect.gen(function* () {

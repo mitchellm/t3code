@@ -14,6 +14,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -776,11 +777,14 @@ it.effect("a person's message lifts a v2 stop, and nothing the server or an agen
     yield* send("from-an-agent", "user", "mcp");
     assert.isDefined((yield* ledgerNow())?.askCheckStopped);
 
+    // Nothing but a person's message gives the check a fresh budget: the count stands as well.
+    assert.equal((yield* ledgerNow())?.askCheckFails, 3);
+
     yield* send("person", "user", "web");
     const resumed = yield* ledgerNow();
     assert.isUndefined(resumed?.askCheckStopped);
-    // It resets nothing else: the count stays, so one more failed check stops the ledger again.
-    assert.equal(resumed?.askCheckFails, 3);
+    // The new message starts the budget again, so it takes three more failed checks to stop it.
+    assert.equal(resumed?.askCheckFails, 0);
   }).pipe(
     Effect.provide(
       LedgerMcpService.layer.pipe(
@@ -790,5 +794,394 @@ it.effect("a person's message lifts a v2 stop, and nothing the server or an agen
         Layer.provideMerge(ServerSettings.layerTest(stopSettings)),
       ),
     ),
+  ),
+);
+
+// A thread's own model, the stronger checker's, and a third a person might pick themselves.
+const ownSelection = { instanceId, model: "gpt-5.1-codex" };
+const strongerSelection = { instanceId, model: "gpt-5.1-codex-max" };
+const pickedSelection = { instanceId, model: "gpt-5.1-codex-mini" };
+
+/**
+ * A thread whose ledger is in progress under the v2 policy, with the tools to fail its checks,
+ * hand it over as the server does (the model switch, then the verdict that records it) and have
+ * a person or the server write to it.
+ */
+const checkedThread = (name: string) =>
+  Effect.gen(function* () {
+    const budgetThreadId = ThreadId.make(`thread:ledger-mcp-budget:${name}`);
+    const budgetScope: McpInvocationContext.McpInvocationScope = {
+      ...scope,
+      thread: {
+        threadId: budgetThreadId,
+        providerSessionId: "ledger-mcp-session",
+        providerInstanceId: instanceId,
+      },
+    };
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const service = yield* LedgerMcpService.LedgerMcpService;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`command:ledger-mcp-budget:${name}:thread`),
+      threadId: budgetThreadId,
+      projectId: stampProjectId,
+      title: `ledger budget ${name}`,
+      modelSelection: ownSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const created = yield* service.create(budgetScope, {
+      title: "Ship the parser",
+      items: [{ id: LedgerItemId.make("L1"), title: "Parse", acceptance: "tests pass" }],
+    });
+    const ledgerId = LedgerId.make(created.ledger!.ledgerId);
+    yield* service.updateItem(budgetScope, {
+      itemId: LedgerItemId.make("L1"),
+      status: "in_progress",
+    });
+    const at = yield* DateTime.now;
+    let step = 0;
+    const failCheck = (handOver?: boolean) =>
+      Effect.gen(function* () {
+        step += 1;
+        if (handOver === true) {
+          // As the server does: the same command t3_thread_configure sends, then the verdict.
+          yield* orchestrator.dispatch({
+            type: "thread.model-selection.set",
+            commandId: CommandId.make(`command:ledger-mcp-budget:${name}:switch:${step}`),
+            threadId: budgetThreadId,
+            modelSelection: strongerSelection,
+          });
+        }
+        yield* orchestrator.dispatch({
+          type: "ledger.item.verdict.record",
+          commandId: CommandId.make(`command:ledger-mcp-budget:${name}:fail:${step}`),
+          threadId: budgetThreadId,
+          ledgerId,
+          itemId: LedgerItemId.make("L1"),
+          verdict: { outcome: "fail", judge: strongerSelection, notes: `fail ${step}`, at },
+          ...(handOver === true
+            ? {
+                handOver: { from: ownSelection.model, to: strongerSelection.model },
+                handOverSelections: { from: ownSelection, to: strongerSelection },
+              }
+            : {}),
+        });
+      });
+    const send = (
+      text: string,
+      source: {
+        readonly createdBy: "user" | "agent";
+        readonly creationSource: "web" | "mcp" | "server";
+        readonly notification?: Extract<
+          Parameters<typeof orchestrator.dispatch>[0],
+          { readonly type: "message.dispatch" }
+        >["notification"];
+        readonly scheduledTaskId?: ScheduledTaskId;
+        readonly modelSelection?: typeof ownSelection;
+      } = { createdBy: "user", creationSource: "web" },
+    ) => {
+      step += 1;
+      return orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`command:ledger-mcp-budget:${name}:send:${step}`),
+        threadId: budgetThreadId,
+        messageId: MessageId.make(`message:ledger-mcp-budget:${name}:send:${step}`),
+        text,
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        ...source,
+      });
+    };
+    const state = () => orchestrator.getThreadProjection(budgetThreadId);
+    const notices = () =>
+      Effect.map(
+        orchestrator.getThreadRecords(budgetThreadId, ["turnItems"], {
+          turnItemTypes: ["system_notice"],
+        }),
+        ({ turnItems }) =>
+          turnItems.flatMap((item) => (item.type === "system_notice" ? [item.message] : [])),
+      );
+    return {
+      orchestrator,
+      service,
+      budgetScope,
+      budgetThreadId,
+      ledgerId,
+      failCheck,
+      send,
+      state,
+      notices,
+    };
+  });
+
+const withBudgetLayers = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.provide(
+      LedgerMcpService.layer.pipe(
+        Layer.provideMerge(layerThreads),
+        Layer.provideMerge(makeLayerOrchestrator(stopSettings)),
+        Layer.provideMerge(NodeCrypto.layer),
+        Layer.provideMerge(ServerSettings.layerTest(stopSettings)),
+      ),
+    ),
+  );
+
+it.effect(
+  "a person's new message starts the check's budget again however the agent reuses the ledger",
+  () =>
+    withBudgetLayers(
+      Effect.gen(function* () {
+        for (const reuse of ["adds an ask", "reopens the ledger"] as const) {
+          const t = yield* checkedThread(reuse.replace(" ", "-"));
+          yield* t.failCheck();
+          yield* t.failCheck(true);
+          yield* t.failCheck();
+          assert.equal((yield* t.state()).ledger?.askCheckStopped?.fails, 3);
+          if (reuse === "reopens the ledger") {
+            // The person closes the held ask themselves, which closes the finished ledger.
+            yield* t.orchestrator.dispatch({
+              type: "ledger.item.update",
+              commandId: CommandId.make("command:ledger-mcp-budget:reopen:user-close"),
+              threadId: t.budgetThreadId,
+              ledgerId: t.ledgerId,
+              itemId: LedgerItemId.make("L1"),
+              status: "closed",
+              evidence: "closed by the user",
+            });
+            assert.isNotNull((yield* t.state()).ledger?.closedAt);
+          }
+
+          yield* t.send("now please add logging to the parser");
+          const fresh = (yield* t.state()).ledger;
+          assert.equal(fresh?.askCheckFails, 0, reuse);
+          assert.isUndefined(fresh?.askCheckStopped, reuse);
+          assert.isUndefined(fresh?.askCheckHandedOver, reuse);
+
+          if (reuse === "adds an ask") {
+            yield* t.service.addItems(t.budgetScope, {
+              items: [
+                {
+                  id: LedgerItemId.make("L2"),
+                  title: "Logging",
+                  acceptance: "the parser logs",
+                  quote: "add logging to the parser",
+                },
+              ],
+            });
+          } else {
+            yield* t.service.reopen(t.budgetScope, {});
+            yield* t.service.updateItem(t.budgetScope, {
+              itemId: LedgerItemId.make("L1"),
+              status: "open",
+            });
+          }
+          // The ask is checked, not refused with the stop text.
+          const heldItem = LedgerItemId.make(reuse === "adds an ask" ? "L2" : "L1");
+          if (reuse === "adds an ask") {
+            yield* t.service.updateItem(t.budgetScope, {
+              itemId: LedgerItemId.make("L1"),
+              status: "closed",
+              evidence: "parser.test.ts: 12 passed",
+            });
+          }
+          yield* t.service.updateItem(t.budgetScope, {
+            itemId: heldItem,
+            status: "closed",
+            evidence: "parser.test.ts: 14 passed",
+          });
+          const judging = (yield* t.state()).ledger?.items.find(({ id }) => id === heldItem);
+          assert.isTrue(judging?.judging, reuse);
+          // One failed check on the new request is the first of its three, not a fourth overall.
+          yield* t.orchestrator.dispatch({
+            type: "ledger.item.verdict.record",
+            commandId: CommandId.make(`command:ledger-mcp-budget:${reuse}:fail-again`),
+            threadId: t.budgetThreadId,
+            ledgerId: t.ledgerId,
+            itemId: heldItem,
+            verdict: {
+              outcome: "fail",
+              judge: strongerSelection,
+              notes: "not yet",
+              at: yield* DateTime.now,
+            },
+          });
+          const once = (yield* t.state()).ledger;
+          assert.equal(once?.askCheckFails, 1, reuse);
+          assert.isUndefined(once?.askCheckStopped, reuse);
+        }
+      }),
+    ),
+);
+
+it.effect(
+  "a thread handed to the checker's model is back on its own at the next message, once",
+  () =>
+    withBudgetLayers(
+      Effect.gen(function* () {
+        const t = yield* checkedThread("return");
+        yield* t.failCheck();
+        yield* t.failCheck(true);
+        const handedOver = yield* t.state();
+        assert.equal(handedOver.thread.modelSelection.model, strongerSelection.model);
+        assert.deepEqual(handedOver.ledger?.askCheckHandedOver?.selections, {
+          from: ownSelection,
+          to: strongerSelection,
+        });
+
+        yield* t.send("a new request");
+        const back = yield* t.state();
+        assert.equal(back.thread.modelSelection.model, ownSelection.model);
+        assert.deepEqual(
+          back.runs.map((run) => run.modelSelection.model),
+          [ownSelection.model],
+        );
+        assert.equal(back.ledger?.askCheckFails, 0);
+        assert.isUndefined(back.ledger?.askCheckHandedOver);
+        assert.deepEqual(yield* t.notices(), [
+          `This thread is back on ${ownSelection.model}; ${strongerSelection.model} took over only for the last request.`,
+        ]);
+
+        // Another message, and a server wake, say nothing more and change nothing.
+        yield* t.send("and another thing");
+        yield* t.send("the server's wake", {
+          createdBy: "agent",
+          creationSource: "server",
+          notification: { source: { kind: "system" }, outcome: "updated", summary: "A wake" },
+        });
+        assert.equal((yield* t.notices()).length, 1);
+        assert.equal((yield* t.state()).thread.modelSelection.model, ownSelection.model);
+
+        // Two failed checks on the new request hand the thread over again, as on the first.
+        yield* t.failCheck();
+        yield* t.failCheck(true);
+        const again = yield* t.state();
+        assert.equal(again.ledger?.askCheckFails, 2);
+        assert.equal(again.ledger?.askCheckHandedOver?.to, strongerSelection.model);
+        assert.isUndefined(again.ledger?.askCheckStopped);
+        assert.equal(again.thread.modelSelection.model, strongerSelection.model);
+      }),
+    ),
+);
+
+it.effect("a model the person picked after the hand-over is not switched back", () =>
+  withBudgetLayers(
+    Effect.gen(function* () {
+      // They changed the thread's model before writing, or wrote with another model chosen.
+      const beforeWriting = yield* checkedThread("picked-before");
+      yield* beforeWriting.failCheck();
+      yield* beforeWriting.failCheck(true);
+      yield* beforeWriting.orchestrator.dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make("command:ledger-mcp-budget:picked-before:pick"),
+        threadId: beforeWriting.budgetThreadId,
+        modelSelection: pickedSelection,
+      });
+      yield* beforeWriting.send("a new request");
+      const kept = yield* beforeWriting.state();
+      assert.equal(kept.thread.modelSelection.model, pickedSelection.model);
+      assert.deepEqual(
+        kept.runs.map((run) => run.modelSelection.model),
+        [pickedSelection.model],
+      );
+      assert.deepEqual(yield* beforeWriting.notices(), []);
+      // The budget is still fresh: that is about checks, not the model.
+      assert.equal(kept.ledger?.askCheckFails, 0);
+      assert.isUndefined(kept.ledger?.askCheckHandedOver);
+
+      const withMessage = yield* checkedThread("picked-with");
+      yield* withMessage.failCheck();
+      yield* withMessage.failCheck(true);
+      yield* withMessage.send("a new request", {
+        createdBy: "user",
+        creationSource: "web",
+        modelSelection: pickedSelection,
+      });
+      const sent = yield* withMessage.state();
+      assert.equal(sent.thread.modelSelection.model, pickedSelection.model);
+      assert.deepEqual(yield* withMessage.notices(), []);
+    }),
+  ),
+);
+
+it.effect("nothing but a person's message gives the budget back or returns the model", () =>
+  withBudgetLayers(
+    Effect.gen(function* () {
+      const t = yield* checkedThread("not-a-person");
+      yield* t.failCheck();
+      yield* t.failCheck(true);
+      const sources = [
+        [
+          "a wake",
+          {
+            createdBy: "agent",
+            creationSource: "server",
+            notification: {
+              source: { kind: "system" },
+              outcome: "failed",
+              summary: "The check failed",
+            },
+          },
+        ],
+        [
+          "an auto-continue",
+          {
+            createdBy: "agent",
+            creationSource: "server",
+            notification: {
+              source: { kind: "ledger_continue", round: 1, items: [] },
+              outcome: "updated",
+              summary: "Continuing",
+            },
+          },
+        ],
+        [
+          "a background task's notice",
+          {
+            createdBy: "agent",
+            creationSource: "server",
+            notification: {
+              source: { kind: "background_task" },
+              outcome: "completed",
+              summary: "Done",
+            },
+          },
+        ],
+        [
+          "a delegated task's result",
+          {
+            createdBy: "agent",
+            creationSource: "server",
+            notification: {
+              source: { kind: "delegated_task", taskIds: [NodeId.make("task:ledger-mcp-budget")] },
+              outcome: "completed",
+              summary: "Done",
+            },
+          },
+        ],
+        ["a usage-limit resume", { createdBy: "user", creationSource: "server" }],
+        [
+          "a scheduled run",
+          {
+            createdBy: "user",
+            creationSource: "web",
+            scheduledTaskId: ScheduledTaskId.make("scheduled:ledger-mcp-budget"),
+          },
+        ],
+        ["an agent's or the CLI's message", { createdBy: "user", creationSource: "mcp" }],
+      ] as const;
+      for (const [name, source] of sources) {
+        yield* t.send(name, source);
+        const after = yield* t.state();
+        assert.equal(after.ledger?.askCheckFails, 2, name);
+        assert.isDefined(after.ledger?.askCheckHandedOver, name);
+        assert.equal(after.thread.modelSelection.model, strongerSelection.model, name);
+        assert.deepEqual(yield* t.notices(), [], name);
+      }
+    }),
   ),
 );

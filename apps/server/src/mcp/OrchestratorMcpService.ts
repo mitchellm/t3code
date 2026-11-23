@@ -2264,7 +2264,12 @@ const make = Effect.gen(function* () {
           });
           return undefined;
         }
-        return { from: own.model, to: modelSelection.model };
+        return {
+          from: own.model,
+          to: modelSelection.model,
+          // Whole, so the next message from a person can put the thread back where it was.
+          selections: { from: own, to: modelSelection },
+        };
       },
     );
 
@@ -2455,7 +2460,12 @@ const make = Effect.gen(function* () {
             ledgerId: ledgerId(),
             itemId,
             verdict,
-            ...(handedOverTo === undefined ? {} : { handOver: handedOverTo }),
+            ...(handedOverTo === undefined
+              ? {}
+              : {
+                  handOver: { from: handedOverTo.from, to: handedOverTo.to },
+                  handOverSelections: handedOverTo.selections,
+                }),
             judgedEvidence,
             ...(judgingRequestedAt === undefined ? {} : { judgingRequestedAt }),
           })

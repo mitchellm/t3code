@@ -366,7 +366,13 @@ function recordAskCheckFailure(
   const handedOver =
     ledger.askCheckHandedOver ??
     (fails === ASK_CHECK_HAND_OVER_AFTER_FAILS && command.handOver !== undefined
-      ? { ...command.handOver, at: now }
+      ? {
+          ...command.handOver,
+          at: now,
+          ...(command.handOverSelections === undefined
+            ? {}
+            : { selections: command.handOverSelections }),
+        }
       : undefined);
   const stopped = fails >= ASK_CHECK_STOP_AFTER_FAILS ? { at: now, fails } : ledger.askCheckStopped;
   return [
@@ -512,23 +518,23 @@ function planCoreLedgerCommand(input: {
     ]);
   }
 
-  // The user writing lifts a v2 stop whether or not the ledger has since closed, so it is never a
-  // reason to refuse their message; with nothing stopped it plans nothing.
+  // A person writing starts a new request, and the check's budget with it: fails, hand-over and stop
+  // all belong to the request they were earned on, however the agent reuses this ledger for the
+  // next. Whether or not the ledger has since closed, it is never a reason to refuse their message;
+  // with nothing recorded it plans nothing.
   if (command.type === "ledger.ask-check.resume") {
-    if (ledger.askCheckStopped === undefined || !isAskCheckPolicyV2(ledger)) {
+    if (
+      !isAskCheckPolicyV2(ledger) ||
+      ((ledger.askCheckFails ?? 0) === 0 &&
+        ledger.askCheckHandedOver === undefined &&
+        ledger.askCheckStopped === undefined)
+    ) {
       return Result.succeed([]);
     }
     return Result.succeed([
       {
         type: "ledger.ask-check.updated",
-        payload: {
-          ledgerId: ledger.id,
-          fails: ledger.askCheckFails ?? 0,
-          ...(ledger.askCheckHandedOver === undefined
-            ? {}
-            : { handedOver: ledger.askCheckHandedOver }),
-          updatedAt: now,
-        },
+        payload: { ledgerId: ledger.id, fails: 0, updatedAt: now },
       },
     ]);
   }

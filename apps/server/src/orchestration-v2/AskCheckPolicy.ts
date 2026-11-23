@@ -17,6 +17,10 @@ export const ASK_CHECK_STOPPED_TEXT =
 export const askCheckHandOverText = (model: string): string =>
   `The check failed twice, so ${model} has taken over this thread from here. The work so far is in the checkout; what the check found is below.`;
 
+/** The user's notice when their next message puts a handed-over thread back on its own model. */
+export const askCheckBackOnOwnModelNoticeText = (own: string, handedTo: string): string =>
+  `This thread is back on ${own}; ${handedTo} took over only for the last request.`;
+
 /** The user's notice when the stop leaves the agent's turn over with items still open. */
 export const askCheckStopNoticeText = (openItems: number): string =>
   `The check failed three times; the agent stopped with ${openItems} ${openItems === 1 ? "item" : "items"} open.`;

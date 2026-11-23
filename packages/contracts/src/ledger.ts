@@ -11,6 +11,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { LedgerInvestigation, LedgerInvestigationJson } from "./investigation.ts";
+import { ModelSelection } from "./modelSelection.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 /** `deferred` is work found out of scope for this task: kept for later, never auto-continued. */
@@ -142,11 +143,24 @@ export const LedgerItem = Schema.Struct({
 });
 export type LedgerItem = typeof LedgerItem.Type;
 
+/** Fork: the two model selections of a hand-over, kept whole so the thread can be put back. */
+export const LedgerAskCheckHandOverSelections = Schema.Struct({
+  from: ModelSelection,
+  to: ModelSelection,
+});
+export type LedgerAskCheckHandOverSelections = typeof LedgerAskCheckHandOverSelections.Type;
+
 /** Fork: which model's thread the stronger checker took over, and when (`Ledger.askCheckHandedOver`). */
 export const LedgerAskCheckHandedOver = Schema.Struct({
   from: Schema.String,
   to: Schema.String,
   at: Schema.DateTimeUtc,
+  /**
+   * The thread's own selection and the one it was switched to. The next message from a person puts
+   * the thread back on `from` unless they changed it from `to` themselves. Absent on a hand-over
+   * recorded before this was kept, which is never undone.
+   */
+  selections: Schema.optionalKey(LedgerAskCheckHandOverSelections),
 });
 export type LedgerAskCheckHandedOver = typeof LedgerAskCheckHandedOver.Type;
 
@@ -202,15 +216,20 @@ export const Ledger = Schema.Struct({
    */
   askCheckPolicy: Schema.optionalKey(Schema.Literal("v2")),
   /**
-   * Failed ask check verdicts recorded on this ledger since it was created. A reopen does not
-   * reset it. Counted only under v2.
+   * Failed ask check verdicts recorded on this ledger for the user's current request, whichever
+   * item they were on. A reopen does not reset it; a message from a person does. Counted only
+   * under v2.
    */
   askCheckFails: Schema.optionalKey(NonNegativeInt),
-  /** v2: the thread was handed to the stronger checker's model after the second failed check. */
+  /**
+   * v2: the thread was handed to the stronger checker's model after the second failed check, for
+   * the current request. A person's next message puts the thread back and clears this.
+   */
   askCheckHandedOver: Schema.optionalKey(LedgerAskCheckHandedOver),
   /**
    * v2: the third failed check stopped the ledger. The held item stays in progress, is never
-   * checked again and cannot be closed by the agent until the user writes.
+   * checked again and cannot be closed by the agent until the user writes, which also gives the
+   * next request a fresh budget.
    */
   askCheckStopped: Schema.optionalKey(LedgerAskCheckStopped),
   /** Fork: present when the ledger runs an investigation (Investigate mode). */
@@ -380,6 +399,8 @@ export const LedgerVerdictRecordCommand = Schema.Struct({
    * The planner records it only when this verdict is the ledger's second failed check.
    */
   handOver: Schema.optionalKey(Schema.Struct({ from: Schema.String, to: Schema.String })),
+  /** The whole selections behind `handOver`, recorded with it. */
+  handOverSelections: Schema.optionalKey(LedgerAskCheckHandOverSelections),
   /** The evidence the judge was shown; a verdict for evidence that has since changed is stale. */
   judgedEvidence: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /**
@@ -428,8 +449,10 @@ export const LedgerItemTaskLinkCommand = Schema.Struct({
 });
 
 /**
- * Server-only: the user wrote, so a v2 ledger that a third failed check stopped may go on. Sent
- * when a person's message arrives; nothing else about the ledger's ask check record changes.
+ * Server-only: a person wrote, which starts a new request. A v2 ledger's ask check record (the
+ * failed checks, the hand-over and the stop) is cleared, so the check has its whole budget again
+ * whether the agent writes a new ledger or goes on with this one. Sent when a person's message
+ * arrives; plans nothing while the record is empty.
  */
 export const LedgerAskCheckResumeCommand = Schema.Struct({
   type: Schema.Literal("ledger.ask-check.resume"),

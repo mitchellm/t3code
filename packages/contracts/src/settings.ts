@@ -1418,9 +1418,9 @@ export const ServerSettings = Schema.Struct({
   taskLedger: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
    * Stamped on a ledger when it is created, so changing it mid-task never changes a running
-   * ledger: "v1" keeps handing a failed ask check back, "v2" hands the thread over to the stronger
-   * checker after two fails and stops after three. v2 is the default; a ledger created before
-   * that carries no policy and stays v1.
+   * ledger: "v1" keeps handing a failed ask check back, "v2" hands the thread over after two fails
+   * and stops after three, counted per request. v2 is the default; a ledger created before that
+   * carries no policy and stays v1.
    */
   askCheckPolicy: AskCheckPolicy.pipe(Schema.withDecodingDefault(Effect.succeed("v2" as const))),
   /**

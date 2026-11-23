@@ -6,9 +6,11 @@ import {
   LedgerItemId,
   type LedgerItem,
   type LedgerItemVerdict,
+  type ModelSelection,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import { applyLedgerEvent, type LedgerDomainEvent } from "@t3tools/shared/taskLedger";
 import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 
@@ -557,7 +559,13 @@ describe("planLedgerCommand ask check policy v2", () => {
     items,
     ...flags,
   });
-  const failOn = (name: string, extra: { handOver?: { from: string; to: string } } = {}) =>
+  const failOn = (
+    name: string,
+    extra: {
+      handOver?: { from: string; to: string };
+      handOverSelections?: { from: ModelSelection; to: ModelSelection };
+    } = {},
+  ) =>
     ({
       type: "ledger.item.verdict.record",
       commandId: CommandId.make(`command:plan:v2-fail:${name}`),
@@ -705,7 +713,7 @@ describe("planLedgerCommand ask check policy v2", () => {
     assert.isTrue(Result.isSuccess(unstopped));
   });
 
-  it("clears the stop when the user writes, resetting nothing else", () => {
+  describe("when the user writes", () => {
     const resume = (ledger: Ledger) =>
       events(
         {
@@ -716,23 +724,100 @@ describe("planLedgerCommand ask check policy v2", () => {
         },
         ledger,
       );
+    const resumed = (ledger: Ledger) => {
+      const found = resume(ledger).find(({ type }) => type === "ledger.ask-check.updated");
+      return found?.type === "ledger.ask-check.updated" ? found.payload : undefined;
+    };
     const handedOver = { from: "sonnet", to: "opus", at: earlier };
-    const cleared = resume(
-      v2Ledger([ask("a")], {
+
+    it("starts the check's budget again: no fails, no stop, no hand-over", () => {
+      for (const spent of [
+        { askCheckFails: 3, askCheckStopped: { at: earlier, fails: 3 } },
+        { askCheckFails: 2 },
+        { askCheckFails: 1 },
+      ]) {
+        const fresh = resumed(
+          v2Ledger([ask("a")], {
+            ...spent,
+            ...(spent.askCheckFails >= 2 ? { askCheckHandedOver: handedOver } : {}),
+          }),
+        );
+        assert.equal(fresh?.fails, 0, JSON.stringify(spent));
+        assert.isUndefined(fresh?.stopped);
+        assert.isUndefined(fresh?.handedOver);
+      }
+    });
+
+    it("does so on a ledger the agent has since closed, which it may reopen for the new request", () => {
+      const closed = v2Ledger([ask("a", { status: "closed", closedAt: earlier })], {
         askCheckFails: 3,
         askCheckHandedOver: handedOver,
         askCheckStopped: { at: earlier, fails: 3 },
+        closedAt: earlier,
+      });
+      assert.equal(resumed(closed)?.fails, 0);
+    });
+
+    it("plans nothing when no check has failed yet, and nothing for v1", () => {
+      assert.deepEqual(resume(v2Ledger([ask("a")])), []);
+      assert.deepEqual(
+        resume({ ...ledgerWith(), askCheck: true, askCheckFails: 2, items: [ask("a")] }),
+        [],
+      );
+    });
+
+    it("leaves a new request's first two failed checks counted from zero, and hands over again", () => {
+      // The planned events folded the way the projection folds them.
+      const reduced = (ledger: Ledger, command: LedgerCommand): Ledger =>
+        events(command, ledger).reduce(
+          (current, planned) =>
+            applyLedgerEvent(current, {
+              ...planned,
+              id: "event:plan",
+              threadId,
+              occurredAt: now,
+            } as unknown as LedgerDomainEvent) ?? current,
+          ledger,
+        );
+      const stopped = v2Ledger([ask("a")], {
+        askCheckFails: 3,
+        askCheckHandedOver: handedOver,
+        askCheckStopped: { at: earlier, fails: 3 },
+      });
+      const fresh = reduced(stopped, {
+        type: "ledger.ask-check.resume",
+        commandId: CommandId.make("command:plan:v2-resume-again"),
+        threadId,
+        ledgerId,
+      });
+      const once = reduced(fresh, failOn("a"));
+      assert.equal(once.askCheckFails, 1);
+      assert.isUndefined(once.askCheckStopped);
+      const twice = reduced(once, failOn("a", { handOver: { from: "sonnet", to: "opus" } }));
+      assert.equal(twice.askCheckFails, 2);
+      assert.deepEqual(twice.askCheckHandedOver, { from: "sonnet", to: "opus", at: now });
+      assert.isUndefined(twice.askCheckStopped);
+    });
+  });
+
+  it("records both models' selections with the hand-over, so the thread can go back", () => {
+    const selections = {
+      from: { instanceId: ProviderInstanceId.make("codex"), model: "claude-sonnet-5-5" },
+      to: { instanceId: ProviderInstanceId.make("codex"), model: "claude-opus-5-5" },
+    };
+    const second = askCheckUpdate(
+      failOn("a", {
+        handOver: { from: "claude-sonnet-5-5", to: "claude-opus-5-5" },
+        handOverSelections: selections,
       }),
-    ).find(({ type }) => type === "ledger.ask-check.updated");
-    assert.equal(cleared?.type === "ledger.ask-check.updated" ? cleared.payload.fails : -1, 3);
-    assert.isUndefined(cleared?.type === "ledger.ask-check.updated" && cleared.payload.stopped);
-    assert.deepEqual(
-      cleared?.type === "ledger.ask-check.updated" ? cleared.payload.handedOver : undefined,
-      handedOver,
+      v2Ledger([ask("a")], { askCheckFails: 1 }),
     );
-    // Nothing is stopped, nothing changes.
-    assert.deepEqual(resume(v2Ledger([ask("a")], { askCheckFails: 1 })), []);
-    assert.deepEqual(resume({ ...ledgerWith(), askCheck: true, items: [ask("a")] }), []);
+    assert.deepEqual(second?.handedOver, {
+      from: "claude-sonnet-5-5",
+      to: "claude-opus-5-5",
+      at: now,
+      selections,
+    });
   });
 });
 

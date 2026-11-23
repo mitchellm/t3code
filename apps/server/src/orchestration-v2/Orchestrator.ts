@@ -85,7 +85,9 @@ import {
   soloJudgeRole,
   withSolo,
 } from "@t3tools/shared/loadouts";
-import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { draftModelPickMatchesThread, modelSelectionsEqual } from "@t3tools/shared/model";
+import { isAskCheckPolicyV2 } from "@t3tools/shared/taskLedger";
+import { askCheckBackOnOwnModelNoticeText } from "./AskCheckPolicy.ts";
 import { modelSwitchSince } from "./modelSwitch.ts";
 import { recordThreadOpen } from "@t3tools/shared/paletteSearch";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -13631,20 +13633,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   /**
-   * Fork: a person writing lifts the stop a third failed check put on a v2 ledger, in the same
-   * commit as their message so the turn it starts already sees the ledger free. Messages from
-   * the server, an agent or the CLI never do.
+   * Fork: a person's message starts a new request: a v2 ledger's check gets its whole budget back,
+   * committed with the message so its turn sees it, and a thread handed to the stronger model goes
+   * back to its own unless they picked a model since. Returns that selection and the user's notice.
+   * Wakes, follow-ups, verdicts and scheduled runs never do either.
    */
-  const resumeStoppedAskCheck = Effect.fn("Orchestrator.resumeStoppedAskCheck")(function* (
+  const startAskCheckRequest = Effect.fn("Orchestrator.startAskCheckRequest")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
-    if (!isTypedByPerson(command)) return;
-    const { ledger } = yield* projectionStore
+    if (!isTypedByPerson(command)) return undefined;
+    const { thread, ledger } = yield* projectionStore
       .getThreadRecords(command.threadId, ["ledger"])
       .pipe(mapDispatchError(command));
-    if (ledger?.askCheckStopped === undefined) return;
+    if (
+      ledger === undefined ||
+      !isAskCheckPolicyV2(ledger) ||
+      ((ledger.askCheckFails ?? 0) === 0 &&
+        ledger.askCheckHandedOver === undefined &&
+        ledger.askCheckStopped === undefined)
+    ) {
+      return undefined;
+    }
     yield* dispatchLedgerCommand(
       {
         type: "ledger.ask-check.resume",
@@ -13655,6 +13666,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       events,
       effects,
     );
+    // The person's own choice stands: a different model picked on the thread, or sent with this
+    // message, is not the hand-over's to undo.
+    const handOver = ledger.askCheckHandedOver?.selections;
+    if (
+      handOver === undefined ||
+      !draftModelPickMatchesThread(command.modelSelection ?? thread.modelSelection, handOver.to)
+    ) {
+      return undefined;
+    }
+    return {
+      modelSelection: handOver.from,
+      notice: askCheckBackOnOwnModelNoticeText(handOver.from.model, handOver.to.model),
+    };
+  });
+
+  /** One notice per message that put a handed-over thread back, thread-level like the investigation's. */
+  const askCheckBackNotice = (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+    message: string,
+    now: DateTime.Utc,
+  ) => ({
+    type: "turn-item.updated" as const,
+    threadId: command.threadId,
+    occurredAt: now,
+    payload: {
+      id: TurnItemId.make(`turn-item:ask-check-back:${command.messageId}`),
+      threadId: command.threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      // Placeholder: EventSink assigns turn item positions when it commits.
+      ordinal: 0,
+      status: "completed" as const,
+      title: "Back on its own model",
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "system_notice" as const,
+      message,
+    },
   });
 
   const dispatchUnsupported = (command: OrchestrationV2ServerCommand) =>
@@ -13857,7 +13911,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         }
         if (yield* holdForEndedInvestigation(command, events)) break;
-        yield* resumeStoppedAskCheck(command, events, effects);
+        const askCheckRequest = yield* startAskCheckRequest(command, events, effects);
         const guestSend =
           command.guestMessageId === undefined
             ? undefined
@@ -13870,7 +13924,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 text: guestSend.text,
                 context: { version: 1 as const, records: [], guest: guestSend.guest },
               };
-        cancelUnsettledEffects = yield* dispatchMessage(dispatched, events, effects);
+        // The message runs on the thread's own model again; the usual path makes the switch.
+        cancelUnsettledEffects = yield* dispatchMessage(
+          askCheckRequest === undefined
+            ? dispatched
+            : { ...dispatched, modelSelection: askCheckRequest.modelSelection },
+          events,
+          effects,
+        );
+        if (askCheckRequest !== undefined) {
+          yield* emit(
+            events,
+            command,
+          )(askCheckBackNotice(command, askCheckRequest.notice, yield* DateTime.now));
+        }
         yield* recordSubagentFollowup(dispatched, events).pipe(mapDispatchError(command));
         break;
       }
